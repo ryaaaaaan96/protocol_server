@@ -1,0 +1,167 @@
+// Optional local PostgreSQL for Linux x64 development; no system installation.
+import fs from "node:fs";
+import path from "node:path";
+import crypto from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import {
+  startPostgres,
+  stopPostgres,
+  connectPostgres,
+} from "./postgres-control.mjs";
+
+try {
+  await main();
+} catch (error) {
+  console.error(`本地数据库启动/停止失败：${error.message}`);
+  process.exitCode = 1;
+}
+
+async function main() {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  process.chdir(root);
+  const runtime = path.join(root, ".runtime");
+  fs.mkdirSync(runtime, { recursive: true, mode: 0o700 });
+  const envPath = path.join(root, ".env");
+  if (!fs.existsSync(envPath)) {
+    const admin = crypto.randomBytes(18).toString("hex"),
+      app = crypto.randomBytes(18).toString("hex"),
+      password = crypto.randomBytes(18).toString("hex");
+    fs.writeFileSync(
+      envPath,
+      `DATABASE_URL=postgres://protocol_app:${app}@127.0.0.1:55432/protocol_studio\nMIGRATION_DATABASE_URL=postgres://postgres:${admin}@127.0.0.1:55432/protocol_studio\nADMIN_USERNAME=admin\nADMIN_PASSWORD=${password}\nBIND_ADDR=127.0.0.1:8080\nCOOKIE_SECURE=false\n`,
+      { mode: 0o600, flag: "wx" },
+    );
+  }
+  const config = Object.fromEntries(
+    fs
+      .readFileSync(envPath, "utf8")
+      .split(/\r?\n/)
+      .filter((l) => l && !l.startsWith("#"))
+      .map((l) => {
+        const i = l.indexOf("=");
+        return [l.slice(0, i), l.slice(i + 1)];
+      }),
+  );
+  const adminUrl = new URL(config.MIGRATION_DATABASE_URL),
+    appUrl = new URL(config.DATABASE_URL);
+  if (adminUrl.hostname !== "127.0.0.1" || adminUrl.port !== "55432")
+    throw new Error(
+      "Existing .env uses an external database. Use your PostgreSQL service instead of local-db.",
+    );
+  let native = path.join(runtime, "pg-package/package/native");
+  const tooling = path.join(runtime, "db-tools");
+  if (!fs.existsSync(path.join(native, "bin/pg_ctl"))) {
+    native = path.join(
+      tooling,
+      "node_modules/@embedded-postgres/linux-x64/native",
+    );
+    if (!fs.existsSync(path.join(native, "bin/pg_ctl")))
+      execFileSync(
+        "npm",
+        [
+          "install",
+          "--prefix",
+          tooling,
+          "--no-audit",
+          "--no-fund",
+          "--silent",
+          "pg",
+          "@embedded-postgres/linux-x64@18.4.0-beta.17",
+        ],
+        { stdio: "inherit" },
+      );
+  }
+  if (!fs.existsSync(path.join(tooling, "node_modules/pg")))
+    execFileSync(
+      "npm",
+      [
+        "install",
+        "--prefix",
+        tooling,
+        "--no-audit",
+        "--no-fund",
+        "--silent",
+        "pg",
+      ],
+      { stdio: "inherit" },
+    );
+  const env = {
+    ...process.env,
+    LD_LIBRARY_PATH: `${path.join(native, "lib")}:${process.env.LD_LIBRARY_PATH || ""}`,
+  };
+  const data = path.join(runtime, "pgdata"),
+    socket = path.join(runtime, "pgsocket");
+  fs.mkdirSync(socket, { recursive: true, mode: 0o700 });
+  const control = {
+    native,
+    data,
+    socket,
+    env,
+    log: path.join(runtime, "postgres.log"),
+  };
+  if (process.argv.includes("stop")) {
+    if (!fs.existsSync(path.join(data, "PG_VERSION")) || !stopPostgres(control))
+      console.log("Local PostgreSQL is already stopped.");
+    return;
+  }
+  if (!fs.existsSync(path.join(data, "PG_VERSION"))) {
+    const pw = path.join(runtime, "init-password");
+    fs.writeFileSync(pw, decodeURIComponent(adminUrl.password), {
+      mode: 0o600,
+    });
+    try {
+      execFileSync(
+        path.join(native, "bin/initdb"),
+        [
+          "-D",
+          data,
+          "-U",
+          "postgres",
+          "--auth=scram-sha-256",
+          `--pwfile=${pw}`,
+          "--encoding=UTF8",
+          "--locale=C",
+        ],
+        { env, stdio: "inherit" },
+      );
+    } finally {
+      fs.unlinkSync(pw);
+    }
+  }
+  startPostgres(control);
+  const { default: pg } = await import(
+    path.join(tooling, "node_modules/pg/lib/index.js")
+  );
+  const { Client } = pg;
+  const connection = new URL(adminUrl);
+  connection.pathname = "/postgres";
+  const db = await connectPostgres(Client, connection.toString());
+  try {
+    const exists = await db.query(
+      "SELECT 1 FROM pg_roles WHERE rolname='protocol_app'",
+    );
+    if (!exists.rowCount) {
+      // Values are quoted by PostgreSQL itself; passwords never enter shell commands.
+      const { rows } = await db.query("SELECT quote_literal($1) AS password", [
+        decodeURIComponent(appUrl.password),
+      ]);
+      await db.query(
+        `CREATE ROLE protocol_app LOGIN PASSWORD ${rows[0].password} NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE`,
+      );
+    }
+    const name = adminUrl.pathname.slice(1);
+    if (!/^[a-z_][a-z0-9_]*$/.test(name))
+      throw new Error("Invalid database name");
+    if (
+      !(await db.query("SELECT 1 FROM pg_database WHERE datname=$1", [name]))
+        .rowCount
+    )
+      await db.query(`CREATE DATABASE "${name}"`);
+  } finally {
+    await db.end();
+  }
+  console.log(
+    "Local PostgreSQL ready at 127.0.0.1:55432. Credentials are in .env (mode 600).",
+  );
+}
