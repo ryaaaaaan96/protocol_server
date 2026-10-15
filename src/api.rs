@@ -24,6 +24,8 @@ pub async fn projects(State(s): State<AppState>, u: User) -> Result<Json<Value>>
 pub struct ProjectInput {
     name: String,
     #[serde(default)]
+    config: Option<Value>,
+    #[serde(default)]
     description: String,
 }
 pub async fn create_project(
@@ -36,7 +38,7 @@ pub async fn create_project(
         return Err(AppError::bad("请输入 1～120 字符的项目名称"));
     }
     let mut tx = db::context(&s.pool, &u, None, true).await?;
-    let project: Value = sqlx::query_scalar(
+    let mut project: Value = sqlx::query_scalar(
         "INSERT INTO projects(name,description) VALUES($1,$2) RETURNING to_jsonb(projects.*)",
     )
     .bind(input.name.trim())
@@ -44,6 +46,10 @@ pub async fn create_project(
     .fetch_one(&mut *tx)
     .await?;
     let pid = project["id"].as_i64().unwrap();
+    if let Some(config) = input.config {
+        let applied = crate::project_config::apply(&mut tx, pid, &config).await?;
+        project["topology_config"] = applied["config"].clone();
+    }
     db::audit(
         &mut tx,
         u.id,

@@ -713,6 +713,95 @@ try {
     ),
     "normalized before snapshot retained",
   );
+  // Portable composition is type-based, with no multiplied board/point rows.
+  const projectConfig = JSON.parse(
+    fs.readFileSync("config/project.example.json", "utf8"),
+  );
+  const beforeConfig = await graph();
+  const cp = await preview("project_config", projectConfig, null, "update");
+  ok(cp.allowed, JSON.stringify(cp.errors));
+  equal((await graph()).board_models.length, beforeConfig.board_models.length);
+  equal(cp.impact.affected_types.length, 3);
+  equal(cp.impact.affected_types.find((t) => t.code === "DSP").quantity, 192);
+  await commit(cp);
+  const configured = await graph();
+  equal(configured.board_models.length, 3);
+  equal(configured.boards.length, beforeConfig.boards.length);
+  equal(configured.signals.length, beforeConfig.signals.length);
+  equal(
+    JSON.stringify(await e.call(`${url}/configuration`)),
+    JSON.stringify(configured.project_config),
+  );
+  equal((await e.raw(`/projects/${other.id}/configuration`)).status, 403);
+  equal(
+    (
+      await v.raw(`${url}/changes/preview`, "POST", {
+        revision: configured.revision,
+        entity: "project_config",
+        operation: "update",
+        values: projectConfig,
+      })
+    ).status,
+    403,
+  );
+  const invalid = structuredClone(projectConfig);
+  invalid.mounts[0].parent = "DSP";
+  ok(!(await preview("project_config", invalid, null, "update")).allowed);
+  const wrongProtocol = structuredClone(projectConfig);
+  wrongProtocol.mounts[1].protocol = "MODBUS";
+  wrongProtocol.mounts[1].transport = "RS485";
+  ok(!(await preview("project_config", wrongProtocol, null, "update")).allowed);
+  const dspModel = configured.board_models.find((m) => m.code === "DSP");
+  ok(!(await preview("board_models", { code: "RENAME" }, dspModel.id)).allowed);
+  const changed = structuredClone(projectConfig);
+  changed.mounts[0].quantity = 12;
+  const oldConfigPreview = await preview(
+    "project_config",
+    changed,
+    null,
+    "update",
+  );
+  const currentConfigPreview = await preview(
+    "project_config",
+    changed,
+    null,
+    "update",
+  );
+  await commit(currentConfigPreview);
+  equal(
+    (await e.raw(`${url}/changes/${oldConfigPreview.id}/commit`, "POST", {}))
+      .status,
+    409,
+  );
+  const reimport = await e.call(`${url}/imports/preview`, "POST", upload());
+  await e.call(`${url}/imports/${reimport.id}/commit`, "POST", {
+    replace: true,
+  });
+  const importedConfig = await graph();
+  equal(importedConfig.project_config.mounts[0].quantity, 12);
+  equal(importedConfig.board_models.length, 3);
+  ok(importedConfig.board_models.some((m) => m.code === "CSU"));
+  const jsonProject = await client.call("/projects", "POST", {
+    name: "JSON-created project",
+    config: projectConfig,
+  });
+  const jsonGraph = await client.call(`/projects/${jsonProject.id}/topology`);
+  equal(jsonGraph.board_models.length, 3);
+  equal(jsonGraph.boards.length, 0);
+  equal(jsonGraph.project_config.mounts[1].quantity, 8);
+  const typeGenerated = await client.call(
+    `/projects/${jsonProject.id}/generate`,
+  );
+  equal(typeGenerated.blocked, false);
+  equal(
+    Object.keys(typeGenerated.files).filter(
+      (k) => k.startsWith("board_types/") && k.endsWith("/connections.json"),
+    ).length,
+    3,
+  );
+  ok(!Object.keys(typeGenerated.files).some((k) => k.startsWith("boards/")));
+  equal(JSON.parse(typeGenerated.files["project.json"]).mounts[0].quantity, 24);
+
   const direct = new pg.Client({ connectionString: appUrl.toString() });
   await direct.connect();
   equal(

@@ -3,617 +3,479 @@ import { ref, watch, computed } from "vue";
 import { api, type Row } from "../api";
 import { specs, labels, labelFor } from "../domain/schema";
 import {
+  boardSheets,
+  projectSheets,
+  scopedRows,
+  rows,
+  type Sheet,
+} from "../domain/board";
+import {
   Plus,
   Search,
   ArrowRight,
-  Network,
-  Layers3,
   Box,
-  Database,
-  FileSpreadsheet,
   ChevronLeft,
   ChevronRight,
+  FileSpreadsheet,
 } from "@lucide/vue";
 import ChangeEditor from "../components/ChangeEditor.vue";
+import { boardTypes, typeConnections } from "../domain/project";
 import Modal from "../components/Modal.vue";
 import Loading from "../components/Loading.vue";
 import Empty from "../components/Empty.vue";
-import Badge from "../components/Badge.vue";
 const props = defineProps<{
   pid: number;
-  tick: number;
+  graph: Row | null;
   canWrite: boolean;
-  mode: "topology" | "data" | "config";
+  mode: "board" | "settings";
+  boardId: number;
   focus?: Row | null;
 }>();
-const emit = defineEmits<{ done: []; error: [message: string] }>();
-const graph = ref<Row | null>(null),
-  error = ref(""),
-  entity = ref(
-    props.mode === "topology"
-      ? "board_links"
-      : props.mode === "data"
-        ? "data_items"
-        : "board_models",
-  ),
+const emit = defineEmits<{
+  done: [];
+  error: [message: string];
+  board: [id: number];
+  settings: [];
+  configuration: [];
+  sheet: [label: string];
+}>();
+const types = computed(() => boardTypes(props.graph));
+const board = computed(() =>
+  props.mode === "board"
+    ? types.value.find((t) => t.id === props.boardId)
+    : undefined,
+);
+const boardModel = computed(() =>
+  props.graph?.board_models.find((m: Row) => m.id === board.value?.model_id),
+);
+function typeSignals(type: Row) {
+  return (
+    props.graph?.v_signals.filter((s: Row) => s.model_id === type.model_id)
+      .length || 0
+  );
+}
+const sheetKey = ref(props.mode === "settings" ? "models" : "signals"),
   query = ref(""),
-  modelFilter = ref(0),
-  page = ref(1),
-  selectedBoard = ref(0),
-  edit = ref<{ entity: string; row: Row | null } | null>(null),
+  page = ref(1);
+const edit = ref<{
+    entity: string;
+    row: Row | null;
+    defaults?: Row;
+    role?: string;
+  } | null>(null),
   source = ref<Row | null>(null);
-const dataTabs = [
-  "data_items",
-  "signals",
-  "signal_ranges",
-  "protocol_fields",
-  "signal_bindings",
-  "passthrough_routes",
-];
-const configTabs = [
-  "board_models",
-  "boards",
-  "signal_groups",
-  "device_contexts",
-  "protocol_contracts",
-  "endpoints",
-  "platform_signals",
-];
-const tabs = computed(() =>
-  props.mode === "topology"
-    ? ["board_links", "boards", "endpoints", "passthrough_routes"]
-    : props.mode === "data"
-      ? dataTabs
-      : configTabs,
+const sheets = computed(() =>
+  props.mode === "settings" ? projectSheets : boardSheets,
+);
+const sheet = computed<Sheet>(
+  () => sheets.value.find((s) => s.key === sheetKey.value) || sheets.value[0],
+);
+const spec = computed(() => specs[sheet.value.entity]);
+const columns = computed(
+  () => sheet.value.columns || spec.value?.columns || [],
+);
+const captions: Record<string, string> = {
+  ...labels,
+  signal_name: "内部信号",
+  resolved_sig_id: "sigID",
+  default_value: "默认值",
+  min_value: "下限",
+  max_value: "上限",
+  route_name: "透传窗口",
+  register_address: "北向地址",
+  register_length: "寄存器数",
+  upp_model: "UPP 模型",
+  upp_offset: "UPP 偏移",
+  sheet: "工作表",
+  row_number: "行号",
+  classification: "映射状态",
+  quantity: "每个上级挂载数",
+};
+watch(
+  () => [props.boardId, props.mode],
+  () => {
+    query.value = "";
+    page.value = 1;
+    edit.value = null;
+    source.value = null;
+  },
 );
 watch(
-  () => [props.pid, props.tick],
-  async (_, __, cleanup) => {
-    let cancelled = false;
-    cleanup(() => {
-      cancelled = true;
-    });
-    try {
-      const g = await api(`/projects/${props.pid}/topology`);
-      if (cancelled) return;
-      graph.value = g;
-      error.value = "";
-      if (props.focus && specs[props.focus.entity]) {
-        entity.value = props.focus.entity;
-        const r = g[props.focus.entity]?.find(
-          (r: Row) => r.id === props.focus!.id,
-        );
-        if (r) edit.value = { entity: props.focus.entity, row: r };
-      }
-    } catch (e) {
-      if (!cancelled) error.value = (e as Error).message;
-    }
+  () => [props.graph, props.focus],
+  () => {
+    if (!props.graph || !props.focus) return;
+    const target = sheets.value.find(
+      (s) =>
+        s.entity === props.focus!.entity &&
+        (!s.role ||
+          props.graph!.v_bindings.find((b: Row) => b.id === props.focus!.id)
+            ?.role === s.role),
+    );
+    if (target) sheetKey.value = target.key;
+    const row = props.graph[props.focus.entity]?.find(
+      (r: Row) => r.id === props.focus!.id,
+    );
+    if (row && specs[props.focus.entity])
+      edit.value = { entity: props.focus.entity, row, role: target?.role };
   },
   { immediate: true },
 );
-watch([entity, query, modelFilter], () => (page.value = 1));
-const spec = computed(() => specs[entity.value]);
-const displayRows = computed(() => {
-  if (!graph.value) return [];
-  return (graph.value[spec.value.view || entity.value] || []).filter(
-    (r: Row) => {
-      if (modelFilter.value) {
-        let matches = r.model_id === modelFilter.value;
-        if (entity.value === "data_items")
-          matches =
-            graph.value!.v_signals.some(
-              (s: Row) =>
-                s.model_id === modelFilter.value && s.data_item_id === r.id,
-            ) ||
-            graph.value!.protocol_fields.some(
-              (f: Row) =>
-                f.data_item_id === r.id &&
-                graph.value!.endpoints.some(
-                  (e: Row) =>
-                    e.model_id === modelFilter.value &&
-                    e.contract_id === f.contract_id,
-                ),
-            );
-        if (entity.value === "protocol_fields")
-          matches = graph.value!.endpoints.some(
-            (e: Row) =>
-              e.model_id === modelFilter.value &&
-              e.contract_id === r.contract_id,
-          );
-        if (entity.value === "signal_ranges")
-          matches = graph.value!.v_signals.some(
-            (s: Row) =>
-              s.model_id === modelFilter.value && s.id === r.signal_id,
-          );
-        if (entity.value === "passthrough_routes")
-          matches = graph.value!.endpoints.some(
-            (e: Row) =>
-              e.model_id === modelFilter.value && e.id === r.server_endpoint_id,
-          );
-        if (entity.value === "board_links")
-          matches = graph.value!.boards.some(
-            (b: Row) =>
-              b.model_id === modelFilter.value &&
-              (b.id === r.client_board_id || b.id === r.server_board_id),
-          );
-        if (
-          !matches &&
-          !["protocol_contracts", "platform_signals", "board_models"].includes(
-            entity.value,
-          )
-        )
-          return false;
-      }
-      return (
-        !query.value ||
-        spec.value.columns
-          .map((k) => cell(r, k))
-          .join(" ")
-          .toLowerCase()
-          .includes(query.value.toLowerCase())
+watch(
+  () => sheet.value.label,
+  (label) => emit("sheet", label),
+  { immediate: true },
+);
+watch([sheetKey, query], () => (page.value = 1));
+function entries(s: Sheet): Row[] {
+  if (!props.graph) return [];
+  if (s.entity === "type_connections")
+    return typeConnections(props.graph).filter(
+      (r) => r.parent === board.value?.code || r.child === board.value?.code,
+    );
+  let records = rows(props.graph, s.view || specs[s.entity]?.view || s.entity);
+  records = scopedRows(props.graph, board.value, s.entity, records);
+  if (s.role) records = records.filter((r) => r.role === s.role);
+  if (s.entity === "signal_ranges")
+    records = records.map((r) => {
+      const signal = props.graph!.v_signals.find(
+        (v: Row) => v.id === r.signal_id,
       );
-    },
-  );
-});
-const pages = computed(() =>
-  Math.max(1, Math.ceil(displayRows.value.length / 40)),
-);
-const visible = computed(() =>
-  displayRows.value.slice((page.value - 1) * 40, page.value * 40),
-);
-function cell(r: Row, k: string) {
-  const f = spec.value.fields.find((f) => f.key === k);
-  if (f?.ref) return labelFor(graph.value!, f.ref, r[k]);
-  return r[k] == null
+      return {
+        ...r,
+        signal_name: signal?.name,
+        resolved_sig_id: signal?.resolved_sig_id,
+        default_value: signal?.default_value,
+        min_value: signal?.min_value,
+        max_value: signal?.max_value,
+      };
+    });
+  return records;
+}
+const sheetRecords = computed(() => entries(sheet.value));
+function cell(r: Row, key: string): string {
+  if (key === "classification")
+    return r[key] === "linked" ? "已用于建模" : "待映射";
+  const f = spec.value?.fields.find((f) => f.key === key);
+  if (f?.ref) return labelFor(props.graph!, f.ref, r[key]);
+  return r[key] == null
     ? "—"
-    : typeof r[k] === "boolean"
-      ? r[k]
+    : typeof r[key] === "boolean"
+      ? r[key]
         ? "是"
         : "否"
-      : String(r[k]);
+      : String(r[key]);
 }
+const filtered = computed(() =>
+  sheetRecords.value.filter(
+    (r) =>
+      !query.value ||
+      columns.value
+        .map((k) => cell(r, k))
+        .join(" ")
+        .toLowerCase()
+        .includes(query.value.trim().toLowerCase()),
+  ),
+);
+const pages = computed(() =>
+  Math.max(1, Math.ceil(filtered.value.length / 50)),
+);
+const visible = computed(() =>
+  filtered.value.slice((page.value - 1) * 50, page.value * 50),
+);
+watch(pages, (n) => (page.value = Math.min(page.value, n)));
+const canCreate = computed(
+  () =>
+    props.canWrite &&
+    !!spec.value &&
+    !(props.mode === "board" && sheet.value.entity === "data_items"),
+);
 function open(row: Row) {
+  if (!spec.value) return;
   edit.value = {
-    entity: entity.value,
-    row: graph.value![entity.value].find((r: Row) => r.id === row.id),
+    entity: sheet.value.entity,
+    row: props.graph![sheet.value.entity].find((r: Row) => r.id === row.id),
+    role: sheet.value.role,
   };
 }
-function done() {
+function create(entity = sheet.value.entity) {
+  const defaults: Row = {};
+  const g = props.graph!,
+    b = board.value;
+  if (b) {
+    if (specs[entity].fields.some((f) => f.key === "model_id"))
+      defaults.model_id = b.model_id;
+    if (entity === "signals") {
+      defaults.group_id = g.signal_groups.find(
+        (r: Row) => r.model_id === b.model_id,
+      )?.id;
+      defaults.process_enabled = boardModel.value?.firmware_profile === "aidc";
+    }
+    if (entity === "signal_bindings")
+      defaults.endpoint_id = g.endpoints.find(
+        (e: Row) => e.model_id === b.model_id && e.role === sheet.value.role,
+      )?.id;
+    if (entity === "protocol_fields")
+      defaults.contract_id = g.endpoints.find(
+        (e: Row) => e.model_id === b.model_id,
+      )?.contract_id;
+    if (entity === "board_links") {
+      const ep = g.endpoints.find(
+        (e: Row) => e.model_id === b.model_id && e.role === "client",
+      );
+      if (ep) {
+        defaults.client_board_id = b.id;
+        defaults.client_endpoint_id = ep.id;
+      } else {
+        defaults.server_board_id = b.id;
+        defaults.server_endpoint_id = g.endpoints.find(
+          (e: Row) => e.model_id === b.model_id && e.role === "server",
+        )?.id;
+      }
+    }
+  }
+  edit.value = { entity, row: null, defaults, role: sheet.value.role };
+}
+function done(record: Row) {
+  const entering = edit.value?.entity === "boards" && !edit.value.row;
   edit.value = null;
   emit("done");
+  if (entering) emit("board", record.id);
 }
-const model = (id: number) =>
-  graph.value?.board_models.find((m: Row) => m.id === id);
-const boardInfo = computed(() =>
-  graph.value?.boards.find((b: Row) => b.id === selectedBoard.value),
-);
-const boardEndpoints = computed(
-  () =>
-    graph.value?.endpoints.filter(
-      (e: Row) => e.model_id === boardInfo.value?.model_id,
-    ) || [],
-);
-const nodes = computed<{ height: number; items: Row[] }>(() => {
-  const boards: Row[] = graph.value?.boards || [];
-  const clients = new Set(
-    (graph.value?.board_links || []).map((l: Row) => l.client_board_id),
-  );
-  const left = boards.filter((b) => clients.has(b.id)),
-    right = boards.filter((b) => !clients.has(b.id));
-  const h = Math.max(380, Math.max(left.length, right.length) * 96 + 40);
-  return {
-    height: h,
-    items: [
-      ...left.map((b, i) => ({
-        ...b,
-        x: 30,
-        y: ((i + 0.5) * h) / Math.max(1, left.length) - 34,
-      })),
-      ...right.map((b, i) => ({
-        ...b,
-        x: 510,
-        y: ((i + 0.5) * h) / Math.max(1, right.length) - 34,
-      })),
-    ],
-  };
-});
-function path(l: Row) {
-  const a = nodes.value.items.find((b) => b.id === l.client_board_id),
-    b = nodes.value.items.find((b) => b.id === l.server_board_id);
-  return a && b
-    ? `M ${a.x + 260} ${a.y + 34} C ${a.x + 355} ${a.y + 34}, ${b.x - 105} ${b.y + 34}, ${b.x} ${b.y + 34}`
-    : "";
-}
-const expansion = ref(false),
-  sources = ref(false);
-const sourceRows = computed(
-  () =>
-    graph.value?.source_records
-      .filter((r: Row) => !query.value || r.sheet.includes(query.value))
-      .slice(0, 100) || [],
-);
-async function showSource(r: Row) {
+async function showSource(row: Row) {
   try {
-    source.value = await api(`/projects/${props.pid}/sources/${r.id}`);
+    source.value = await api(`/projects/${props.pid}/sources/${row.id}`);
   } catch (e) {
     emit("error", (e as Error).message);
   }
 }
+function sourceOf(row: Row) {
+  return props.graph?.source_records.find(
+    (r: Row) => r.sheet === row.source_sheet && r.row_number === row.source_row,
+  );
+}
 </script>
 <template>
-  <div v-if="error" class="notice danger">{{ error }}</div>
-  <Loading v-else-if="!graph" /><template v-else>
-    <div class="topology-stats">
-      <div>
-        <Box :size="18" /><strong>{{ graph.boards.length }}</strong
-        ><span>板卡实例</span>
-      </div>
-      <div>
-        <Layers3 :size="18" /><strong>{{ graph.board_models.length }}</strong
-        ><span>共享模板</span>
-      </div>
-      <div>
-        <Network :size="18" /><strong>{{ graph.board_links.length }}</strong
-        ><span>协议连接</span>
-      </div>
-      <div>
-        <Database :size="18" /><strong>{{ graph.signals.length }}</strong
-        ><span>内部信号定义</span>
-      </div>
-    </div>
-    <section v-if="mode === 'topology'" class="panel topology-panel">
-      <div class="panel-heading">
+  <Loading v-if="!graph" />
+  <Empty
+    v-else-if="mode === 'board' && !board"
+    title="先配置板卡类型"
+    detail="通过项目 JSON 定义板卡类型后，即可维护各自的点表和协议。"
+    ><button class="button" @click="emit('configuration')">
+      项目 JSON 配置
+    </button></Empty
+  >
+  <template v-else>
+    <div
+      v-if="board"
+      class="board-type-selector"
+      role="group"
+      aria-label="选择板卡类型"
+    >
+      <button
+        v-for="type in types"
+        :key="type.code"
+        :class="['board-type-choice', { selected: type.id === boardId }]"
+        :aria-label="`选择 ${type.code} 板卡`"
+        :aria-pressed="type.id === boardId"
+        @click="emit('board', type.id)"
+      >
+        <Box :size="21" />
         <div>
-          <h3>板卡与协议连接</h3>
-          <p>
-            选择板卡查看端点。同一模板的多个实例共享配置，通信地址分别设置。
-          </p>
+          <strong>{{ type.code }}</strong
+          ><span>{{ type.name }}</span>
         </div>
+        <small>{{ typeSignals(type) }} 个信号</small>
+      </button>
+    </div>
+    <section class="panel table-panel board-tables">
+      <div
+        class="entity-tabs"
+        role="tablist"
+        :aria-label="board ? '板卡内表格' : '项目共享配置'"
+      >
         <button
-          v-if="canWrite"
-          class="button primary small"
-          @click="edit = { entity: 'board_links', row: null }"
+          v-for="s in sheets"
+          :key="s.key"
+          role="tab"
+          :aria-selected="sheetKey === s.key"
+          :class="{ selected: sheetKey === s.key }"
+          @click="
+            sheetKey = s.key;
+            query = '';
+          "
         >
-          <Plus :size="15" />添加连接
+          {{ s.label }}<small>{{ entries(s).length }}</small>
         </button>
       </div>
-      <div v-if="graph.boards.length" class="topology-layout">
-        <div class="topology-canvas">
-          <svg
-            :viewBox="`0 0 800 ${nodes.height}`"
-            role="img"
-            aria-label="项目板卡协议拓扑"
-          >
-            <defs>
-              <marker
-                id="topology-arrow"
-                markerWidth="8"
-                markerHeight="8"
-                refX="7"
-                refY="4"
-                orient="auto"
-              >
-                <path d="M 0 0 L 8 4 L 0 8" fill="#49a89b" />
-              </marker>
-            </defs>
-            <g v-for="l in graph.v_topology_links" :key="l.id">
-              <path
-                :d="path(l)"
-                fill="none"
-                stroke="#82bdb3"
-                stroke-width="2"
-                marker-end="url(#topology-arrow)"
-              />
-              <title>
-                {{ l.client_board }} → {{ l.server_board }} · {{ l.protocol }} /
-                {{ l.transport }} · 地址 {{ l.remote_address }}
-              </title>
-            </g>
-            <g
-              v-for="b in nodes.items"
-              :key="b.id"
-              role="button"
-              tabindex="0"
-              :aria-label="`查看板卡 ${b.name}`"
-              @click="selectedBoard = b.id"
-              @keydown.enter="selectedBoard = b.id"
-              class="board-node"
-            >
-              <rect
-                :x="b.x"
-                :y="b.y"
-                width="260"
-                height="68"
-                rx="12"
-                :fill="selectedBoard === b.id ? '#e2f6f1' : '#fff'"
-                :stroke="selectedBoard === b.id ? '#168b79' : '#d5e1ec'"
-              />
-              <text :x="b.x + 18" :y="b.y + 28" class="board-node-title">
-                {{ b.name }}
-              </text>
-              <text :x="b.x + 18" :y="b.y + 49" class="board-node-caption">
-                {{ b.code }} · {{ model(b.model_id)?.name }}
-              </text>
-            </g>
-          </svg>
-        </div>
-        <aside class="board-inspector">
-          <template v-if="boardInfo"
-            ><Badge tone="teal">板卡实例</Badge>
-            <h3>{{ boardInfo.name }}</h3>
-            <p>{{ model(boardInfo.model_id)?.name }}</p>
-            <code>{{ boardInfo.code }}</code>
-            <h4>协议端点</h4>
-            <article v-for="e in boardEndpoints" :key="e.id">
-              <strong>{{ e.name }}</strong>
-              <p>
-                {{ e.role === "client" ? "采集端" : "服务端" }} ·
-                {{ e.transport }} · {{ e.port || "端口待配置" }}
-              </p>
-              <small>{{
-                labelFor(graph, "protocol_contracts", e.contract_id)
-              }}</small>
-            </article>
-            <button
-              class="button small"
-              @click="
-                modelFilter = boardInfo.model_id;
-                entity = 'endpoints';
-              "
-            >
-              筛选此板卡的端点</button
-            ><button
-              v-if="canWrite"
-              class="text-button"
-              @click="edit = { entity: 'boards', row: boardInfo }"
-            >
-              编辑板卡实例
-            </button></template
-          ><template v-else
-            ><Network :size="30" />
-            <h3>查看板卡关系</h3>
-            <p>点击图中的板卡，查看它所用的模板、通信协议和端口。</p>
-            <div class="notice">
-              箭头从协议采集方指向服务方。读写数据可沿同一连接双向传输。
-            </div></template
-          >
-        </aside>
+      <div class="sheet-heading">
+        <h2>{{ sheet.label }}</h2>
+        <span v-if="sheet.role">{{
+          sheet.role === "client"
+            ? "从协议端点采集到本板内部信号"
+            : "将本板内部信号映射到对外协议字段"
+        }}</span
+        ><span v-else-if="sheet.entity === 'signal_ranges'"
+          >显示当前生效的范围值，支持单独覆盖与恢复策略。</span
+        ><span v-else-if="board && sheet.entity === 'data_items'"
+          >显示本板引用的数据定义；新定义在项目共享目录中维护。</span
+        ><span v-else-if="sheet.entity === 'source_records'"
+          >原始单元格和公式 · 尚未明确的板卡来源保留为待映射</span
+        >
       </div>
-      <Empty
-        v-else
-        title="项目还没有板卡"
-        detail="先建立板卡模板和实例，再添加协议端点与连接。"
-        ><button
-          v-if="canWrite"
-          class="button"
-          @click="edit = { entity: 'board_models', row: null }"
-        >
-          创建板卡模板
-        </button></Empty
+      <div
+        v-if="sheet.entity === 'type_connections'"
+        class="notice type-link-notice"
       >
-    </section>
-    <section class="panel table-panel section-gap">
-      <div class="entity-tabs">
-        <button
-          v-for="t in tabs"
-          :key="t"
-          :class="{ selected: entity === t && !expansion && !sources }"
-          @click="
-            entity = t;
-            expansion = false;
-            sources = false;
-          "
-        >
-          {{ specs[t].label }}<small>{{ graph[t].length }}</small></button
-        ><button
-          v-if="mode === 'data'"
-          :class="{ selected: expansion }"
-          @click="
-            expansion = true;
-            sources = false;
-          "
-        >
-          透传地址展开</button
-        ><button
-          v-if="mode === 'data'"
-          :class="{ selected: sources }"
-          @click="
-            sources = true;
-            expansion = false;
-          "
-        >
-          工作簿来源
+        <span>挂载关系及协议在项目 JSON 中维护，数量按每个上级计算。</span
+        ><button class="text-button" @click="emit('configuration')">
+          项目 JSON 配置 <ArrowRight :size="15" />
         </button>
       </div>
       <div class="table-toolbar">
         <div class="search">
-          <Search :size="16" /><input
-            aria-label="搜索配置"
-            placeholder="搜索名称、sigID、协议地址…"
+          <Search :size="17" /><input
             v-model="query"
+            aria-label="搜索当前表格"
+            placeholder="搜索名称、sigID、地址或枚举…"
           />
         </div>
         <div class="inline">
-          <select
-            v-if="!sources && !expansion"
-            aria-label="筛选板卡模板"
-            v-model.number="modelFilter"
-          >
-            <option :value="0">全部板卡模板</option>
-            <option v-for="m in graph.board_models" :value="m.id" :key="m.id">
-              {{ m.name }}
-            </option></select
-          ><Badge v-if="sources">原始值与公式</Badge
+          <span class="muted">{{ filtered.length }} 条</span
           ><button
-            v-if="canWrite && !expansion && !sources"
-            class="button primary small"
-            @click="edit = { entity, row: null }"
+            v-if="board && sheet.entity === 'data_items'"
+            class="button small"
+            @click="emit('settings')"
           >
-            <Plus :size="15" />新建{{ spec.label }}
+            项目共享目录 <ArrowRight :size="15" /></button
+          ><button
+            v-if="canCreate"
+            class="button primary small"
+            @click="create()"
+          >
+            <Plus :size="16" />新建{{ spec.label }}
           </button>
         </div>
       </div>
-      <template v-if="sources"
-        ><div class="notice">
-          已映射的源行与待接入工作表分别保留。CSU、BMS、侦测板的物理连接需要明确后再建立；未按名称自动猜测。
-        </div>
-        <div class="table-scroll">
-          <table>
-            <thead>
-              <tr>
-                <th>工作表</th>
-                <th>行号</th>
-                <th>状态</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="r in sourceRows" :key="r.id">
-                <td>{{ r.sheet }}</td>
-                <td>{{ r.row_number }}</td>
-                <td>
-                  {{
-                    r.classification === "linked" ? "已用于建模" : "待映射来源"
-                  }}
-                </td>
-                <td>
-                  <button class="text-button" @click="showSource(r)">
-                    查看单元格与公式
-                  </button>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <p class="padded muted">展示前 100 条匹配来源。</p></template
-      >
-      <template v-else-if="expansion"
-        ><div class="table-scroll">
-          <table>
-            <thead>
-              <tr>
-                <th>透传窗口</th>
-                <th>字段</th>
-                <th>北向地址</th>
-                <th>寄存器数</th>
-                <th>UPP 模型</th>
-                <th>UPP 偏移</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr
-                v-for="(r, i) in graph.v_passthrough_fields
-                  .filter(
-                    (r: Row) =>
-                      !query ||
-                      `${r.name} ${r.route_name} ${r.register_address}`.includes(
-                        query,
-                      ),
-                  )
-                  .slice(0, 150)"
-                :key="i"
-              >
-                <td>{{ r.route_name }}</td>
-                <td>{{ r.name }}</td>
-                <td class="mono">{{ r.register_address }}</td>
-                <td>{{ r.register_length }}</td>
-                <td>{{ r.upp_model }}</td>
-                <td>{{ r.upp_offset }}</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <p class="padded muted">
-          展示前 150 条；SQL 工作台可查询全部展开结果。
-        </p></template
-      >
-      <template v-else
-        ><div class="table-scroll">
-          <table>
-            <thead>
-              <tr>
-                <th v-for="k in spec.columns" :key="k">
-                  {{
-                    spec.fields.find((f) => f.key === k)?.label ||
-                    labels[k] ||
-                    k
-                  }}
-                </th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="r in visible" :key="r.id">
-                <td v-for="(k, i) in spec.columns" :key="k">
+      <div class="table-scroll sheet-scroll">
+        <table :aria-label="sheet.label">
+          <thead>
+            <tr>
+              <th class="row-number">#</th>
+              <th v-for="key in columns" :key="key">
+                {{ captions[key] || key }}
+              </th>
+              <th v-if="spec || sheet.entity === 'source_records'">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="(r, index) in visible"
+              :key="r.id || `${r.route_id}:${r.field_id}`"
+            >
+              <td class="row-number">{{ (page - 1) * 50 + index + 1 }}</td>
+              <td v-for="(key, i) in columns" :key="key">
+                <button
+                  v-if="i === 0 && spec"
+                  class="text-button record-name"
+                  :title="cell(r, key)"
+                  @click="open(r)"
+                >
+                  {{ cell(r, key) }}</button
+                ><span
+                  v-else
+                  :class="{
+                    mono: [
+                      'resolved_sig_id',
+                      'enum_name',
+                      'effective_address',
+                      'register_address',
+                    ].includes(key),
+                  }"
+                  >{{ cell(r, key) }}</span
+                >
+              </td>
+              <td v-if="spec">
+                <div class="inline">
                   <button
-                    v-if="i === 0"
-                    class="text-button record-name"
-                    @click="open(r)"
-                  >
-                    {{ cell(r, k) }}</button
-                  ><span v-else>{{ cell(r, k) }}</span>
-                </td>
-                <td>
-                  <button
+                    v-if="r.source_sheet && sourceOf(r)"
                     class="icon-btn"
-                    aria-label="查看配置关系"
+                    aria-label="查看来源单元格"
+                    @click="showSource(sourceOf(r))"
+                  >
+                    <FileSpreadsheet :size="17" /></button
+                  ><button
+                    class="icon-btn"
+                    :aria-label="`查看 ${r.name || r.signal_name || r.id} 的配置`"
                     @click="open(r)"
                   >
-                    <ChevronRight :size="16" />
+                    <ChevronRight :size="17" />
                   </button>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <Empty
-          v-if="!visible.length"
-          title="暂无匹配配置"
-          detail="调整筛选，或创建一条新配置。" />
-        <div class="pagination">
-          <span
-            >{{ displayRows.length }} 条 · 第 {{ page }} / {{ pages }} 页</span
+                </div>
+              </td>
+              <td v-else-if="sheet.entity === 'source_records'">
+                <button class="text-button" @click="showSource(r)">
+                  查看单元格与公式
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <Empty
+        v-if="!visible.length"
+        title="当前表格暂无匹配记录"
+        :detail="
+          sheet.role === 'client'
+            ? '此板卡的采集绑定会显示在这里。'
+            : sheet.role === 'server'
+              ? '此板卡的普通转发绑定会显示在这里；地址段透传单独配置。'
+              : '调整搜索，或添加当前板卡需要的配置。'
+        "
+      />
+      <div class="pagination">
+        <span>共 {{ filtered.length }} 条 · 每页 50 条</span>
+        <div class="inline">
+          <button
+            class="icon-btn"
+            :disabled="page <= 1"
+            aria-label="上一页"
+            @click="page--"
           >
-          <div class="inline">
-            <button
-              class="icon-btn"
-              :disabled="page <= 1"
-              aria-label="上一页"
-              @click="page--"
-            >
-              <ChevronLeft :size="16" /></button
-            ><button
-              class="icon-btn"
-              :disabled="page >= pages"
-              aria-label="下一页"
-              @click="page++"
-            >
-              <ChevronRight :size="16" />
-            </button>
-          </div></div
-      ></template>
+            <ChevronLeft :size="18" /></button
+          ><span>{{ page }} / {{ pages }}</span
+          ><button
+            class="icon-btn"
+            :disabled="page >= pages"
+            aria-label="下一页"
+            @click="page++"
+          >
+            <ChevronRight :size="18" />
+          </button>
+        </div>
+      </div>
     </section>
-    <ChangeEditor
-      v-if="edit"
-      :key="`${edit.entity}:${edit.row?.id || 'new'}`"
-      :pid="pid"
-      :graph="graph"
-      :entity="edit.entity"
-      :row="edit.row"
-      :can-write="canWrite"
-      @close="edit = null"
-      @done="done"
-    />
-    <Modal
-      v-if="source"
-      :title="`${source.sheet} · 第 ${source.row_number} 行`"
-      wide
-      @close="source = null"
-      ><div class="modal-body">
-        <pre class="source-json">{{
-          JSON.stringify(source.cells, null, 2)
-        }}</pre>
-      </div></Modal
-    >
   </template>
+  <ChangeEditor
+    v-if="edit && graph"
+    :key="`${edit.entity}:${edit.row?.id || 'new'}`"
+    :pid="pid"
+    :graph="graph"
+    :entity="edit.entity"
+    :row="edit.row"
+    :defaults="edit.defaults"
+    :board="board"
+    :binding-role="edit.role"
+    :can-write="canWrite"
+    @close="edit = null"
+    @done="done"
+  />
+  <Modal
+    v-if="source"
+    :title="`${source.sheet} · 第 ${source.row_number} 行`"
+    wide
+    @close="source = null"
+    ><div class="modal-body">
+      <pre class="source-json">{{ JSON.stringify(source.cells, null, 2) }}</pre>
+    </div></Modal
+  >
 </template>

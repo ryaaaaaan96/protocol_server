@@ -516,6 +516,7 @@ pub fn validate(g: &Value) -> Value {
             }
         }
     }
+    out.extend(crate::project_config::relationship_issues(g));
     let errors = out.iter().filter(|x| x["level"] == "error").count();
     json!({"errors":errors,"warnings":out.len()-errors,"issues":out,"point_count":rows(g,"data_items").len()})
 }

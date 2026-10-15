@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch, computed } from "vue";
 import { api, type Row } from "../api";
+import { referenceOptions } from "../domain/board";
 import { specs, labelFor, labels, type FieldSpec } from "../domain/schema";
 import Modal from "./Modal.vue";
 import Field from "./Field.vue";
@@ -11,8 +12,11 @@ const props = defineProps<{
   entity: string;
   row?: Row | null;
   canWrite: boolean;
+  board?: Row;
+  defaults?: Row;
+  bindingRole?: string;
 }>();
-const emit = defineEmits<{ close: []; done: [] }>();
+const emit = defineEmits<{ close: []; done: [record: Row] }>();
 const spec = computed(() => specs[props.entity]);
 const values = ref<Row>({}),
   preview = ref<Row | null>(null),
@@ -22,6 +26,7 @@ const values = ref<Row>({}),
 for (const f of spec.value.fields)
   values.value[f.key] =
     props.row?.[f.key] ??
+    props.defaults?.[f.key] ??
     f.default ??
     (f.type === "boolean"
       ? false
@@ -39,6 +44,20 @@ watch(
   },
   { deep: true },
 );
+function choices(f: FieldSpec) {
+  return referenceOptions(
+    props.graph,
+    props.entity,
+    f.key,
+    f.ref!,
+    values.value,
+    props.board,
+    props.bindingRole,
+  );
+}
+function fixed(f: FieldSpec) {
+  return f.key === "model_id" && !!props.board && props.entity !== "boards";
+}
 function set(f: FieldSpec, event: Event) {
   const el = event.target as HTMLInputElement;
   values.value[f.key] =
@@ -51,12 +70,30 @@ function set(f: FieldSpec, event: Event) {
             ? null
             : Number(el.value)
           : el.value;
+  // A changed endpoint/group/board must not keep references to its old scope.
+  if (f.ref)
+    for (let pass = 0; pass < 2; pass++)
+      for (const field of spec.value.fields) {
+        if (
+          field.ref &&
+          values.value[field.key] != null &&
+          !choices(field).some((r) => r.id === values.value[field.key])
+        )
+          values.value[field.key] = null;
+      }
 }
 async function review(op = props.row ? "update" : "create") {
   busy.value = true;
   error.value = "";
   operation.value = op;
   try {
+    if (
+      props.entity === "board_links" &&
+      props.board &&
+      values.value.client_board_id !== props.board.id &&
+      values.value.server_board_id !== props.board.id
+    )
+      throw new Error("连接至少有一端需要属于当前板卡。");
     preview.value = await api(
       `/projects/${props.pid}/changes/preview`,
       "POST",
@@ -78,12 +115,12 @@ async function commit() {
   busy.value = true;
   error.value = "";
   try {
-    await api(
+    const result = await api(
       `/projects/${props.pid}/changes/${preview.value!.id}/commit`,
       "POST",
       {},
     );
-    emit("done");
+    emit("done", result.record);
   } catch (e) {
     error.value = (e as Error).message;
     preview.value = null;
@@ -124,6 +161,18 @@ const related = computed(() =>
   >
     <form @submit.prevent="review()">
       <div class="modal-body">
+        <div v-if="board" class="editor-scope">
+          <strong>{{ board.name }}</strong
+          ><span
+            >{{ board.code }} ·
+            {{
+              graph.board_models.find((m: Row) => m.id === board?.model_id)
+                ?.name
+            }}</span
+          ><small
+            >按当前板卡选择关联项；共享配置的影响范围会在提交前列出。</small
+          >
+        </div>
         <div v-if="related" class="notice">
           <strong
             >共享定义 · {{ related.signals.length }} 个内部信号 /
@@ -142,6 +191,7 @@ const related = computed(() =>
           >
             <input
               v-if="f.type === 'boolean'"
+              :aria-label="f.label"
               type="checkbox"
               :checked="!!values[f.key]"
               :disabled="!canWrite || busy"
@@ -149,18 +199,20 @@ const related = computed(() =>
             />
             <select
               v-else-if="f.ref"
+              :aria-label="f.label"
               :value="values[f.key] ?? ''"
-              :disabled="!canWrite || busy"
+              :disabled="!canWrite || busy || fixed(f)"
               :required="!f.nullable"
               @change="set(f, $event)"
             >
               <option value="">{{ f.nullable ? "未指定" : "请选择" }}</option>
-              <option v-for="r in graph[f.ref]" :key="r.id" :value="r.id">
+              <option v-for="r in choices(f)" :key="r.id" :value="r.id">
                 {{ labelFor(graph, f.ref, r.id) }}
               </option>
             </select>
             <select
               v-else-if="f.options"
+              :aria-label="f.label"
               :value="values[f.key] ?? ''"
               :disabled="!canWrite || busy"
               @change="set(f, $event)"
@@ -172,6 +224,7 @@ const related = computed(() =>
             </select>
             <input
               v-else
+              :aria-label="f.label"
               :type="f.type === 'number' ? 'number' : 'text'"
               :step="f.key === 'scale' ? 'any' : '1'"
               :value="values[f.key] ?? ''"
@@ -202,7 +255,14 @@ const related = computed(() =>
             }}
             <p v-for="(e, i) in preview.errors" :key="i">{{ e.message }}</p>
           </div>
-          <p v-if="preview.impact.affected_boards?.length">
+          <p v-if="preview.impact.affected_types?.length">
+            涉及板卡类型：{{
+              preview.impact.affected_types
+                .map((t: Row) => `${t.code}（${t.quantity} 个挂载）`)
+                .join("、")
+            }}
+          </p>
+          <p v-else-if="preview.impact.affected_boards?.length">
             涉及板卡：{{
               preview.impact.affected_boards.map((b: Row) => b.name).join("、")
             }}

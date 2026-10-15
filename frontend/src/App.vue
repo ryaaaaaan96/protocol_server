@@ -3,9 +3,9 @@ import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
 import {
   Network,
   Layers3,
+  Box,
   ChevronsUpDown,
   LayoutDashboard,
-  Table2,
   Terminal,
   ShieldCheck,
   FileCode2,
@@ -25,11 +25,14 @@ import {
   LoaderCircle,
 } from "@lucide/vue";
 import { api, roles, type Row } from "./api";
+import { belongsToBoard } from "./domain/board";
+import { boardTypes } from "./domain/project";
 import Badge from "./components/Badge.vue";
 import Empty from "./components/Empty.vue";
-import Loading from "./components/Loading.vue";
 import Login from "./pages/Login.vue";
 import TopologyWorkspace from "./pages/TopologyWorkspace.vue";
+import ProjectTopology from "./pages/ProjectTopology.vue";
+import ProjectConfig from "./components/ProjectConfig.vue";
 import SqlWorkspace from "./pages/SqlWorkspace.vue";
 import Validation from "./pages/Validation.vue";
 import Releases from "./pages/Releases.vue";
@@ -40,9 +43,9 @@ import ImportModal from "./components/ImportModal.vue";
 import CreateProject from "./components/CreateProject.vue";
 import CreateUser from "./components/CreateUser.vue";
 const nav = [
-  { id: "overview", label: "板卡拓扑", icon: LayoutDashboard },
-  { id: "points", label: "数据与协议", icon: Table2 },
-  { id: "devices", label: "模板与端点", icon: Network },
+  { id: "overview", label: "项目拓扑", icon: LayoutDashboard },
+  { id: "board", label: "板卡内部信息", icon: Box },
+  { id: "devices", label: "项目设置", icon: Network },
   { id: "sql", label: "SQL 工作台", icon: Terminal },
   { id: "validation", label: "数据校验", icon: ShieldCheck },
   { id: "releases", label: "代码与版本", icon: FileCode2 },
@@ -50,9 +53,9 @@ const nav = [
   { id: "audit", label: "操作记录", icon: History },
 ];
 const descriptions: Record<string, string> = {
-  overview: "管理项目中的板卡实例、协议连接和数据流向。",
-  points: "源定义、内部信号与协议映射分别维护，修改前检查关联影响。",
-  devices: "维护可复用的板卡模板、设备上下文和通信端点。",
+  overview: "按板卡类型展示项目组成、挂载数量与通信协议。",
+  board: "选择板卡类型，维护内部信号、采集、转发及协议配置。",
+  devices: "管理项目共享的板卡模板、协议、数据定义和来源。",
   sql: "用 SQL 查看数据关系，替代复杂的表格公式。",
   validation: "在配置进入工程之前，发现并定位数据问题。",
   releases: "从同一份数据生成配置，冻结每次交付的版本。",
@@ -66,6 +69,9 @@ const user = ref<Row | null>(null),
   pid = ref(Number(localStorage.getItem("protocol-project")) || 0),
   tab = ref("overview"),
   overview = ref<Row | null>(null),
+  graph = ref<Row | null>(null),
+  boardId = ref(0),
+  sheetLabel = ref("内部信号表"),
   overviewError = ref(""),
   tick = ref(0),
   toast = ref<{ message: string; error: boolean } | null>(null),
@@ -75,9 +81,14 @@ const user = ref<Row | null>(null),
 const project = computed(() => projects.value.find((p) => p.id === pid.value)),
   canWrite = computed(() => !!project.value && project.value.role !== "viewer"),
   report = computed(() => overview.value?.validation),
+  types = computed(() => boardTypes(graph.value)),
+  selectedBoard = computed(() =>
+    types.value.find((b: Row) => b.id === boardId.value),
+  ),
   pageTitle = computed(
     () => nav.find((n) => n.id === tab.value)?.label || "账号管理",
   );
+const pageDescription = computed(() => descriptions[tab.value]);
 let toastTimer: ReturnType<typeof setTimeout>;
 function notify(message: string, error = false) {
   toast.value = { message, error };
@@ -91,9 +102,22 @@ function refresh() {
   tick.value++;
 }
 function navigate(page: string) {
+  focus.value = null;
   tab.value = page;
   menu.value = false;
 }
+function openSharedData() {
+  navigate("devices");
+  focus.value = { entity: "data_items", id: null };
+}
+function enterBoard(id: number) {
+  boardId.value = id;
+  navigate("board");
+}
+watch(pid, () => {
+  boardId.value = 0;
+  focus.value = null;
+});
 function expired() {
   user.value = null;
   focus.value = null;
@@ -135,11 +159,27 @@ watch([pid, tick, user], ([id, _, currentUser], __, onCleanup) => {
   onCleanup(() => (cancelled = true));
   localStorage.setItem("protocol-project", String(id));
   overview.value = null;
+  graph.value = null;
   overviewError.value = "";
   if (!id || !currentUser) return;
-  api(`/projects/${id}/overview`)
-    .then((data) => {
-      if (!cancelled) overview.value = data;
+  Promise.all([
+    api(`/projects/${id}/overview`),
+    api(`/projects/${id}/topology`),
+  ])
+    .then(([data, topology]) => {
+      if (cancelled) return;
+      overview.value = data;
+      graph.value = topology;
+      if (!boardTypes(topology).some((t) => t.id === boardId.value))
+        boardId.value =
+          boardTypes(topology).find((t) => t.code === "UPM")?.id ||
+          boardTypes(topology)[0]?.id ||
+          0;
+      if (
+        tab.value === "board" &&
+        !boardTypes(topology).some((b: Row) => b.id === boardId.value)
+      )
+        navigate("overview");
     })
     .catch((e) => {
       if (!cancelled) {
@@ -149,10 +189,30 @@ watch([pid, tick, user], ([id, _, currentUser], __, onCleanup) => {
     });
 });
 function openIssue(issue: Row) {
+  if (!graph.value) return;
+  if (issue.entity === "project_config") {
+    navigate("devices");
+    modal.value = "config";
+    return;
+  }
+  const row = graph.value[issue.entity]?.find((r: Row) => r.id === issue.id);
+  const candidates = types.value.filter(
+    (b: Row) => row && belongsToBoard(graph.value!, b, issue.entity, row),
+  );
+  const board =
+    candidates.find((b: Row) => b.id === boardId.value) || candidates[0];
+  if (
+    board &&
+    !["board_models", "platform_signals", "protocol_contracts"].includes(
+      issue.entity,
+    )
+  ) {
+    boardId.value = board.id;
+    tab.value = "board";
+  } else tab.value = "devices";
   focus.value = { entity: issue.entity, id: issue.id };
-  tab.value = "points";
-  tick.value++;
 }
+
 function topologyDone() {
   focus.value = null;
   refresh();
@@ -213,8 +273,8 @@ function userCreated() {
         </div>
         <ChevronsUpDown :size="15" />
       </div>
-      <div class="nav-caption">工作空间</div>
-      <nav>
+      <div class="nav-caption">当前项目</div>
+      <nav class="workspace-nav" aria-label="项目与板卡导航">
         <template v-for="(item, index) in nav" :key="item.id"
           ><div v-if="index === 6" class="nav-caption separated">协作管理</div>
           <button
@@ -227,7 +287,27 @@ function userCreated() {
               class="nav-count"
               >{{ report.errors }}</span
             >
-          </button></template
+          </button>
+          <div
+            v-if="item.id === 'board' && tab === 'board' && types.length"
+            class="board-tree"
+          >
+            <button
+              v-for="board in types"
+              :key="board.id"
+              :class="[
+                'board-nav-item',
+                { active: tab === 'board' && boardId === board.id },
+              ]"
+              :aria-current="
+                tab === 'board' && boardId === board.id ? 'page' : undefined
+              "
+              @click="enterBoard(board.id)"
+            >
+              <Box :size="16" /><span>{{ board.name }}</span
+              ><small>{{ board.code }}</small>
+            </button>
+          </div></template
         ><button
           v-if="user.is_admin"
           :class="['nav-item', { active: tab === 'users' }]"
@@ -266,11 +346,18 @@ function userCreated() {
         >
           <Menu />
         </button>
-        <div class="breadcrumbs">
-          <span>工作空间</span><ChevronRight :size="14" /><strong>{{
-            project?.name || "协议管理平台"
-          }}</strong
-          ><span class="crumb-sep">/</span><span>{{ pageTitle }}</span>
+        <div class="breadcrumbs" aria-label="当前位置">
+          <button class="crumb-button" @click="navigate('overview')">
+            {{ project?.name || "协议管理平台" }}
+          </button>
+          <ChevronRight :size="14" />
+          <template v-if="tab === 'board' && selectedBoard"
+            ><span class="crumb-board">{{ selectedBoard.name }}</span
+            ><ChevronRight :size="14" /><strong>{{
+              sheetLabel
+            }}</strong></template
+          >
+          <strong v-else>{{ pageTitle }}</strong>
         </div>
         <div class="topbar-right">
           <span class="top-label"><span class="status-dot" />版本受控</span
@@ -284,19 +371,25 @@ function userCreated() {
       <main>
         <div class="page-heading">
           <div>
-            <div class="eyebrow">PROTOCOL WORKSPACE</div>
             <h1>{{ pageTitle }}</h1>
-            <p>{{ descriptions[tab] }}</p>
+            <p>{{ pageDescription }}</p>
           </div>
           <div class="heading-actions">
             <button
-              v-if="tab === 'overview' && user.is_admin"
+              v-if="tab === 'devices' && project"
+              class="button"
+              @click="modal = 'config'"
+            >
+              项目 JSON 配置
+            </button>
+            <button
+              v-if="tab === 'devices' && user.is_admin"
               class="button"
               @click="modal = 'project'"
             >
               <FolderPlus :size="16" />新建项目</button
             ><button
-              v-if="['points', 'overview'].includes(tab) && canWrite"
+              v-if="['board', 'devices'].includes(tab) && canWrite"
               class="button"
               @click="modal = 'import'"
             >
@@ -327,22 +420,36 @@ function userCreated() {
           </button></Empty
         >
         <template v-else>
+          <div
+            v-if="
+              overviewError && ['overview', 'board', 'devices'].includes(tab)
+            "
+            class="notice danger"
+            role="alert"
+          >
+            {{ overviewError
+            }}<button class="text-button" @click="refresh">重试</button>
+          </div>
+          <ProjectTopology
+            v-else-if="tab === 'overview'"
+            :graph="graph"
+            @board="enterBoard"
+          />
           <TopologyWorkspace
-            v-if="['overview', 'points', 'devices'].includes(tab)"
+            v-else-if="['board', 'devices'].includes(tab)"
             :key="`${pid}:${tab}`"
             :pid="pid"
-            :tick="tick"
+            :graph="graph"
             :can-write="canWrite"
-            :mode="
-              tab === 'overview'
-                ? 'topology'
-                : tab === 'points'
-                  ? 'data'
-                  : 'config'
-            "
-            :focus="tab === 'points' ? focus : null"
+            :mode="tab === 'board' ? 'board' : 'settings'"
+            :board-id="boardId"
+            :focus="focus"
             @done="topologyDone"
             @error="fail"
+            @board="enterBoard"
+            @settings="openSharedData"
+            @configuration="modal = 'config'"
+            @sheet="sheetLabel = $event"
           />
           <SqlWorkspace
             v-else-if="tab === 'sql'"
@@ -392,7 +499,7 @@ function userCreated() {
         </template>
         <footer class="page-footer">
           <span>Protocol Studio</span><span>统一数据源，清晰的工程协作。</span
-          ><span>VUE 3 + RUST + POSTGRESQL</span>
+          ><span>{{ project?.name }}</span>
         </footer>
       </main>
     </div>
@@ -409,6 +516,17 @@ function userCreated() {
         <X :size="16" />
       </button>
     </div>
+    <ProjectConfig
+      v-if="modal === 'config' && graph"
+      :pid="pid"
+      :graph="graph"
+      :can-write="canWrite"
+      @close="modal = null"
+      @done="
+        modal = null;
+        topologyDone();
+      "
+    />
     <ImportModal
       v-if="modal === 'import'"
       :pid="pid"

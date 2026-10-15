@@ -86,7 +86,12 @@ pub async fn snapshot(
     pid: i64,
     computed: bool,
 ) -> Result<Value> {
-    let mut g = json!({"schema_version":2});
+    let config: Option<Value> =
+        sqlx::query_scalar("SELECT topology_config FROM projects WHERE id=$1")
+            .bind(pid)
+            .fetch_one(&mut **tx)
+            .await?;
+    let mut g = json!({"schema_version":2,"project_config":config});
     for &t in TABLES
         .iter()
         .chain(if computed { VIEWS.iter() } else { [].iter() })
@@ -162,6 +167,21 @@ pub struct Change {
     pub values: Value,
 }
 pub async fn apply(tx: &mut Transaction<'_, Postgres>, pid: i64, c: &Change) -> Result<Value> {
+    if c.entity == "project_config" {
+        if c.operation != "update" {
+            return Err(AppError::bad("项目 JSON 配置仅支持整体更新"));
+        }
+        return crate::project_config::apply(tx, pid, &c.values).await;
+    }
+    if c.entity == "board_models" && c.operation != "create" {
+        let referenced:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM projects p JOIN board_models m ON m.project_id=p.id CROSS JOIN LATERAL jsonb_array_elements(p.topology_config->'board_types') t WHERE p.id=$1 AND m.id=$2 AND t->>'model_code'=m.code AND ($3 OR ($4::text IS NOT NULL AND $4<>m.code)))")
+            .bind(pid).bind(c.id).bind(c.operation=="delete").bind(c.values["code"].as_str()).fetch_one(&mut **tx).await?;
+        if referenced {
+            return Err(AppError::bad(
+                "板卡类型已在项目 JSON 中引用，不能删除或修改模板代码",
+            ));
+        }
+    }
     let allowed = columns(&c.entity).ok_or(AppError::bad("不可编辑此类数据"))?;
     if c.operation == "delete" {
         return Ok(sqlx::query_scalar(&format!(
@@ -245,6 +265,10 @@ fn new_errors(before: &Value, after: &Value) -> Vec<Value> {
 }
 fn impact(before: &Value, after: &Value) -> Value {
     let mut diffs = Vec::new();
+    let config_changed = before["project_config"] != after["project_config"];
+    if config_changed {
+        diffs.push(json!({"entity":"project_config","key":"project_config","before":before["project_config"],"after":after["project_config"]}));
+    }
     for t in [
         "board_models",
         "signal_groups",
@@ -335,7 +359,20 @@ fn impact(before: &Value, after: &Value) -> Value {
         .filter(|b| models.contains(&num(b, "model_id")) || board_ids.contains(&num(b, "id")))
         .map(|b| json!({"id":b["id"],"name":b["name"],"code":b["code"]}))
         .collect();
-    json!({"count":diffs.len(),"affected_boards":affected,"changes":diffs.into_iter().take(200).collect::<Vec<_>>()})
+    let mut types = Vec::new();
+    if let Ok(config) = crate::project_config::Config::parse(after["project_config"].clone()) {
+        let counts = config.counts().unwrap_or_default();
+        for t in config.board_types {
+            if config_changed
+                || rows(after, "board_models")
+                    .iter()
+                    .any(|m| m["code"] == t.model_code && models.contains(&num(m, "id")))
+            {
+                types.push(json!({"code":t.code,"name":t.name,"quantity":counts[&t.code]}));
+            }
+        }
+    }
+    json!({"count":diffs.len(),"affected_boards":affected,"affected_types":types,"changes":diffs.into_iter().take(200).collect::<Vec<_>>()})
 }
 pub async fn preview(
     State(s): State<AppState>,
@@ -404,7 +441,7 @@ pub async fn commit(
         return Err(AppError::conflict("变更导致关联配置不一致"));
     }
     let effects = impact(&before, &after);
-    db::audit(&mut tx,u.id,Some(pid),&format!("topology.{}",c.operation),&format!("{}:{}",c.entity,row["id"]),Some(json!({"record":find(&before,&c.entity,num(&row,"id")),"revision":revision})),Some(json!({"record":if c.operation=="delete" {Value::Null}else{row.clone()},"impact":effects}))).await?;
+    db::audit(&mut tx,u.id,Some(pid),&format!("topology.{}",c.operation),&format!("{}:{}",c.entity,row["id"]),Some(json!({"record":if c.entity=="project_config" {Some(json!({"config":before["project_config"]}))}else{find(&before,&c.entity,num(&row,"id")).cloned()},"revision":revision})),Some(json!({"record":if c.operation=="delete" {Value::Null}else{row.clone()},"impact":effects}))).await?;
     db::touch(&mut tx, pid).await?;
     sqlx::query("DELETE FROM change_previews WHERE id=$1")
         .bind(id)

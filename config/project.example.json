@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "board_types": [
+    { "code": "CSU", "name": "CSU 主控板", "model_code": "CSU" },
+    { "code": "UPM", "name": "UPM 控制板", "model_code": "UPM_ARM" },
+    { "code": "DSP", "name": "DSP 功率板", "model_code": "DSP" }
+  ],
+  "root": { "type": "CSU", "quantity": 1 },
+  "mounts": [
+    { "parent": "CSU", "child": "UPM", "quantity": 24, "protocol": null, "transport": null },
+    { "parent": "UPM", "child": "DSP", "quantity": 8, "protocol": "UPP", "transport": "CAN" }
+  ]
+}

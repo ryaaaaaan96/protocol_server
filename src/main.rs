@@ -5,6 +5,7 @@ mod db;
 mod error;
 mod importer;
 mod model;
+mod project_config;
 mod sql_workspace;
 mod topology;
 mod topology_codegen;
@@ -104,6 +105,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/auth/login", post(auth::login))
         .route("/auth/me", get(auth::me))
         .route("/auth/logout", post(auth::logout))
+        .route("/project-template", get(project_config::template))
+        .route("/projects/{pid}/configuration", get(project_config::read))
         .route("/projects", get(api::projects).post(api::create_project))
         .route("/projects/{pid}/overview", get(api::overview))
         .route("/projects/{pid}/topology", get(topology::read))

@@ -295,6 +295,14 @@ pub async fn import(
         .bind(pid)
         .execute(&mut **tx)
         .await?;
+    let config: Option<Value> =
+        sqlx::query_scalar("SELECT topology_config FROM projects WHERE id=$1")
+            .bind(pid)
+            .fetch_one(&mut **tx)
+            .await?;
+    if let Some(config) = config {
+        crate::project_config::apply(tx, pid, &config).await?;
+    }
     let g = topology::snapshot(tx, pid, true).await?;
     Ok(crate::topology_validation::validate(&g))
 }

@@ -54,11 +54,35 @@ fn protocol_xml(fields: &[&Value], dev: i64) -> String {
 }
 pub fn generate(g: &Value) -> Result<Value> {
     let mut report = crate::topology_validation::validate(g);
-    if rows(g, "boards").is_empty() {
-        return Err(AppError::bad("请先创建板卡实例"));
+    let config = if g["project_config"].is_null() {
+        None
+    } else {
+        Some(crate::project_config::Config::parse(
+            g["project_config"].clone(),
+        )?)
+    };
+    let targets: Vec<Value> = if let Some(config) = &config {
+        config.board_types.iter().map(|t|{
+            let model=rows(g,"board_models").iter().find(|m|m["code"]==t.model_code).ok_or(AppError::bad("项目配置引用的板卡模板不存在"))?;
+            // Existing instance rows provide the board-local address/context template.
+            // Export one configuration per type; multiplicities remain in project.json.
+            let existing=rows(g,"boards").iter().find(|b|b["model_id"]==model["id"]);
+            Ok(json!({"id":existing.map(|b|&b["id"]),"model_id":model["id"],"code":t.code,"name":t.name}))
+        }).collect::<Result<Vec<_>>>()?
+    } else {
+        rows(g, "boards").to_vec()
+    };
+    if targets.is_empty() {
+        return Err(AppError::bad("请先通过项目 JSON 配置板卡类型"));
     }
     let mut files = BTreeMap::<String, String>::new();
     files.insert("topology.json".into(), serde_json::to_string_pretty(g)?);
+    if !g["project_config"].is_null() {
+        files.insert(
+            "project.json".into(),
+            serde_json::to_string_pretty(&g["project_config"])?,
+        );
+    }
     for contract in rows(g, "protocol_contracts") {
         let fields: Vec<_> = rows(g, "v_protocol_fields")
             .iter()
@@ -72,10 +96,18 @@ pub fn generate(g: &Value) -> Result<Value> {
     if n(&report, "errors") > 0 {
         return Ok(json!({"validation":report,"files":{},"blocked":true}));
     }
-    for board in rows(g, "boards") {
+    for board in &targets {
         let model = find(g, "board_models", n(board, "model_id")).unwrap();
         let mid = n(model, "id");
-        let prefix = format!("boards/{}/", s(board, "code"));
+        let prefix = format!(
+            "{}/{}/",
+            if config.is_some() {
+                "board_types"
+            } else {
+                "boards"
+            },
+            s(board, "code")
+        );
         let endpoints: Vec<_> = rows(g, "endpoints")
             .iter()
             .filter(|e| n(e, "model_id") == mid && e["enabled"] == true)
@@ -106,7 +138,7 @@ pub fn generate(g: &Value) -> Result<Value> {
                     .unwrap_or(0);
                 files.insert(
                     format!("{prefix}{}.xml", s(ep, "code")),
-                    protocol_xml(&fields, dev),
+                    protocol_xml(&fields, if config.is_some() { 0 } else { dev }),
                 );
             }
         }
