@@ -721,11 +721,25 @@ try {
   const cp = await preview("project_config", projectConfig, null, "update");
   ok(cp.allowed, JSON.stringify(cp.errors));
   equal((await graph()).board_models.length, beforeConfig.board_models.length);
-  equal(cp.impact.affected_types.length, 3);
+  equal(cp.impact.affected_types.length, 5);
+  equal(cp.impact.affected_types.find((t) => t.code === "IDU_T").quantity, 1);
+  equal(cp.impact.affected_types.find((t) => t.code === "IDU_R").quantity, 4);
   equal(cp.impact.affected_types.find((t) => t.code === "DSP").quantity, 192);
   await commit(cp);
   const configured = await graph();
-  equal(configured.board_models.length, 3);
+  equal(configured.board_models.length, 5);
+  equal(configured.project_config.version, 2);
+  equal(configured.project_config.mounts[0].connections.length, 2);
+  equal(configured.project_config.mounts[0].quantity, 24);
+  const iduModels = configured.board_models.filter((m) =>
+    ["IDU_TRANSFORMER", "IDU_RECTIFIER"].includes(m.code),
+  );
+  equal(iduModels.length, 2);
+  ok(
+    iduModels.every(
+      (m) => !configured.v_signals.some((s) => s.model_id === m.id),
+    ),
+  );
   equal(configured.boards.length, beforeConfig.boards.length);
   equal(configured.signals.length, beforeConfig.signals.length);
   equal(
@@ -748,8 +762,8 @@ try {
   invalid.mounts[0].parent = "DSP";
   ok(!(await preview("project_config", invalid, null, "update")).allowed);
   const wrongProtocol = structuredClone(projectConfig);
-  wrongProtocol.mounts[1].protocol = "MODBUS";
-  wrongProtocol.mounts[1].transport = "RS485";
+  wrongProtocol.mounts[1].connections[0].protocol = "MODBUS";
+  wrongProtocol.mounts[1].connections[0].transport = "RS485";
   ok(!(await preview("project_config", wrongProtocol, null, "update")).allowed);
   const dspModel = configured.board_models.find((m) => m.code === "DSP");
   ok(!(await preview("board_models", { code: "RENAME" }, dspModel.id)).allowed);
@@ -779,16 +793,113 @@ try {
   });
   const importedConfig = await graph();
   equal(importedConfig.project_config.mounts[0].quantity, 12);
-  equal(importedConfig.board_models.length, 3);
+  equal(importedConfig.board_models.length, 5);
+  ok(importedConfig.board_models.some((m) => m.code === "IDU_TRANSFORMER"));
+  ok(importedConfig.board_models.some((m) => m.code === "IDU_RECTIFIER"));
   ok(importedConfig.board_models.some((m) => m.code === "CSU"));
   const jsonProject = await client.call("/projects", "POST", {
     name: "JSON-created project",
     config: projectConfig,
   });
   const jsonGraph = await client.call(`/projects/${jsonProject.id}/topology`);
-  equal(jsonGraph.board_models.length, 3);
+  equal(jsonGraph.board_models.length, 5);
   equal(jsonGraph.boards.length, 0);
   equal(jsonGraph.project_config.mounts[1].quantity, 8);
+  const jsonUrl = `/projects/${jsonProject.id}`;
+  async function jsonPreview(entity, values, id = null) {
+    const current = await client.call(`${jsonUrl}/topology`);
+    return client.call(`${jsonUrl}/changes/preview`, "POST", {
+      revision: current.revision,
+      entity,
+      operation: id === null ? "create" : "update",
+      id,
+      values,
+    });
+  }
+  async function jsonCreate(entity, values) {
+    const result = await jsonPreview(entity, values);
+    ok(result.allowed, JSON.stringify(result.errors));
+    return (
+      await client.call(`${jsonUrl}/changes/${result.id}/commit`, "POST", {})
+    ).record;
+  }
+  const canfdCsu = jsonGraph.board_models.find((m) => m.code === "CSU");
+  const canfdUpm = jsonGraph.board_models.find((m) => m.code === "UPM_ARM");
+  let firstCanfdEndpoint;
+  for (const protocol of ["MODBUS", "UPP"]) {
+    const contract = await jsonCreate("protocol_contracts", {
+      name: `CSU UPM ${protocol}`,
+      code: `CSU_UPM_${protocol}`,
+      protocol,
+    });
+    for (const [model, role] of [
+      [canfdCsu, "client"],
+      [canfdUpm, "server"],
+    ]) {
+      const endpoint = await jsonCreate("endpoints", {
+        model_id: model.id,
+        contract_id: contract.id,
+        name: `${protocol} CAN FD`,
+        code: `${protocol}_CANFD`,
+        role,
+        transport: "CANFD",
+        port: "TEST_CANFD_PORT",
+      });
+      if (!firstCanfdEndpoint) firstCanfdEndpoint = endpoint;
+      equal(endpoint.transport, "CANFD");
+    }
+  }
+  const missingProtocol = structuredClone(projectConfig);
+  missingProtocol.mounts[0].connections.pop();
+  ok(
+    !(await jsonPreview("project_config", missingProtocol, jsonProject.id))
+      .allowed,
+    "cannot omit a shared CAN FD protocol",
+  );
+  ok(
+    !(
+      await jsonPreview(
+        "endpoints",
+        { transport: "CAN" },
+        firstCanfdEndpoint.id,
+      )
+    ).allowed,
+    "CAN FD is distinct from classic CAN",
+  );
+  const duplicateProtocol = structuredClone(projectConfig);
+  duplicateProtocol.mounts[0].connections.push(
+    duplicateProtocol.mounts[0].connections[0],
+  );
+  ok(
+    !(await jsonPreview("project_config", duplicateProtocol, jsonProject.id))
+      .allowed,
+    "duplicate connection rejected",
+  );
+  const canfdGraph = await client.call(`${jsonUrl}/topology`);
+  equal(canfdGraph.endpoints.length, 4);
+  ok(canfdGraph.endpoints.every((e) => e.transport === "CANFD"));
+  equal(canfdGraph.signals.length, 0);
+  equal(canfdGraph.boards.length, 0);
+  const legacyConfig = structuredClone(projectConfig);
+  legacyConfig.version = 1;
+  for (const mount of legacyConfig.mounts) {
+    const first = mount.connections[0];
+    delete mount.connections;
+    Object.assign(mount, first);
+  }
+  legacyConfig.mounts[0].protocol = null;
+  legacyConfig.mounts[0].transport = null;
+  const legacyProject = await client.call("/projects", "POST", {
+    name: "Legacy JSON import",
+    config: legacyConfig,
+  });
+  const normalizedLegacy = await client.call(
+    `/projects/${legacyProject.id}/configuration`,
+  );
+  equal(normalizedLegacy.version, 2);
+  equal(normalizedLegacy.mounts[0].connections.length, 0);
+  equal(normalizedLegacy.mounts[0].quantity, 24);
+  equal(normalizedLegacy.mounts[1].connections[0].transport, "CAN");
   const typeGenerated = await client.call(
     `/projects/${jsonProject.id}/generate`,
   );
@@ -797,10 +908,20 @@ try {
     Object.keys(typeGenerated.files).filter(
       (k) => k.startsWith("board_types/") && k.endsWith("/connections.json"),
     ).length,
-    3,
+    5,
   );
   ok(!Object.keys(typeGenerated.files).some((k) => k.startsWith("boards/")));
   equal(JSON.parse(typeGenerated.files["project.json"]).mounts[0].quantity, 24);
+  equal(
+    JSON.parse(typeGenerated.files["project.json"]).mounts[0].connections
+      .length,
+    2,
+  );
+  const exportedEndpoints = JSON.parse(
+    typeGenerated.files["board_types/CSU/connections.json"],
+  ).endpoints;
+  equal(exportedEndpoints.length, 2);
+  ok(exportedEndpoints.every((e) => e.transport === "CANFD"));
 
   const direct = new pg.Client({ connectionString: appUrl.toString() });
   await direct.connect();

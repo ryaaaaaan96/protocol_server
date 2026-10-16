@@ -38,14 +38,30 @@ export function boardTypes(graph: Row | null): Row[] {
     };
   });
 }
-export function typeConnections(graph: Row): Row[] {
+// Keep physical composition separate from the protocols used on each relationship.
+export function typeMounts(graph: Row): Row[] {
   const types = boardTypes(graph);
   return (graph.project_config?.mounts || []).map((edge: Row, i: number) => ({
     ...edge,
     id: i + 1,
     name: `${edge.parent} ↔ ${edge.child}`,
-    protocol: edge.protocol || "待配置",
-    transport: edge.transport || "待配置",
+    connections:
+      edge.connections ??
+      (edge.protocol && edge.transport
+        ? [{ protocol: edge.protocol, transport: edge.transport }]
+        : []),
     total: types.find((t) => t.code === edge.child)?.quantity || 0,
   }));
+}
+export function typeConnections(graph: Row): Row[] {
+  return typeMounts(graph).flatMap((mount) => {
+    const connections = mount.connections.length
+      ? mount.connections
+      : [{ protocol: "待配置", transport: "待配置" }];
+    return connections.map((connection: Row, i: number) => ({
+      ...mount,
+      ...connection,
+      id: `${mount.id}:${i}`,
+    }));
+  });
 }

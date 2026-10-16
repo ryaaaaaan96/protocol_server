@@ -3269,7 +3269,7 @@ body {
   display: block;
   width: 100%;
   min-width: 850px;
-  max-height: 260px;
+  height: auto;
 }
 .type-node {
   cursor: pointer;
@@ -3333,7 +3333,7 @@ body {
 }
 .board-type-selector {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
   gap: 8px;
   margin-bottom: 10px;
 }
@@ -3408,6 +3408,9 @@ body {
   padding: 8px 10px;
 }
 @media (max-width: 680px) {
+  .board-type-selector {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
   .board-type-choice {
     display: block;
     padding: 9px 8px;

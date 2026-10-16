@@ -41,15 +41,15 @@ python3 scripts/seed-workbook.py
 - 冻结版本、ZIP 下载、源数据快照和审计；后续编辑不改变已发布文件。
 - 平台管理员、按项目分配的工程师和只读用户，使用 PostgreSQL RLS 隔离数据。
 
-前端使用 Vue 3 Composition API、TypeScript 和 Vite。「项目拓扑」与「板卡内部信息」是同级页面。拓扑页仅显示 **CSU、UPM、DSP 三类板卡**、挂载数量和通信关系，点击任一板卡节点，直接进入该板卡的内部信息；节点也支持 Enter / 空格键操作。点表统一放在「板卡内部信息」，按三类板卡切换；每类只维护一份配置，包括采集、转发、range、协议字段、板间协议及逻辑设备。表头和名称列固定，支持搜索和分页，字号与行距按表格操作调整。
+前端使用 Vue 3 Composition API、TypeScript 和 Vite。「项目拓扑」与「板卡内部信息」是同级页面。拓扑页仅显示 **CSU、UPM、DSP、变压器 IDU、整流模块 IDU 五类板卡**、挂载数量和通信关系，点击任一板卡节点，直接进入该板卡的内部信息；节点也支持 Enter / 空格键操作。点表统一放在「板卡内部信息」，按板卡类型切换；每类只维护一份配置，包括采集、转发、range、协议字段、板间协议及逻辑设备。表头和名称列固定，支持搜索和分页，字号与行距按表格操作调整。
 
 「项目设置」维护共享模板、协议、数据目录和工作簿来源。修改共享数据时，预览列出受影响板卡类型及挂载数量。编辑关联项随类型、端点和逻辑设备联动；校验问题直接跳转到所属板卡的内部信息页。
 
 ## 项目 JSON 配置
 
-[config/project.example.json](config/project.example.json) 定义三种板卡及两条挂载关系：CSU → UPM 为每个 CSU 挂载 24 个 UPM，UPM → DSP 为每个 UPM 挂载 8 个 DSP。界面始终按三种类型展示，数量只用于项目组成，不复制点表或展开成数百个节点。CSU ↔ UPM 的协议暂为 `null`（待配置）；UPM ↔ DSP 为 UPP / CAN。
+[config/project.example.json](config/project.example.json) 定义五种板卡及四条挂载关系：每个 CSU 挂载 24 个 UPM、1 个变压器 IDU、4 个整流模块 IDU；每个 UPM 挂载 8 个 DSP。拓扑按父子关系自动分支，每类只显示一个节点，数量不复制点表或展开成数百个节点。CSU ↔ UPM 同时配置 Modbus / CAN FD 与 UPP / CAN FD；UPM ↔ DSP 为 UPP / CAN；CSU 与两类 IDU 均为 Modbus RTU / RS485。变压器 IDU（`IDU_T`，模板 `IDU_TRANSFORMER`）和整流模块 IDU（`IDU_R`，模板 `IDU_RECTIFIER`）分别维护独立点表；新增模板为空，具体寄存器、地址与内部信号需按实际点表配置。
 
-在「项目设置」或「板卡内部信息 → 板间协议」点击「项目 JSON 配置」可导入、编辑、导出文件；检查后应用，更新遵循项目权限、revision 锁和审计。`board_types[].model_code` 按项目内模板代码关联现有点表；首次出现的类型建立空模板。`root` 指定根类型及数量，`mounts[].quantity` 是**每个上级**的挂载数，协议和传输方式同时为 `null` 或同时配置。循环、重复上级、非法数量、与已有端点冲突的协议会被拒绝。
+在「项目设置」或「板卡内部信息 → 板间协议」点击「项目 JSON 配置」可导入、编辑、导出文件；检查后应用，更新遵循项目权限、revision 锁和审计。`board_types[].model_code` 按项目内模板代码关联现有点表；首次出现的类型建立空模板。`root` 指定根类型及数量，`mounts[].quantity` 是**每个上级**的挂载数。JSON `version: 2` 使用 `mounts[].connections` 数组保存多组 `{protocol, transport}`，`CANFD` 与 `CAN` 分别表示 CAN FD 和经典 CAN，空数组表示协议待配置；添加协议不会重复计算板卡数量。兼容导入旧版 `version: 1` 的单组 `protocol/transport`（同时为 `null` 表示待配置），应用时转为新版。循环、重复上级、非法数量、与已有端点冲突的协议会被拒绝。
 
 新建项目使用此 JSON 作为可编辑模板；修改磁盘示例文件影响新建项目的默认值，已有项目通过导入和预览应用修改。项目配置保存到 PostgreSQL 的 `projects.topology_config`，点表和权限仍使用关系表。工作簿替换导入保留项目组成，JSON 导出及版本快照包含该配置。
 
@@ -67,7 +67,7 @@ python3 scripts/seed-workbook.py
 
 工作簿提供 UPM 与 DSP 的点表，以及 UPM 内部面向 8 个 DSP 的采集上下文、UPP 连接和 Modbus→UPP 透传窗口；它们属于 UPM 板内配置，不作为首页的 8 个独立板卡模块。项目整体组成由 JSON 定义。DSP 固件的内部数字 sigID 未在源表中明确，因此不沿用 ARM 的 sigID 推断。
 
-CSU 已有独立类型入口，源工作表尚未映射为 CSU 内部点表；CSU ↔ UPM 协议按当前要求标记待配置。BMS、侦测板的真实端口和连接未明确；HMI 大型派生表未接入。源表中已有的类型/长度、上下限等问题保留在校验中心，阻断错误清理后才能发布。平台没有自动改写原工作簿或 AIDC 参考工程，也未接入钉钉 API。
+CSU 已有独立类型入口，源工作表尚未映射为 CSU 内部点表；CSU ↔ UPM 已声明两种 CAN FD 协议；原始工作簿中的 UPM 端点仍按来源保留，实际端口与两端协议字段需单独配置。BMS、侦测板的真实端口和连接未明确；HMI 大型派生表未接入。源表中已有的类型/长度、上下限等问题保留在校验中心，阻断错误清理后才能发布。平台没有自动改写原工作簿或 AIDC 参考工程，也未接入钉钉 API。
 
 ## 连接已有 PostgreSQL
 
@@ -134,7 +134,7 @@ npx playwright install chromium
 node browser-check.mjs
 ```
 
-需要应用已经启动，已导入上述 UPM 项目并应用示例 JSON，以及 Chromium 所需系统库和中文字体。检查覆盖拓扑与板卡信息的页面拆分、跳转及板卡切换、三个类型节点、24/8 挂载数量、采集和转发归属、引用联动、range 继承值、共享修改影响、JSON 导入导出与预览、只读界面及手机布局；也检查来源单元格、SQL 和发布阻断。仅预览配置，不提交业务修改。通过 BASE_URL 可指定服务地址，截图保存在 `.runtime/`。
+需要应用已经启动，已导入上述 UPM 项目并应用示例 JSON，以及 Chromium 所需系统库和中文字体。检查覆盖拓扑与板卡信息的页面拆分、跳转及板卡切换、五个类型节点、分支布局、同一关系的双 CAN FD 协议及旧版 JSON 兼容、24/8/1/4 挂载数量及两类 IDU 的独立配置、采集和转发归属、引用联动、range 继承值、共享修改影响、JSON 导入导出与预览、只读界面及手机布局；也检查来源单元格、SQL 和发布阻断。仅预览配置，不提交业务修改。通过 BASE_URL 可指定服务地址，截图保存在 `.runtime/`。
 
 ## 目录
 

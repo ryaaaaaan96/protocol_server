@@ -218,7 +218,7 @@ export const specs: Record<string, EntitySpec> = {
         default: "client",
       }),
       f("transport", "传输方式", {
-        options: ["CAN", "RS485", "TCP", "UNSPECIFIED"],
+        options: ["CAN", "CANFD", "RS485", "TCP", "UNSPECIFIED"],
         default: "UNSPECIFIED",
       }),
       f("port", "固件端口标识", { hint: "例如 CAN_PORT1 或 UART_PORT1。" }),

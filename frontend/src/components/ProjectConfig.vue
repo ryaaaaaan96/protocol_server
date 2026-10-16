@@ -91,8 +91,8 @@ async function commit() {
     ><form @submit.prevent="review">
       <div class="modal-body project-json">
         <p class="notice">
-          每种板卡维护一份点表。quantity
-          表示每个上级挂载的数量；协议与传输方式同时设为 null，表示待配置。
+          每种板卡维护一份点表。quantity 表示每个上级挂载的数量， connections
+          可填写多组协议与传输方式，数量只计算一次；空数组表示待配置。
         </p>
         <div class="inline json-actions">
           <label v-if="canWrite" class="button"

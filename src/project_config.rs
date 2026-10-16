@@ -30,12 +30,17 @@ pub struct Root {
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct Connection {
+    pub protocol: String,
+    pub transport: String,
+}
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Mount {
     pub parent: String,
     pub child: String,
     pub quantity: u32,
-    pub protocol: Option<String>,
-    pub transport: Option<String>,
+    pub connections: Vec<Connection>,
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -46,15 +51,48 @@ pub struct Config {
     pub mounts: Vec<Mount>,
 }
 impl Config {
-    pub fn parse(value: Value) -> Result<Self> {
+    pub fn parse(mut value: Value) -> Result<Self> {
+        // Version 1 attached a single protocol to each mount. Normalize on import,
+        // preserving one mount/count even when version 2 declares several protocols.
+        if value["version"] == 1 {
+            value["version"] = json!(2);
+            let mounts = value["mounts"]
+                .as_array_mut()
+                .ok_or_else(|| AppError::bad("项目 JSON 的 mounts 必须是数组"))?;
+            for mount in mounts {
+                let object = mount
+                    .as_object_mut()
+                    .ok_or_else(|| AppError::bad("挂载关系必须是对象"))?;
+                if object.contains_key("connections") {
+                    return Err(AppError::bad("connections 数组须使用项目配置 version 2"));
+                }
+                let protocol = object.remove("protocol").unwrap_or(Value::Null);
+                let transport = object.remove("transport").unwrap_or(Value::Null);
+                if protocol.is_null() != transport.is_null() {
+                    return Err(AppError::bad(
+                        "旧版配置的协议与传输方式须同时填写，或同时为 null",
+                    ));
+                }
+                object.insert(
+                    "connections".into(),
+                    if protocol.is_null() {
+                        json!([])
+                    } else {
+                        json!([{"protocol":protocol,"transport":transport}])
+                    },
+                );
+            }
+        }
         let c: Self = serde_json::from_value(value)
             .map_err(|e| AppError::bad(format!("项目 JSON 格式错误：{e}")))?;
         c.counts()?;
         Ok(c)
     }
     pub fn counts(&self) -> Result<BTreeMap<String, u32>> {
-        if self.version != 1 || self.board_types.is_empty() || self.board_types.len() > 32 {
-            return Err(AppError::bad("项目配置版本须为 1，板卡类型数量须为 1～32"));
+        if self.version != 2 || self.board_types.is_empty() || self.board_types.len() > 32 {
+            return Err(AppError::bad(
+                "项目配置须为 version 2（兼容导入 version 1），板卡类型数量须为 1～32",
+            ));
         }
         let mut codes = BTreeSet::new();
         let mut models = BTreeSet::new();
@@ -94,17 +132,23 @@ impl Config {
                     "挂载关系包含未知板卡、重复上级或无效数量（须为 1～1024）",
                 ));
             }
-            if m.protocol
-                .as_deref()
-                .is_some_and(|p| !matches!(p, "MODBUS" | "UPP"))
-                || m.transport
-                    .as_deref()
-                    .is_some_and(|p| !matches!(p, "CAN" | "RS485" | "TCP"))
-                || m.protocol.is_none() != m.transport.is_none()
-            {
-                return Err(AppError::bad(
-                    "协议与传输方式须同时配置，或同时为 null（待配置）",
-                ));
+            let mut connections = BTreeSet::new();
+            for connection in &m.connections {
+                if !matches!(connection.protocol.as_str(), "MODBUS" | "UPP")
+                    || !matches!(
+                        connection.transport.as_str(),
+                        "CAN" | "CANFD" | "RS485" | "TCP"
+                    )
+                {
+                    return Err(AppError::bad(
+                        "每组连接须配置有效协议与传输方式；connections 为空表示待配置",
+                    ));
+                }
+                if !connections.insert((&connection.protocol, &connection.transport)) {
+                    return Err(AppError::bad(
+                        "同一挂载关系中不能重复配置相同协议与传输方式",
+                    ));
+                }
             }
         }
         let mut counts = BTreeMap::from([(self.root.kind.clone(), self.root.quantity)]);
@@ -202,30 +246,34 @@ pub fn relationship_issues(g: &Value) -> Vec<Value> {
         let Some(child) = model_id(&m.child) else {
             continue;
         };
-        let mut actual = Vec::new();
+        let mut actual: BTreeMap<i64, BTreeSet<(&str, &str)>> = BTreeMap::new();
         for ce in rows(g, "endpoints")
             .iter()
-            .filter(|e| num(e, "model_id") == parent && e["role"] == "client")
+            .filter(|e| num(e, "model_id") == parent)
         {
             for se in rows(g, "endpoints").iter().filter(|e| {
                 num(e, "model_id") == child
-                    && e["role"] == "server"
+                    && e["role"] != ce["role"]
                     && e["contract_id"] == ce["contract_id"]
             }) {
                 if let Some(contract) = find(g, "protocol_contracts", num(ce, "contract_id")) {
-                    actual.push((
-                        strv(contract, "protocol"),
-                        strv(ce, "transport"),
-                        strv(se, "transport"),
-                    ));
+                    let matches = actual.entry(num(contract, "id")).or_default();
+                    // A contract may also be served on unrelated interfaces. Compare
+                    // only the transports that these two types have in common.
+                    if ce["transport"] == se["transport"] {
+                        matches.insert((strv(contract, "protocol"), strv(ce, "transport")));
+                    }
                 }
             }
         }
-        if !actual.is_empty()
-            && !actual.iter().any(|(p, t, s)| {
-                Some(*p) == m.protocol.as_deref() && Some(*t) == m.transport.as_deref() && t == s
-            })
-        {
+        if actual.values().any(|connections| {
+            connections.is_empty()
+                || connections.iter().any(|(p, t)| {
+                    !m.connections
+                        .iter()
+                        .any(|c| c.protocol == *p && c.transport == *t)
+                })
+        }) {
             issues.push(json!({"key":format!("project_config:protocol:{index}"),"level":"error","entity":"project_config","id":0,"name":format!("{} ↔ {}",m.parent,m.child),"code":"protocol","message":"项目 JSON 的协议/传输方式与现有板卡端点契约不一致，请同步检查挂载关系和端点配置"}));
         }
     }
@@ -242,10 +290,19 @@ mod tests {
     fn type_counts_do_not_expand_instances() {
         let c = Config::parse(example()).unwrap();
         let n = c.counts().unwrap();
-        assert_eq!(c.board_types.len(), 3);
+        assert_eq!(c.board_types.len(), 5);
         assert_eq!(n["CSU"], 1);
         assert_eq!(n["UPM"], 24);
         assert_eq!(n["DSP"], 192);
+        assert_eq!(n["IDU_T"], 1);
+        assert_eq!(n["IDU_R"], 4);
+        assert_eq!(c.mounts[0].connections.len(), 2);
+        assert!(
+            c.mounts[0]
+                .connections
+                .iter()
+                .all(|c| c.transport == "CANFD")
+        );
     }
     #[test]
     fn rejects_invalid_hierarchy() {
@@ -262,10 +319,71 @@ mod tests {
         v["board_types"][1]["model_code"] = json!("CSU");
         assert!(Config::parse(v).is_err());
         let mut v = example();
-        v["mounts"][0]["protocol"] = json!("MODBUS");
+        v["mounts"][0]["connections"][0]["transport"] = json!("UNKNOWN");
         assert!(Config::parse(v).is_err());
         let mut v = example();
-        v["version"] = json!(2);
+        v["version"] = json!(3);
         assert!(Config::parse(v).is_err());
+        let mut v = example();
+        let duplicate = v["mounts"][0]["connections"][0].clone();
+        v["mounts"][0]["connections"]
+            .as_array_mut()
+            .unwrap()
+            .push(duplicate);
+        assert!(Config::parse(v).is_err());
+        let mut v = example();
+        v["mounts"][0]["connections"][0]["transport"] = Value::Null;
+        assert!(Config::parse(v).is_err());
+    }
+    #[test]
+    fn reads_legacy_single_protocol_without_multiplying_counts() {
+        let mut legacy = example();
+        legacy["version"] = json!(1);
+        for m in legacy["mounts"].as_array_mut().unwrap() {
+            let obj = m.as_object_mut().unwrap();
+            let connections = obj.remove("connections").unwrap();
+            let first = &connections[0];
+            obj.insert("protocol".into(), first["protocol"].clone());
+            obj.insert("transport".into(), first["transport"].clone());
+        }
+        legacy["mounts"][0]["protocol"] = Value::Null;
+        legacy["mounts"][0]["transport"] = Value::Null;
+        let normalized = Config::parse(legacy.clone()).unwrap();
+        assert_eq!(normalized.version, 2);
+        assert!(normalized.mounts[0].connections.is_empty());
+        assert_eq!(normalized.counts().unwrap()["UPM"], 24);
+        assert_eq!(normalized.mounts[1].connections[0].protocol, "UPP");
+        legacy["mounts"][0]["protocol"] = json!("MODBUS");
+        assert!(Config::parse(legacy.clone()).is_err());
+        legacy["mounts"][0]["protocol"] = Value::Null;
+        legacy["mounts"][0]["connections"] = json!([]);
+        assert!(Config::parse(legacy).is_err());
+    }
+    #[test]
+    fn validates_both_canfd_protocols_against_shared_endpoints() {
+        let mut graph = json!({
+            "project_config": example(),
+            "board_models": [{"id":1,"code":"CSU"},{"id":2,"code":"UPM_ARM"}],
+            "protocol_contracts": [{"id":10,"protocol":"MODBUS"},{"id":20,"protocol":"UPP"}],
+            "endpoints": [
+                {"model_id":1,"contract_id":10,"role":"client","transport":"CANFD"},
+                {"model_id":2,"contract_id":10,"role":"server","transport":"CANFD"},
+                {"model_id":1,"contract_id":20,"role":"client","transport":"CANFD"},
+                {"model_id":2,"contract_id":20,"role":"server","transport":"CANFD"},
+                {"model_id":2,"contract_id":10,"role":"server","transport":"RS485"}
+            ]
+        });
+        assert!(relationship_issues(&graph).is_empty());
+        graph["project_config"]["mounts"][0]["connections"]
+            .as_array_mut()
+            .unwrap()
+            .pop();
+        assert_eq!(relationship_issues(&graph).len(), 1);
+        graph["project_config"] = example();
+        graph["endpoints"][0]["role"] = json!("server");
+        graph["endpoints"][1]["role"] = json!("client");
+        assert!(relationship_issues(&graph).is_empty());
+        graph["endpoints"][3]["transport"] = json!("CAN");
+        assert_eq!(relationship_issues(&graph).len(), 1);
     }
 }

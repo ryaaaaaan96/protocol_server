@@ -63,19 +63,21 @@ try {
     "CSU",
     "UPM",
     "DSP",
+    "IDU_T",
+    "IDU_R",
   ]);
   await expect(
     page.getByRole("group", { name: "项目板卡类型协议拓扑" }),
   ).toBeVisible();
-  await expect(page.locator(".type-node")).toHaveCount(3);
+  await expect(page.locator(".type-node")).toHaveCount(5);
   const csuLink = page.locator(
     '.type-connection-line[data-parent="CSU"][data-child="UPM"]',
   );
   const dspLink = page.locator(
     '.type-connection-line[data-parent="UPM"][data-child="DSP"]',
   );
-  await expect(page.locator(".type-connection-line")).toHaveCount(2);
-  await expect(csuLink).toHaveAttribute("stroke-dasharray", "7 5");
+  await expect(page.locator(".type-connection-line")).toHaveCount(4);
+  await expect(csuLink).not.toHaveAttribute("stroke-dasharray");
   await expect(dspLink).not.toHaveAttribute("stroke-dasharray");
   for (const edge of [csuLink, dspLink]) {
     // Horizontal SVG paths have a zero-height DOM box despite a visible stroke.
@@ -91,16 +93,80 @@ try {
   ).toBeVisible();
   await expect(page.locator("main table")).toHaveCount(0);
   await expect(page.getByRole("tablist")).toHaveCount(0);
-  await expect(page.locator("main").getByRole("button")).toHaveCount(3);
+  await expect(page.locator("main").getByRole("button")).toHaveCount(5);
   await expect(
     page.getByRole("button", { name: "项目 JSON 配置", exact: true }),
   ).toHaveCount(0);
   await expect(nav.locator(".board-nav-item")).toHaveCount(0);
-  await expect(page.locator(".type-edge-count")).toHaveText(["× 24", "× 8"]);
-  await expect(page.locator(".type-edge-protocol")).toHaveText([
-    "协议待配置",
-    "UPP / CAN",
+  await expect(page.locator(".type-edge-count")).toHaveText([
+    "× 24",
+    "× 8",
+    "× 1",
+    "× 4",
   ]);
+  await expect(page.locator(".type-edge-protocol")).toHaveText([
+    "MODBUS / CAN FD",
+    "UPP / CAN FD",
+    "UPP / CAN",
+    "MODBUS / RS485",
+    "MODBUS / RS485",
+  ]);
+  const boxes = await page.locator(".type-node").evaluateAll((nodes) =>
+    Object.fromEntries(
+      nodes.map((node) => {
+        const rect = node.querySelector("rect");
+        return [
+          node.dataset.code,
+          {
+            x: rect.x.baseVal.value,
+            y: rect.y.baseVal.value,
+            w: rect.width.baseVal.value,
+            h: rect.height.baseVal.value,
+          },
+        ];
+      }),
+    ),
+  );
+  expect(boxes.UPM.x).toBe(boxes.IDU_T.x);
+  expect(boxes.UPM.x).toBe(boxes.IDU_R.x);
+  expect(boxes.CSU.x).toBeLessThan(boxes.UPM.x);
+  expect(boxes.DSP.x).toBeGreaterThan(boxes.UPM.x);
+  const rects = Object.values(boxes);
+  for (let i = 0; i < rects.length; i++)
+    for (let j = i + 1; j < rects.length; j++) {
+      const a = rects[i],
+        b = rects[j];
+      expect(
+        a.x + a.w <= b.x ||
+          b.x + b.w <= a.x ||
+          a.y + a.h <= b.y ||
+          b.y + b.h <= a.y,
+      ).toBe(true);
+    }
+  const edgeLabels = await page
+    .locator(".type-edge-count, .type-edge-protocol")
+    .evaluateAll((labels) =>
+      labels.map((label) => {
+        const box = label.getBBox();
+        return { x: box.x, y: box.y, w: box.width, h: box.height };
+      }),
+    );
+  for (const label of edgeLabels)
+    for (const node of rects) {
+      expect(
+        label.x + label.w <= node.x ||
+          node.x + node.w <= label.x ||
+          label.y + label.h <= node.y ||
+          node.y + node.h <= label.y,
+      ).toBe(true);
+    }
+  for (const code of ["IDU_T", "IDU_R"]) {
+    const edge = page.locator(
+      `.type-connection-line[data-parent="CSU"][data-child="${code}"]`,
+    );
+    await expect(edge).toHaveCount(1);
+    await expect(edge).not.toHaveAttribute("stroke-dasharray");
+  }
   await expect(page.locator(".type-topology-legend")).toContainText(
     "DSP × 192",
   );
@@ -115,6 +181,8 @@ try {
   ).toHaveCount(0);
   for (const [code, count, activation] of [
     ["CSU", "0", "click"],
+    ["IDU_T", "0", "click"],
+    ["IDU_R", "0", "click"],
     ["DSP", "552", "click"],
     ["CSU", "0", "Enter"],
     ["DSP", "552", "Space"],
@@ -138,12 +206,30 @@ try {
       page.getByRole("button", { name: `选择 ${code} 板卡`, exact: true }),
     ).toHaveAttribute("aria-pressed", "true");
     await expect(tab("内部信号表")).toContainText(count);
+    if (code.startsWith("IDU_")) {
+      await tab("板间协议").click();
+      await expect(tableRows()).toHaveCount(1);
+      await expect(tableRows().first()).toContainText(`CSU ↔ ${code}`);
+      await expect(tableRows().first()).toContainText("MODBUS");
+      await expect(tableRows().first()).toContainText("RS485");
+      await tab("逻辑设备").click();
+      await page
+        .getByRole("button", { name: "新建逻辑设备上下文", exact: true })
+        .click();
+      const type = g.project_config.board_types.find((t) => t.code === code);
+      const model = g.board_models.find((m) => m.code === type.model_code);
+      await expect(page.getByLabel("板卡模板", { exact: true })).toHaveValue(
+        String(model.id),
+      );
+      await expect(page.getByLabel("板卡模板", { exact: true })).toBeDisabled();
+      await close();
+    }
   }
   await expect(
     page.getByRole("heading", { name: "板卡内部信息", exact: true }),
   ).toBeVisible();
-  await expect(page.locator(".board-type-choice")).toHaveCount(3);
-  await expect(nav.locator(".board-nav-item")).toHaveCount(3);
+  await expect(page.locator(".board-type-choice")).toHaveCount(5);
+  await expect(nav.locator(".board-nav-item")).toHaveCount(5);
   await expect(
     page.getByRole("group", { name: "项目板卡类型协议拓扑" }),
   ).toHaveCount(0);
@@ -162,7 +248,7 @@ try {
     fullPage: true,
   });
   console.log(
-    "PASS: topology nodes open their own board details by click/Enter/Space; 3 types, 24/8 links and readable tables",
+    "PASS: topology nodes open their own board details by click/Enter/Space; 5 types, independent IDUs, branching Modbus links and readable tables",
   );
 
   await tab("采集表").click();
@@ -209,9 +295,21 @@ try {
   );
   await close();
   await tab("板间协议").click();
-  await expect(tableRows()).toHaveCount(2);
-  await expect(tableRows().first()).toContainText("CSU ↔ UPM");
-  await expect(tableRows().first()).toContainText("待配置");
+  await expect(tableRows()).toHaveCount(3);
+  await expect(tableRows().nth(0)).toContainText("CSU ↔ UPM");
+  await expect(tableRows().nth(0)).toContainText("MODBUS");
+  await expect(tableRows().nth(0)).toContainText("CANFD");
+  await expect(tableRows().nth(1)).toContainText("CSU ↔ UPM");
+  await expect(tableRows().nth(1)).toContainText("UPP");
+  await expect(tableRows().nth(1)).toContainText("CANFD");
+  await tab("协议端点").click();
+  await page.getByRole("button", { name: "新建协议端点", exact: true }).click();
+  await page.getByLabel("传输方式", { exact: true }).selectOption("CANFD");
+  await expect(page.getByLabel("传输方式", { exact: true })).toHaveValue(
+    "CANFD",
+  );
+  await close();
+  await tab("板间协议").click();
   await page
     .getByRole("button", { name: "选择 DSP 板卡", exact: true })
     .click();
@@ -399,7 +497,7 @@ try {
     () => document.querySelector(".sidebar").getBoundingClientRect().right <= 0,
   );
   await expect(page.locator("main table")).toHaveCount(0);
-  await expect(page.locator("main").getByRole("button")).toHaveCount(3);
+  await expect(page.locator("main").getByRole("button")).toHaveCount(5);
   await page.screenshot({
     path: "../.runtime/mobile-project-topology.png",
     fullPage: true,
@@ -421,6 +519,34 @@ try {
   );
 
   await page.setViewportSize({ width: 1440, height: 1000 });
+  const legacyGraph = structuredClone(g);
+  legacyGraph.project_config.version = 1;
+  for (const mount of legacyGraph.project_config.mounts) {
+    const first = mount.connections[0];
+    delete mount.connections;
+    Object.assign(mount, first);
+  }
+  legacyGraph.project_config.mounts[0].protocol = null;
+  legacyGraph.project_config.mounts[0].transport = null;
+  const topologyRoute = `**/api/projects/${pid}/topology`;
+  await page.route(topologyRoute, (route) =>
+    route.fulfill({ json: legacyGraph }),
+  );
+  await page.reload();
+  await expect(
+    page.locator('.type-connection-line[data-parent="CSU"][data-child="UPM"]'),
+  ).toHaveAttribute("stroke-dasharray", "7 5");
+  await expect(page.locator(".type-node")).toHaveCount(5);
+  await page
+    .getByRole("button", { name: "查看 UPM 板卡内部信息", exact: true })
+    .click();
+  await tab("板间协议").click();
+  await expect(tableRows()).toHaveCount(2);
+  await expect(tableRows().first()).toContainText("待配置");
+  await page.unroute(topologyRoute);
+  console.log(
+    "PASS: CAN FD protocol pairs, endpoint transport choice and legacy JSON rendering",
+  );
   await page.route("**/api/projects", async (route) => {
     const response = await route.fetch();
     await route.fulfill({

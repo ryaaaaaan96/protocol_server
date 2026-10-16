@@ -326,7 +326,9 @@ function sourceOf(row: Row) {
         v-if="sheet.entity === 'type_connections'"
         class="notice type-link-notice"
       >
-        <span>挂载关系及协议在项目 JSON 中维护，数量按每个上级计算。</span
+        <span
+          >挂载关系及协议在项目 JSON
+          中维护；同一关系可有多种协议，挂载数量不叠加。</span
         ><button class="text-button" @click="emit('configuration')">
           项目 JSON 配置 <ArrowRight :size="15" />
         </button>
