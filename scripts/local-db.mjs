@@ -20,10 +20,15 @@ try {
 async function main() {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   process.chdir(root);
+  const command = process.argv[2] || "start";
+  if (!["init", "start", "stop"].includes(command))
+    throw new Error("用法：node scripts/local-db.mjs init|start|stop");
+  const initialize = command === "init";
   const runtime = path.join(root, ".runtime");
-  fs.mkdirSync(runtime, { recursive: true, mode: 0o700 });
   const envPath = path.join(root, ".env");
   if (!fs.existsSync(envPath)) {
+    if (!initialize)
+      throw new Error("尚未配置数据库，请先执行 ./scripts/init-db.sh。");
     const admin = crypto.randomBytes(18).toString("hex"),
       app = crypto.randomBytes(18).toString("hex"),
       password = crypto.randomBytes(18).toString("hex");
@@ -33,6 +38,7 @@ async function main() {
       { mode: 0o600, flag: "wx" },
     );
   }
+  if (initialize) fs.mkdirSync(runtime, { recursive: true, mode: 0o700 });
   const config = Object.fromEntries(
     fs
       .readFileSync(envPath, "utf8")
@@ -56,7 +62,11 @@ async function main() {
       tooling,
       "node_modules/@embedded-postgres/linux-x64/native",
     );
-    if (!fs.existsSync(path.join(native, "bin/pg_ctl")))
+    if (!fs.existsSync(path.join(native, "bin/pg_ctl"))) {
+      if (!initialize)
+        throw new Error(
+          "缺少本地 PostgreSQL 工具，请先执行 ./scripts/init-db.sh。",
+        );
       execFileSync(
         "npm",
         [
@@ -71,8 +81,11 @@ async function main() {
         ],
         { stdio: "inherit" },
       );
+    }
   }
-  if (!fs.existsSync(path.join(tooling, "node_modules/pg")))
+  if (!fs.existsSync(path.join(tooling, "node_modules/pg"))) {
+    if (!initialize)
+      throw new Error("缺少数据库连接工具，请先执行 ./scripts/init-db.sh。");
     execFileSync(
       "npm",
       [
@@ -86,13 +99,13 @@ async function main() {
       ],
       { stdio: "inherit" },
     );
+  }
   const env = {
     ...process.env,
     LD_LIBRARY_PATH: `${path.join(native, "lib")}:${process.env.LD_LIBRARY_PATH || ""}`,
   };
   const data = path.join(runtime, "pgdata"),
     socket = path.join(runtime, "pgsocket");
-  fs.mkdirSync(socket, { recursive: true, mode: 0o700 });
   const control = {
     native,
     data,
@@ -100,12 +113,16 @@ async function main() {
     env,
     log: path.join(runtime, "postgres.log"),
   };
-  if (process.argv.includes("stop")) {
+  if (command === "stop") {
     if (!fs.existsSync(path.join(data, "PG_VERSION")) || !stopPostgres(control))
       console.log("Local PostgreSQL is already stopped.");
     return;
   }
   if (!fs.existsSync(path.join(data, "PG_VERSION"))) {
+    if (!initialize)
+      throw new Error(
+        "本地数据库未初始化，请先执行 ./scripts/init-db.sh。启动不会自动建库。",
+      );
     const pw = path.join(runtime, "init-password");
     fs.writeFileSync(pw, decodeURIComponent(adminUrl.password), {
       mode: 0o600,
@@ -129,11 +146,20 @@ async function main() {
       fs.unlinkSync(pw);
     }
   }
+  fs.mkdirSync(socket, { recursive: true, mode: 0o700 });
   startPostgres(control);
   const { default: pg } = await import(
     path.join(tooling, "node_modules/pg/lib/index.js")
   );
   const { Client } = pg;
+  if (!initialize) {
+    const db = await connectPostgres(Client, appUrl.toString());
+    await db.end();
+    console.log(
+      "Local PostgreSQL started. Existing database and projects preserved.",
+    );
+    return;
+  }
   const connection = new URL(adminUrl);
   connection.pathname = "/postgres";
   const db = await connectPostgres(Client, connection.toString());

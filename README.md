@@ -4,29 +4,61 @@
 
 ## 启动
 
-当前机器已初始化开发数据库。旧版 612 条主测点迁移为板卡、内部信号、协议字段和绑定关系，保留旧记录作为迁移档案。
+数据库初始化、项目创建、应用启动分别执行。新电脑首次部署（Linux x64）：
 
 ```bash
+./scripts/init-db.sh                 # 初始化本地 PostgreSQL 和表结构，不创建项目
+./scripts/create-project.sh upm      # 手动从 config/projects/upm/ 创建 UPM 项目
 ./scripts/dev.sh
 ```
 
 打开 http://127.0.0.1:8080 。登录账号和密码对应根目录 `.env` 的 `ADMIN_USERNAME`、`ADMIN_PASSWORD`；首次初始化使用随机密码，没有固定默认口令。`.env` 权限为 `600`，已加入忽略规则。
 
-这个脚本适用于 **Linux x64**：在 `.runtime/` 内启动真正的 PostgreSQL 18，使用端口 `55432`，无需安装系统服务。首次运行会下载依赖；后续保留数据。HTTP 服务由 `Ctrl+C` 停止，数据库单独停止：
+`init-db.sh` 在 `.runtime/` 内安装、初始化并启动真正的 PostgreSQL 18，使用端口 `55432`，无需 Docker 或系统服务；首次运行生成 `.env`，重复运行保留已有数据库并应用新增迁移。`create-project.sh` 不需要 HTTP 服务已启动，只有明确执行它才会创建项目。`dev.sh` 只构建并启动应用，不启动数据库、不建库、不迁移、不创建项目。
+
+电脑重启后，先启动已有数据库，再启动应用；不必重新创建项目：
+
+```bash
+node scripts/local-db.mjs start
+./scripts/dev.sh
+```
+
+HTTP 服务由 `Ctrl+C` 停止，数据库单独停止：
 
 ```bash
 node scripts/local-db.mjs stop
 ```
 
-启动脚本通过 `pg_ctl status` 检查实际进程状态，并等待数据库连接就绪；异常停止后遗留的 `postmaster.pid` 由 PostgreSQL 在启动时处理。启动失败时查看 `.runtime/postgres.log`，不需要删除现有数据库目录。
+数据库启动通过 `pg_ctl status` 检查实际进程状态，并等待连接就绪；异常停止后遗留的 `postmaster.pid` 由 PostgreSQL 处理。启动失败时查看 `.runtime/postgres.log`，不需要删除现有数据库目录。未初始化时，启动命令只提示执行初始化脚本，不会隐式创建空库。
 
-在另一台机器启动后，登录界面创建项目并导入 Excel；也可以在服务运行时执行：
+**`.runtime/pgdata/` 是真实的持久数据库，不是缓存**：网页保存的项目拓扑、点表、映射、用户、权限都在这里（使用外部 PostgreSQL 时由外部服务存储）。`.runtime/` 还包含数据库工具、日志和测试截图，整个目录被 Git 忽略。`config/` 是可迁移的初始配置和展示定义，不是数据库备份。
 
-```bash
-python3 scripts/seed-workbook.py
+新电脑执行上面的 UPM 创建命令，会导入仓库中的 `UPM项目测点数据表.xlsx`，并显示五类板卡。它不会恢复旧电脑网页上保存的后续修改。迁移旧项目请按 [数据库备份与恢复](docs/operations.md) 操作，恢复到空数据库后再执行迁移和启动，勿先创建同名新项目。
+
+## 按目录创建多个项目
+
+```text
+config/
+  point-tables.json               公共展示定义
+  projects/
+    upm/
+      project.json               名称、拓扑、可选 Excel 导入来源
+      point-tables.json          本项目展示覆盖（可省略）
+    project-b/
+      project.json
 ```
 
-该脚本只向新建或空的「UPM 协议配置」项目导入，已有数据时不会覆盖。
+[config/projects/upm/project.json](config/projects/upm/project.json) 的 `key` 必须与目录名一致；`name` 是界面显示名，`topology` 保存板卡和协议挂载配置。可选 `workbook` 路径相对于该 JSON 文件，省略或设为 `null` 就只创建拓扑和空板卡模板。当前 Excel 解析器支持本仓库 UPM 工作簿的结构，不能把任意 Excel 当作通用模板。
+
+复制 `upm` 目录到 `project-b`，修改 `key`、`name` 和拓扑；不需要原始点表时删除 `workbook`。然后执行：
+
+```bash
+./scripts/create-project.sh project-b
+```
+
+创建过程在同一事务中完成，包含拓扑、可选点表导入和审计；失败会整体回滚。已绑定同一 `key` 的项目再次执行会跳过，保留已有数据和 revision；另有同名项目时会报错，避免误覆盖或创建重复项目。脚本使用 `ADMIN_USERNAME` 对应的启用管理员身份，成员权限在网页「成员与权限」分配。创建时有工作簿校验问题会显示数量，进入校验中心处理后才能发布。若服务已运行，创建后刷新页面即可看到新项目；新增目录或修改展示配置需重启后端加载。
+
+数据库保存的 `config_key` 关联项目展示配置，改显示名不会断开关系。`project.json` 仅在创建时写入数据库，后续修改磁盘拓扑不会覆盖现有项目；已有拓扑修改仍通过网页 JSON 编辑、预览、提交。网页手动创建的项目和升级前的项目继续使用公共展示定义。
 
 ## 功能
 
@@ -51,6 +83,8 @@ python3 scripts/seed-workbook.py
 
 [config/point-tables.json](config/point-tables.json) 独立维护字段标题、提示、显示列及编辑顺序：`fields` 是共享字段目录，`tables.process/collect/forward.columns` 是展示列，`editor` 是可编辑字段。调整这些配置后重启后端即可生效，不需要重新编译前端。通过 `POINT_TABLE_CONFIG` 可指定文件路径；默认路径相对于进程工作目录。启动时检查版本、字段标识和重复列，计算字段不能配置成可写字段。
 
+`config/projects/<项目>/point-tables.json` 按字段覆盖公共配置：对象递归合并，数组整体替换；可以仅写需要修改的标题或列列表。合并后仍执行完整字段校验。`PROJECT_CONFIG_DIR` 可指定项目目录的父目录，默认 `config/projects`；从空目录加载时不提供项目配置。点表读取接口自动采用当前项目的有效展示定义。
+
 例如，在 `tables.process.columns` 中加入已有的 `contexts`，即可显示处理点被哪些逻辑设备复用；添加 `range_inherited` 可显示哪些范围值继承数据定义。`label` 控制编辑标题，`column_label` 可单独设置显示列标题。新增存储属性或协议行为仍需扩展后端字段契约和校验，JSON 配置不会自动修改数据库结构。
 
 业务接口与数据库实体分离：
@@ -58,6 +92,7 @@ python3 scripts/seed-workbook.py
 | 接口 | 用途 |
 | --- | --- |
 | `GET /api/point-tables/schema` | 获取字段目录和三个点表的展示定义 |
+| `GET /api/projects/{pid}/point-tables/schema` | 获取项目覆盖后的展示定义，遵循项目权限 |
 | `GET /api/projects/{pid}/board-models/{mid}/point-tables/{kind}` | 获取指定板卡的点表、有效值、原始编辑值和关联选项 |
 | `POST /api/projects/{pid}/board-models/{mid}/point-tables/{kind}/preview` | 校验业务修改，预览所有关联影响 |
 | `POST /api/projects/{pid}/changes/{id}/commit` | 按预览版本提交事务 |
@@ -125,7 +160,7 @@ CSU 已有独立类型入口，源工作表尚未映射为 CSU 内部点表；CS
 docker compose up --build -d
 ```
 
-依次运行数据库初始化、迁移和应用。默认只监听本机 `8080`。如需内网访问，设置 `HTTP_BIND=0.0.0.0`。启用 HTTPS 反向代理后设置 `COOKIE_SECURE=true`。
+这是可选容器部署方式，与上述本地脚本独立。依次运行数据库初始化、迁移和应用，不自动创建业务项目。默认只监听本机 `8080`。如需内网访问，设置 `HTTP_BIND=0.0.0.0`。启用 HTTPS 反向代理后设置 `COOKIE_SECURE=true`。
 
 ## 测试
 
@@ -139,9 +174,9 @@ node tests/migration.mjs
 python3 tests/compile-generated.py
 ```
 
-`tests/local-db.mjs` 使用临时 PostgreSQL 集群，验证残留 PID 文件后的恢复、重复启动/停止、连接等待及原数据保留，不操作已有业务数据库。
+`tests/local-db.mjs` 使用临时目录和 PostgreSQL 集群，验证首次启动不隐式创建环境/数据库、残留 PID 文件后的恢复、重复启动/停止、连接等待及原数据保留，不操作已有业务数据库。
 
-集成测试读取 `.env` 连接开发 PostgreSQL，创建独立临时数据库和临时 HTTP 服务，测试结束删除临时数据库，不覆盖已有业务项目。它依赖 `scripts/local-db.mjs` 安装的本地 `pg` 客户端。覆盖数据库行级权限、API 权限、SQL 隔离、乐观锁、导入事务、生成和版本不可变性。
+集成测试读取 `.env` 连接开发 PostgreSQL，创建独立临时数据库和临时 HTTP 服务，测试结束删除临时数据库，不覆盖已有业务项目。它依赖初始化脚本安装的本地 `pg` 客户端。覆盖显式项目创建、重复/并发创建、导入失败回滚、项目展示覆盖及隔离、数据库行级权限、API 权限、SQL 隔离、乐观锁、导入事务、生成和版本不可变性。
 
 C 合约测试编译生成文件并验证设备注册、独立 sigID、别名、地址移动、浮点类型、范围查询及独立恢复策略；使用与参考接口一致的最小类型声明。**这不等于完整固件编译或硬件联调**。参考工程当前缺少独立编译所需的部分驱动头文件，生成代码上线前仍需目标工程验证。
 
@@ -163,8 +198,8 @@ migrations/                PostgreSQL 表结构、RLS 策略、SQL 视图和授�
 frontend/src/App.vue       Vue 应用和工作空间状态
 frontend/src/pages/        各业务页面
 frontend/src/components/   通用组件与编辑/导入弹窗
-config/                    项目 JSON 示例：板卡类型与协议挂载关系
-scripts/                   启动、数据库初始化和工作簿导入
+config/                    公共展示定义、项目目录和 JSON 示例
+scripts/                   独立的数据库初始化、项目创建和应用启动脚本
 tests/                    隔离数据库集成测试与 C 合约测试
 docs/                     数据模型与规则说明
 ```

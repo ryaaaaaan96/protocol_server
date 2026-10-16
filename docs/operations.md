@@ -11,8 +11,17 @@
 | COOKIE_SECURE | HTTPS 环境设为 true |
 | STATIC_DIR | 生产前端目录，默认 frontend/dist |
 | POINT_TABLE_CONFIG | 点表展示配置路径，默认 config/point-tables.json；修改后重启后端生效 |
+| PROJECT_CONFIG_DIR | 项目配置的父目录，默认 config/projects；每个子目录提供 project.json 和可选 point-tables.json |
 
 不要把迁移管理员连接作为运行连接。本版迁移给名称为 `protocol_app` 的角色授权；如采用其他角色名，需在部署时单独授予等价权限并测试 RLS。
+
+## 本地数据库与项目分开创建
+
+首次运行 `./scripts/init-db.sh` 明确创建本地数据库、应用角色和表结构，不创建业务项目。随后由管理员运行 `./scripts/create-project.sh upm`，从 `config/projects/upm/project.json` 创建项目，最后运行 `./scripts/dev.sh` 启动应用。已经初始化的数据库可用 `node scripts/local-db.mjs start` / `stop` 单独控制；启动应用和数据库不会自动初始化新库。
+
+外部 PostgreSQL 使用已有的数据库管理流程创建空库和运行角色，执行 `cargo run -- migrate` 安装表结构后，同样可以运行项目创建脚本。项目创建只需要运行数据库连接，仍通过管理员上下文、RLS 和事务写入。运行角色不得拥有表或绕过 RLS。创建脚本重复运行会保留已有项目，导入失败则整体回滚；它不是同步或恢复已有项目的工具。
+
+本地模式的 `.runtime/pgdata/` 保存完整业务数据库；`.runtime/` 被 Git 忽略，不能整体当缓存删除。`config/projects/` 可随代码迁移，提供创建时的拓扑和可选 Excel 来源，以及运行时的展示定义；网页中修改的点表、用户和权限仍以数据库为准。恢复旧电脑的数据时，使用下面的数据库备份流程，勿先初始化表结构或创建同名新项目到恢复目标。
 
 ## 备份
 

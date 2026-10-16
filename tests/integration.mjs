@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import assert from "node:assert/strict";
-import { spawn, execFileSync } from "node:child_process";
+import { spawn, spawnSync, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 process.chdir(root);
@@ -31,6 +31,40 @@ const migration = new URL(env.MIGRATION_DATABASE_URL),
 migration.pathname = `/${dbname}`;
 appUrl.pathname = `/${dbname}`;
 const password = crypto.randomBytes(20).toString("hex");
+const projectConfigs = fs.mkdtempSync(
+  path.join(root, ".runtime/test-project-configs-"),
+);
+fs.cpSync("config/projects", projectConfigs, { recursive: true });
+const manifest = JSON.parse(
+  fs.readFileSync(path.join(projectConfigs, "upm/project.json"), "utf8"),
+);
+manifest.workbook = path.join(root, "UPM项目测点数据表.xlsx");
+fs.writeFileSync(
+  path.join(projectConfigs, "upm/project.json"),
+  JSON.stringify(manifest),
+);
+fs.writeFileSync(
+  path.join(projectConfigs, "upm/point-tables.json"),
+  JSON.stringify({
+    fields: { name: { label: "UPM 自定义名称" } },
+    tables: { process: { columns: ["name", "sig_id"] } },
+  }),
+);
+for (const [key, workbook] of [
+  ["second", null],
+  ["broken", "missing.xlsx"],
+]) {
+  fs.mkdirSync(path.join(projectConfigs, key));
+  fs.writeFileSync(
+    path.join(projectConfigs, key, "project.json"),
+    JSON.stringify({
+      ...manifest,
+      key,
+      name: `Script ${key}`,
+      workbook,
+    }),
+  );
+}
 let server;
 const testEnv = {
   ...process.env,
@@ -41,6 +75,7 @@ const testEnv = {
   ADMIN_USERNAME: "test_admin",
   BIND_ADDR: "127.0.0.1:18081",
   RUST_LOG: "warn",
+  PROJECT_CONFIG_DIR: projectConfigs,
 };
 const base = "http://127.0.0.1:18081/api";
 let assertions = 0;
@@ -128,6 +163,83 @@ try {
     username: "test_admin",
     password,
   });
+  equal((await client.call("/projects")).length, 0); // Startup never creates a project.
+  const createFromFile = (key) =>
+    execFileSync("target/debug/protocol-server", ["create-project", key], {
+      env: testEnv,
+      encoding: "utf8",
+    });
+  ok(createFromFile("upm").includes("已创建项目"));
+  const seeded = (await client.call("/projects"))[0];
+  equal(seeded.config_key, "upm");
+  ok(seeded.point_count > 0);
+  const seededUrl = `/projects/${seeded.id}`;
+  let seededGraph = await client.call(`${seededUrl}/topology`);
+  equal(seededGraph.project_config.board_types.length, 5);
+  const upmModel = seededGraph.board_models.find((m) => m.code === "UPM_ARM");
+  const upmProcess = await client.call(
+    `${seededUrl}/board-models/${upmModel.id}/point-tables/process`,
+  );
+  equal(upmProcess.rows.length, 202);
+  equal(upmProcess.definition.fields.name.label, "UPM 自定义名称");
+  equal(upmProcess.definition.columns.join(","), "name,sig_id");
+  equal(
+    (await client.call(`${seededUrl}/point-tables/schema`)).fields.name.label,
+    "UPM 自定义名称",
+  );
+  ok(
+    (await client.call("/point-tables/schema")).fields.name.label !==
+      "UPM 自定义名称",
+  );
+  const savedEdit = await client.call(`${seededUrl}/changes/preview`, "POST", {
+    revision: seededGraph.revision,
+    entity: "data_items",
+    operation: "update",
+    id: seededGraph.data_items[0].id,
+    values: { notes: "saved after creation" },
+  });
+  ok(savedEdit.allowed);
+  await client.call(`${seededUrl}/changes/${savedEdit.id}/commit`, "POST", {});
+  seededGraph = await client.call(`${seededUrl}/topology`);
+  const savedAudit = await client.call(`${seededUrl}/audit`);
+  ok(createFromFile("upm").includes("未覆盖任何数据"));
+  equal(
+    JSON.stringify(await client.call(`${seededUrl}/topology`)),
+    JSON.stringify(seededGraph),
+  );
+  equal(
+    JSON.stringify(await client.call(`${seededUrl}/audit`)),
+    JSON.stringify(savedAudit),
+  );
+  const failed = spawnSync(
+    "target/debug/protocol-server",
+    ["create-project", "broken"],
+    { env: testEnv, encoding: "utf8" },
+  );
+  equal(failed.status, 1);
+  ok(failed.stderr.includes("读取工作簿"));
+  equal((await client.call("/projects")).length, 1); // Failed imports roll back project and models.
+  const simultaneous = () =>
+    new Promise((resolve, reject) => {
+      const child = spawn(
+        "target/debug/protocol-server",
+        ["create-project", "second"],
+        { env: testEnv, stdio: "ignore" },
+      );
+      child.once("error", reject);
+      child.once("exit", (code) =>
+        code === 0 ? resolve() : reject(new Error(`create exited ${code}`)),
+      );
+    });
+  await Promise.all([simultaneous(), simultaneous()]);
+  const scriptedProjects = await client.call("/projects");
+  equal(scriptedProjects.length, 2);
+  const second = scriptedProjects.find((p) => p.config_key === "second");
+  equal(second.point_count, 0);
+  ok(
+    (await client.call(`/projects/${second.id}/point-tables/schema`)).fields
+      .name.label !== "UPM 自定义名称",
+  );
   const p = await client.call("/projects", "POST", {
       name: "Test alpha",
       description: "integration",
@@ -157,6 +269,27 @@ try {
   await e.call("/auth/login", "POST", { username: "engineer", password });
   await v.call("/auth/login", "POST", { username: "viewer", password });
   equal((await e.call("/projects")).length, 1);
+  equal((await e.raw(`${seededUrl}/point-tables/schema`)).status, 403);
+  equal((await v.raw(`${seededUrl}/point-tables/schema`)).status, 403);
+  await client.call(`${seededUrl}/members`, "PUT", {
+    user_id: viewer.id,
+    role: "viewer",
+  });
+  equal(
+    (await v.call(`${seededUrl}/point-tables/schema`)).fields.name.label,
+    "UPM 自定义名称",
+  );
+  equal(
+    (
+      await v.raw(`${seededUrl}/changes/preview`, "POST", {
+        revision: seededGraph.revision,
+        entity: "data_items",
+        operation: "create",
+        values: {},
+      })
+    ).status,
+    403,
+  );
   equal((await e.raw(`/projects/${other.id}/topology`)).status, 403);
   equal(
     (
@@ -1189,4 +1322,5 @@ try {
   }
   await adminDb.query(`DROP DATABASE IF EXISTS "${dbname}" WITH (FORCE)`);
   await adminDb.end();
+  fs.rmSync(projectConfigs, { recursive: true, force: true });
 }

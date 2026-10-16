@@ -4,7 +4,10 @@
 Protocol Studio manages industrial protocol configuration with Rust, Vue 3, TypeScript, and PostgreSQL. Backend modules in `src/` cover authentication, APIs, workbook import, validation, and code generation. `migrations/` contains numbered SQL migrations, views, grants, and row-level security policies. Frontend pages, reusable components, and domain helpers live in `frontend/src/pages/`, `components/`, and `domain/`. Integration and generated-C contract checks live in `tests/`; browser checks use `frontend/browser-check.mjs`. See `config/` for project JSON examples, `scripts/` for local tooling, and `docs/` for architecture and operations.
 
 ## Build, Test, and Development Commands
-- `./scripts/dev.sh`: start the local PostgreSQL 18 environment and application on `127.0.0.1:8080` (Linux x64).
+- `./scripts/init-db.sh`: explicitly initialize local PostgreSQL 18 and apply migrations (Linux x64); creates no business projects.
+- `./scripts/create-project.sh upm`: explicitly create a project from `config/projects/upm/project.json`; repeated execution preserves saved data.
+- `./scripts/dev.sh`: build and start the application on `127.0.0.1:8080`; requires an initialized, running database and does not run migrations.
+- `node scripts/local-db.mjs start` / `stop`: control the existing local database without creating a new one.
 - `npm ci --prefix frontend`: install locked frontend dependencies.
 - `npm run dev --prefix frontend`: start Vite with `/api` proxied to the backend.
 - `npm run build --prefix frontend`: type-check Vue/TypeScript and build frontend assets.

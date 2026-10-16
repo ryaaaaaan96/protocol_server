@@ -129,7 +129,19 @@ pub fn load_definition() -> anyhow::Result<Value> {
     Ok(config)
 }
 pub async fn schema(State(s): State<AppState>, _u: User) -> Json<Value> {
-    Json((*s.point_table_definition).clone())
+    Json(s.project_files.definition(None).clone())
+}
+pub async fn project_schema(
+    State(s): State<AppState>,
+    u: User,
+    Path(pid): Path<i64>,
+) -> Result<Json<Value>> {
+    let mut tx = db::read_snapshot_context(&s.pool, &u, pid).await?;
+    let key: Option<String> = sqlx::query_scalar("SELECT config_key FROM projects WHERE id=$1")
+        .bind(pid)
+        .fetch_one(&mut *tx)
+        .await?;
+    Ok(Json(s.project_files.definition(key.as_deref()).clone()))
 }
 async fn board(tx: &mut Transaction<'_, Postgres>, pid: i64, mid: i64) -> Result<Value> {
     Ok(
@@ -149,10 +161,11 @@ pub async fn read(
     entity(&kind)?;
     let mut tx = db::read_snapshot_context(&s.pool, &u, pid).await?;
     // Repeatable-read also works for viewers, unlike row locks under UPDATE RLS.
-    let revision: i32 = sqlx::query_scalar("SELECT revision FROM projects WHERE id=$1")
-        .bind(pid)
-        .fetch_one(&mut *tx)
-        .await?;
+    let (revision, key): (i32, Option<String>) =
+        sqlx::query_as("SELECT revision,config_key FROM projects WHERE id=$1")
+            .bind(pid)
+            .fetch_one(&mut *tx)
+            .await?;
     board(&mut tx, pid, mid).await?;
     let data: Vec<Value> = if kind == "process" {
         sqlx::query_scalar(r#"
@@ -228,7 +241,7 @@ pub async fn read(
         "SELECT jsonb_build_object('id',id,'name',name,'data_type',data_type,'byte_length',byte_length,'default_value',default_value,'min_value',min_value,'max_value',max_value) FROM data_items WHERE project_id=$1 ORDER BY id", pid).await?);
     Ok(Json(
         json!({"version":1,"revision":revision,"model_id":mid,"kind":kind,
-        "definition":definition(&s.point_table_definition,&kind),"rows":data,"options":options}),
+        "definition":definition(s.project_files.definition(key.as_deref()),&kind),"rows":data,"options":options}),
     ))
 }
 

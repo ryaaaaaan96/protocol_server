@@ -1,0 +1,91 @@
+{
+  "version": 1,
+  "key": "upm",
+  "name": "UPM 协议配置",
+  "description": "AIDC · 本地控制器与 DSP 点表的统一数据空间",
+  "workbook": "../../../UPM项目测点数据表.xlsx",
+  "topology": {
+    "version": 2,
+    "board_types": [
+      {
+        "code": "CSU",
+        "name": "CSU 主控板",
+        "model_code": "CSU"
+      },
+      {
+        "code": "UPM",
+        "name": "UPM 控制板",
+        "model_code": "UPM_ARM"
+      },
+      {
+        "code": "DSP",
+        "name": "DSP 功率板",
+        "model_code": "DSP"
+      },
+      {
+        "code": "IDU_T",
+        "name": "变压器 IDU",
+        "model_code": "IDU_TRANSFORMER"
+      },
+      {
+        "code": "IDU_R",
+        "name": "整流模块 IDU",
+        "model_code": "IDU_RECTIFIER"
+      }
+    ],
+    "root": {
+      "type": "CSU",
+      "quantity": 1
+    },
+    "mounts": [
+      {
+        "parent": "CSU",
+        "child": "UPM",
+        "quantity": 24,
+        "connections": [
+          {
+            "protocol": "MODBUS",
+            "transport": "CANFD"
+          },
+          {
+            "protocol": "UPP",
+            "transport": "CANFD"
+          }
+        ]
+      },
+      {
+        "parent": "UPM",
+        "child": "DSP",
+        "quantity": 8,
+        "connections": [
+          {
+            "protocol": "UPP",
+            "transport": "CAN"
+          }
+        ]
+      },
+      {
+        "parent": "CSU",
+        "child": "IDU_T",
+        "quantity": 1,
+        "connections": [
+          {
+            "protocol": "MODBUS",
+            "transport": "RS485"
+          }
+        ]
+      },
+      {
+        "parent": "CSU",
+        "child": "IDU_R",
+        "quantity": 4,
+        "connections": [
+          {
+            "protocol": "MODBUS",
+            "transport": "RS485"
+          }
+        ]
+      }
+    ]
+  }
+}

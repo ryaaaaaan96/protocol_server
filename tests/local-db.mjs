@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import net from "node:net";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
   startPostgres,
@@ -23,7 +23,7 @@ const native = [
     ".runtime/db-tools/node_modules/@embedded-postgres/linux-x64/native",
   ),
 ].find((p) => fs.existsSync(path.join(p, "bin/pg_ctl")));
-assert.ok(native, "Run scripts/local-db.mjs once to install PostgreSQL");
+assert.ok(native, "Run scripts/init-db.sh once to install PostgreSQL");
 const env = {
   ...process.env,
   LD_LIBRARY_PATH: `${native}/lib:${process.env.LD_LIBRARY_PATH || ""}`,
@@ -51,6 +51,29 @@ const options = {
 const connection = `postgres://postgres@127.0.0.1:${port}/postgres`;
 let db;
 try {
+  // Starting in a fresh checkout must not generate credentials or create a DB.
+  const checkout = path.join(temp, "checkout");
+  fs.mkdirSync(path.join(checkout, "scripts"), { recursive: true });
+  for (const file of ["local-db.mjs", "postgres-control.mjs", "dev.sh"])
+    fs.copyFileSync(
+      path.join(root, "scripts", file),
+      path.join(checkout, "scripts", file),
+    );
+  const cleanEnv = { ...process.env };
+  delete cleanEnv.DATABASE_URL;
+  for (const [command, args] of [
+    [process.execPath, [path.join(checkout, "scripts/local-db.mjs"), "start"]],
+    ["bash", [path.join(checkout, "scripts/dev.sh")]],
+  ]) {
+    const result = spawnSync(command, args, {
+      env: cleanEnv,
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /init-db.sh/);
+    assert.equal(fs.existsSync(path.join(checkout, ".env")), false);
+    assert.equal(fs.existsSync(path.join(checkout, ".runtime")), false);
+  }
   execFileSync(
     path.join(native, "bin/initdb"),
     [
