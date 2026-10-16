@@ -96,11 +96,7 @@ pub async fn snapshot(
         .iter()
         .chain(if computed { VIEWS.iter() } else { [].iter() })
     {
-        let select = if t == "source_records" {
-            "to_jsonb(t)"
-        } else {
-            "to_jsonb(t)"
-        };
+        let select = "to_jsonb(t)";
         g[t] = json!(
             db::all_json(
                 tx,
@@ -126,11 +122,7 @@ pub async fn snapshot(
     Ok(g)
 }
 pub async fn read(State(s): State<AppState>, u: User, Path(pid): Path<i64>) -> Result<Json<Value>> {
-    let mut tx = db::context(&s.pool, &u, Some(pid), false).await?;
-    sqlx::query("SELECT id FROM projects WHERE id=$1 FOR SHARE")
-        .bind(pid)
-        .execute(&mut *tx)
-        .await?;
+    let mut tx = db::read_snapshot_context(&s.pool, &u, pid).await?;
     let mut g = snapshot(&mut tx, pid, true).await?;
     g["validation"] = crate::topology_validation::validate(&g);
     // Raw workbook cells can be large; fetch them on demand from source_records.
@@ -167,6 +159,9 @@ pub struct Change {
     pub values: Value,
 }
 pub async fn apply(tx: &mut Transaction<'_, Postgres>, pid: i64, c: &Change) -> Result<Value> {
+    if crate::point_tables::is_point_entity(&c.entity) {
+        return Box::pin(crate::point_tables::apply(tx, pid, c)).await;
+    }
     if c.entity == "project_config" {
         if c.operation != "update" {
             return Err(AppError::bad("项目 JSON 配置仅支持整体更新"));
@@ -441,7 +436,19 @@ pub async fn commit(
         return Err(AppError::conflict("变更导致关联配置不一致"));
     }
     let effects = impact(&before, &after);
-    db::audit(&mut tx,u.id,Some(pid),&format!("topology.{}",c.operation),&format!("{}:{}",c.entity,row["id"]),Some(json!({"record":if c.entity=="project_config" {Some(json!({"config":before["project_config"]}))}else{find(&before,&c.entity,num(&row,"id")).cloned()},"revision":revision})),Some(json!({"record":if c.operation=="delete" {Value::Null}else{row.clone()},"impact":effects}))).await?;
+    let before_record = if c.entity == "project_config" {
+        Some(json!({"config":before["project_config"]}))
+    } else if crate::point_tables::is_point_entity(&c.entity) {
+        crate::point_tables::audit_before(&before, &c.entity, num(&row, "id"))
+    } else {
+        find(&before, &c.entity, num(&row, "id")).cloned()
+    };
+    db::audit(
+        &mut tx, u.id, Some(pid), &format!("topology.{}", c.operation),
+        &format!("{}:{}", c.entity, row["id"]),
+        Some(json!({"record":before_record,"revision":revision})),
+        Some(json!({"record":if c.operation == "delete" {Value::Null} else {row.clone()},"impact":effects})),
+    ).await?;
     db::touch(&mut tx, pid).await?;
     sqlx::query("DELETE FROM change_previews WHERE id=$1")
         .bind(id)

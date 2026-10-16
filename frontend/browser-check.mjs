@@ -18,6 +18,13 @@ const page = await browser.newPage({
 page.on("pageerror", (e) => errors.push(e.message));
 const nav = page.getByRole("navigation", { name: "项目与板卡导航" });
 const tab = (name) => page.getByRole("tab", { name: new RegExp(`^${name}`) });
+const auxiliary = async (name) => {
+  if (!(await tab(name).isVisible()))
+    await page
+      .getByRole("button", { name: "展开辅助配置", exact: true })
+      .click();
+  await tab(name).click();
+};
 const close = () =>
   page
     .locator("dialog")
@@ -49,7 +56,7 @@ const selectBoard = async (code) => {
   await expect(
     page.getByRole("group", { name: "项目板卡类型协议拓扑" }),
   ).toHaveCount(0);
-  await tab("内部信号表").click();
+  await tab("处理点表").click();
 };
 try {
   await page.goto("/");
@@ -205,14 +212,22 @@ try {
     await expect(
       page.getByRole("button", { name: `选择 ${code} 板卡`, exact: true }),
     ).toHaveAttribute("aria-pressed", "true");
-    await expect(tab("内部信号表")).toContainText(count);
+    await expect(tab("处理点表")).toContainText(count);
+    if (code === "CSU" && activation === "click") {
+      await expect(page.getByRole("tab")).toHaveCount(3);
+      await expect(tab("采集点表")).toBeVisible();
+      await expect(tab("转发点表")).toBeVisible();
+      await expect(
+        page.getByRole("button", { name: "展开辅助配置", exact: true }),
+      ).toBeVisible();
+    }
     if (code.startsWith("IDU_")) {
-      await tab("板间协议").click();
+      await auxiliary("板间协议");
       await expect(tableRows()).toHaveCount(1);
       await expect(tableRows().first()).toContainText(`CSU ↔ ${code}`);
       await expect(tableRows().first()).toContainText("MODBUS");
       await expect(tableRows().first()).toContainText("RS485");
-      await tab("逻辑设备").click();
+      await auxiliary("逻辑设备");
       await page
         .getByRole("button", { name: "新建逻辑设备上下文", exact: true })
         .click();
@@ -236,7 +251,7 @@ try {
   await expect(
     page.getByRole("button", { name: "选择 UPM 板卡", exact: true }),
   ).toHaveAttribute("aria-pressed", "true");
-  await expect(tab("内部信号表")).toContainText("202");
+  await expect(tab("处理点表")).toContainText("202");
   expect(
     await page
       .locator(".sheet-scroll tbody tr")
@@ -251,8 +266,8 @@ try {
     "PASS: topology nodes open their own board details by click/Enter/Space; 5 types, independent IDUs, branching Modbus links and readable tables",
   );
 
-  await tab("采集表").click();
-  await expect(tab("采集表")).toContainText("328");
+  await tab("采集点表").click();
+  await expect(tab("采集点表")).toContainText("328");
   await record().first().click();
   const arm = g.board_models.find((m) => m.code === "UPM_ARM"),
     dsp = g.board_models.find((m) => m.code === "DSP"),
@@ -279,11 +294,54 @@ try {
     "",
   );
   await close();
-  await tab("转发表").click();
-  await expect(tab("转发表")).toContainText("86");
-  for (const name of await record().allTextContents())
-    expect(name).toBe("北向 Modbus 服务");
-  await tab("范围表").click();
+  await page
+    .getByRole("button", { name: "关联处理点", exact: true })
+    .first()
+    .click();
+  await expect(tab("处理点表")).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByLabel("信号名称", { exact: true })).toHaveValue(
+    binding.signal_name,
+  );
+  await expect(page.getByLabel("默认值覆盖", { exact: true })).toBeVisible();
+  await close();
+  await page.getByLabel("搜索当前表格").fill("整流Rect1电压");
+  await expect(record()).toHaveCount(1);
+  await record().first().click();
+  await expect(page.getByLabel("下限覆盖", { exact: true })).toHaveValue("");
+  await expect(page.locator(".point-inheritance")).toContainText("-100");
+  await page.getByLabel("数字 sigID", { exact: true }).fill("60001");
+  await page.getByLabel("下限覆盖", { exact: true }).fill("-99");
+  const processPreviewResponse = page.waitForResponse((r) =>
+    r.url().endsWith("/point-tables/process/preview"),
+  );
+  await page.getByRole("button", { name: "检查关联影响", exact: true }).click();
+  const processPreview = await (await processPreviewResponse).json();
+  expect(processPreview.allowed).toBe(true);
+  expect(
+    processPreview.impact.changes.some((c) => c.entity === "signal_ranges"),
+  ).toBe(true);
+  expect(
+    processPreview.impact.changes.some((c) => c.entity === "v_bindings"),
+  ).toBe(true);
+  await page.screenshot({
+    path: "../.runtime/process-point-preview.png",
+    fullPage: true,
+  });
+  await page.getByLabel("下限覆盖", { exact: true }).fill("-98");
+  await expect(
+    page.getByRole("button", { name: "确认提交", exact: true }),
+  ).toHaveCount(0);
+  await close();
+  console.log(
+    "PASS: three primary tables, stable signal navigation and atomic process/range preview with inherited defaults",
+  );
+  await tab("转发点表").click();
+  await expect(tab("转发点表")).toContainText("86");
+  expect(await record().first().textContent()).toBe(
+    g.v_bindings.find((b) => b.role === "server" && b.model_id === arm.id)
+      .signal_name,
+  );
+  await auxiliary("范围表");
   const range = g.signal_ranges[0],
     signal = g.v_signals.find((s) => s.id === range.signal_id);
   await expect(tableRows().first().locator("td").nth(3)).toHaveText(
@@ -294,7 +352,7 @@ try {
     range.default_value ?? "",
   );
   await close();
-  await tab("板间协议").click();
+  await auxiliary("板间协议");
   await expect(tableRows()).toHaveCount(3);
   await expect(tableRows().nth(0)).toContainText("CSU ↔ UPM");
   await expect(tableRows().nth(0)).toContainText("MODBUS");
@@ -302,14 +360,14 @@ try {
   await expect(tableRows().nth(1)).toContainText("CSU ↔ UPM");
   await expect(tableRows().nth(1)).toContainText("UPP");
   await expect(tableRows().nth(1)).toContainText("CANFD");
-  await tab("协议端点").click();
+  await auxiliary("协议端点");
   await page.getByRole("button", { name: "新建协议端点", exact: true }).click();
   await page.getByLabel("传输方式", { exact: true }).selectOption("CANFD");
   await expect(page.getByLabel("传输方式", { exact: true })).toHaveValue(
     "CANFD",
   );
   await close();
-  await tab("板间协议").click();
+  await auxiliary("板间协议");
   await page
     .getByRole("button", { name: "选择 DSP 板卡", exact: true })
     .click();
@@ -317,16 +375,16 @@ try {
   await expect(tableRows()).toHaveCount(1);
   await expect(tableRows().first()).toContainText("UPM ↔ DSP");
   await expect(page.getByLabel("搜索当前表格")).toHaveValue("");
-  await tab("内部信号表").click();
-  await expect(tab("内部信号表")).toContainText("552");
+  await tab("处理点表").click();
+  await expect(tab("处理点表")).toContainText("552");
   for (const group of await tableRows()
     .locator("td:nth-child(3)")
     .allTextContents())
     expect(group).toBe("DSP 源变量");
-  await tab("板间协议").click();
+  await auxiliary("板间协议");
   await expect(tableRows()).toHaveCount(1);
   await expect(tableRows().first()).toContainText("UPM ↔ DSP");
-  await tab("逻辑设备").click();
+  await auxiliary("逻辑设备");
   await page
     .getByRole("button", { name: "新建逻辑设备上下文", exact: true })
     .click();
@@ -336,11 +394,11 @@ try {
   );
   await close();
   await selectBoard("CSU");
-  await expect(tab("内部信号表")).toContainText("0");
+  await expect(tab("处理点表")).toContainText("0");
   await expect(
     page.getByText("当前表格暂无匹配记录", { exact: true }),
   ).toBeVisible();
-  await tab("逻辑设备").click();
+  await auxiliary("逻辑设备");
   await page
     .getByRole("button", { name: "新建逻辑设备上下文", exact: true })
     .click();
@@ -353,7 +411,7 @@ try {
   );
 
   await selectBoard("UPM");
-  await tab("数据定义").click();
+  await auxiliary("数据定义");
   await page.getByLabel("搜索当前表格").fill("机器型号");
   await record().first().click();
   await page.getByLabel("单位", { exact: true }).fill("预览测试");
@@ -373,7 +431,7 @@ try {
     fullPage: true,
   });
   await close();
-  await tab("板间协议").click();
+  await auxiliary("板间协议");
   await page
     .getByRole("button", { name: "项目 JSON 配置", exact: true })
     .click();
@@ -540,7 +598,7 @@ try {
   await page
     .getByRole("button", { name: "查看 UPM 板卡内部信息", exact: true })
     .click();
-  await tab("板间协议").click();
+  await auxiliary("板间协议");
   await expect(tableRows()).toHaveCount(2);
   await expect(tableRows().first()).toContainText("待配置");
   await page.unroute(topologyRoute);
@@ -557,15 +615,15 @@ try {
   await page.reload();
   await selectBoard("UPM");
   await expect(
-    page.getByRole("button", { name: "新建内部信号", exact: true }),
+    page.getByRole("button", { name: "新建处理点表", exact: true }),
   ).toHaveCount(0);
   await record().first().click();
-  await expect(page.getByLabel("名称", { exact: true })).toBeDisabled();
+  await expect(page.getByLabel("信号名称", { exact: true })).toBeDisabled();
   await expect(
     page.getByRole("button", { name: "检查关联影响", exact: true }),
   ).toHaveCount(0);
   await close();
-  await tab("板间协议").click();
+  await auxiliary("板间协议");
   await page
     .getByRole("button", { name: "项目 JSON 配置", exact: true })
     .click();

@@ -40,6 +40,12 @@ JSON 更新通过现有变更预览/提交事务完成，校验类型唯一性�
 
 ## 采集、处理、转发、range 的关系
 
+业务点表接口由 `src/point_tables.rs` 实现，前端 `PointTable.vue` / `PointEditor.vue` 使用独立契约，不根据数据库表结构生成主业务页面。`process_points`、`collect_points`、`forward_points` 是业务操作名，不新增重复存储表；处理点写入信号及可选的范围覆盖，采集和转发写入各自角色的绑定。底层外键仍是唯一的关联依据。
+
+显示定义在 `config/point-tables.json`：共享字段目录负责名称和控件元数据，三个点表分别声明展示列及编辑字段；Rust 白名单负责读写能力边界。返回的有效值用于显示，`edit_values` 保留真实覆盖值，包括继承用的 `null`。处理点删除与范围删除处于同一事务，被绑定引用时整体回滚；跨板卡移动、端点角色错误和协议不匹配在业务写入口直接拒绝。
+
+点表读取在 REPEATABLE READ / READ ONLY 事务中读取 revision、记录和关联选项，避免把要求 UPDATE 权限的行锁用于只读用户。修改预览和提交保留项目锁、乐观版本检查和审计，复合修改的审计前后记录包含 range。前端按字段目录构建搜索文本索引，并在逻辑设备或端点改变后清理失效的信号与协议字段选择。
+
 ```mermaid
 flowchart LR
   DSP["DSP 板卡协议端点"] -->|"UPP 字段 / 模型 / 偏移"| COLLECT["UPM 采集端点"]

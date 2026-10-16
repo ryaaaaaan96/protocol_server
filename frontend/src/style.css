@@ -3011,6 +3011,33 @@ body {
   gap: 12px;
   padding: 10px 12px 6px;
 }
+.point-settings-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 16px;
+  color: var(--muted);
+  font-size: 14px;
+  border-bottom: 1px solid var(--border);
+}
+.point-settings-toggle > span { min-width: 0; }
+.point-settings-toggle > button { flex-shrink: 0; }
+.point-filter {
+  min-width: 140px;
+  max-width: 240px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+  color: inherit;
+  font: inherit;
+}
+.point-inheritance { margin-bottom: 14px; }
+@media (max-width: 640px) {
+  .point-settings-toggle { flex-wrap: wrap; }
+  .point-filter { max-width: 100%; }
+}
 .sheet-heading h2 {
   font-size: 17px;
   font-weight: 600;

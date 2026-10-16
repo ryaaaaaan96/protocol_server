@@ -23,6 +23,7 @@ import { boardTypes, typeConnections } from "../domain/project";
 import Modal from "../components/Modal.vue";
 import Loading from "../components/Loading.vue";
 import Empty from "../components/Empty.vue";
+import PointTable from "../components/PointTable.vue";
 const props = defineProps<{
   pid: number;
   graph: Row | null;
@@ -57,6 +58,8 @@ function typeSignals(type: Row) {
 const sheetKey = ref(props.mode === "settings" ? "models" : "signals"),
   query = ref(""),
   page = ref(1);
+const advanced = ref(false),
+  pointFocus = ref<number>();
 const edit = ref<{
     entity: string;
     row: Row | null;
@@ -69,6 +72,11 @@ const sheets = computed(() =>
 );
 const sheet = computed<Sheet>(
   () => sheets.value.find((s) => s.key === sheetKey.value) || sheets.value[0],
+);
+const visibleSheets = computed(() =>
+  sheets.value.filter(
+    (s) => props.mode === "settings" || advanced.value || s.pointKind,
+  ),
 );
 const spec = computed(() => specs[sheet.value.entity]);
 const columns = computed(
@@ -98,6 +106,7 @@ watch(
     page.value = 1;
     edit.value = null;
     source.value = null;
+    pointFocus.value = undefined;
   },
 );
 watch(
@@ -111,7 +120,14 @@ watch(
           props.graph!.v_bindings.find((b: Row) => b.id === props.focus!.id)
             ?.role === s.role),
     );
-    if (target) sheetKey.value = target.key;
+    if (target) {
+      sheetKey.value = target.key;
+      if (target.pointKind) {
+        pointFocus.value = props.focus.id;
+        return;
+      }
+      advanced.value = true;
+    }
     const row = props.graph[props.focus.entity]?.find(
       (r: Row) => r.id === props.focus!.id,
     );
@@ -241,6 +257,18 @@ function done(record: Row) {
   emit("done");
   if (entering) emit("board", record.id);
 }
+function pointDone() {
+  pointFocus.value = undefined;
+  emit("done");
+}
+function openProcess(id: number) {
+  sheetKey.value = "signals";
+  pointFocus.value = id;
+}
+function toggleAdvanced() {
+  advanced.value = !advanced.value;
+  if (!advanced.value && !sheet.value.pointKind) sheetKey.value = "signals";
+}
 async function showSource(row: Row) {
   try {
     source.value = await api(`/projects/${props.pid}/sources/${row.id}`);
@@ -294,7 +322,7 @@ function sourceOf(row: Row) {
         :aria-label="board ? '板卡内表格' : '项目共享配置'"
       >
         <button
-          v-for="s in sheets"
+          v-for="s in visibleSheets"
           :key="s.key"
           role="tab"
           :aria-selected="sheetKey === s.key"
@@ -302,159 +330,186 @@ function sourceOf(row: Row) {
           @click="
             sheetKey = s.key;
             query = '';
+            pointFocus = undefined;
           "
         >
           {{ s.label }}<small>{{ entries(s).length }}</small>
         </button>
       </div>
-      <div class="sheet-heading">
-        <h2>{{ sheet.label }}</h2>
-        <span v-if="sheet.role">{{
-          sheet.role === "client"
-            ? "从协议端点采集到本板内部信号"
-            : "将本板内部信号映射到对外协议字段"
-        }}</span
-        ><span v-else-if="sheet.entity === 'signal_ranges'"
-          >显示当前生效的范围值，支持单独覆盖与恢复策略。</span
-        ><span v-else-if="board && sheet.entity === 'data_items'"
-          >显示本板引用的数据定义；新定义在项目共享目录中维护。</span
-        ><span v-else-if="sheet.entity === 'source_records'"
-          >原始单元格和公式 · 尚未明确的板卡来源保留为待映射</span
+      <div v-if="mode === 'board'" class="point-settings-toggle">
+        <span>处理点定义内部数据，采集和转发维护协议映射。</span>
+        <button
+          class="text-button"
+          :aria-expanded="advanced"
+          @click="toggleAdvanced"
         >
-      </div>
-      <div
-        v-if="sheet.entity === 'type_connections'"
-        class="notice type-link-notice"
-      >
-        <span
-          >挂载关系及协议在项目 JSON
-          中维护；同一关系可有多种协议，挂载数量不叠加。</span
-        ><button class="text-button" @click="emit('configuration')">
-          项目 JSON 配置 <ArrowRight :size="15" />
+          {{ advanced ? "收起辅助配置" : "展开辅助配置" }}
         </button>
       </div>
-      <div class="table-toolbar">
-        <div class="search">
-          <Search :size="17" /><input
-            v-model="query"
-            aria-label="搜索当前表格"
-            placeholder="搜索名称、sigID、地址或枚举…"
-          />
+      <PointTable
+        v-if="sheet.pointKind && board && graph"
+        :key="`${board.model_id}:${sheet.pointKind}`"
+        :pid="pid"
+        :model-id="board.model_id"
+        :kind="sheet.pointKind"
+        :revision="graph.revision"
+        :can-write="canWrite"
+        :process-enabled="boardModel?.firmware_profile === 'aidc'"
+        :focus-id="pointFocus"
+        @done="pointDone"
+        @process="openProcess"
+        @error="emit('error', $event)"
+      />
+      <template v-else>
+        <div class="sheet-heading">
+          <h2>{{ sheet.label }}</h2>
+          <span v-if="sheet.role">{{
+            sheet.role === "client"
+              ? "从协议端点采集到本板内部信号"
+              : "将本板内部信号映射到对外协议字段"
+          }}</span
+          ><span v-else-if="sheet.entity === 'signal_ranges'"
+            >显示当前生效的范围值，支持单独覆盖与恢复策略。</span
+          ><span v-else-if="board && sheet.entity === 'data_items'"
+            >显示本板引用的数据定义；新定义在项目共享目录中维护。</span
+          ><span v-else-if="sheet.entity === 'source_records'"
+            >原始单元格和公式 · 尚未明确的板卡来源保留为待映射</span
+          >
         </div>
-        <div class="inline">
-          <span class="muted">{{ filtered.length }} 条</span
-          ><button
-            v-if="board && sheet.entity === 'data_items'"
-            class="button small"
-            @click="emit('settings')"
-          >
-            项目共享目录 <ArrowRight :size="15" /></button
-          ><button
-            v-if="canCreate"
-            class="button primary small"
-            @click="create()"
-          >
-            <Plus :size="16" />新建{{ spec.label }}
+        <div
+          v-if="sheet.entity === 'type_connections'"
+          class="notice type-link-notice"
+        >
+          <span
+            >挂载关系及协议在项目 JSON
+            中维护；同一关系可有多种协议，挂载数量不叠加。</span
+          ><button class="text-button" @click="emit('configuration')">
+            项目 JSON 配置 <ArrowRight :size="15" />
           </button>
         </div>
-      </div>
-      <div class="table-scroll sheet-scroll">
-        <table :aria-label="sheet.label">
-          <thead>
-            <tr>
-              <th class="row-number">#</th>
-              <th v-for="key in columns" :key="key">
-                {{ captions[key] || key }}
-              </th>
-              <th v-if="spec || sheet.entity === 'source_records'">操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="(r, index) in visible"
-              :key="r.id || `${r.route_id}:${r.field_id}`"
+        <div class="table-toolbar">
+          <div class="search">
+            <Search :size="17" /><input
+              v-model="query"
+              aria-label="搜索当前表格"
+              placeholder="搜索名称、sigID、地址或枚举…"
+            />
+          </div>
+          <div class="inline">
+            <span class="muted">{{ filtered.length }} 条</span
+            ><button
+              v-if="board && sheet.entity === 'data_items'"
+              class="button small"
+              @click="emit('settings')"
             >
-              <td class="row-number">{{ (page - 1) * 50 + index + 1 }}</td>
-              <td v-for="(key, i) in columns" :key="key">
-                <button
-                  v-if="i === 0 && spec"
-                  class="text-button record-name"
-                  :title="cell(r, key)"
-                  @click="open(r)"
-                >
-                  {{ cell(r, key) }}</button
-                ><span
-                  v-else
-                  :class="{
-                    mono: [
-                      'resolved_sig_id',
-                      'enum_name',
-                      'effective_address',
-                      'register_address',
-                    ].includes(key),
-                  }"
-                  >{{ cell(r, key) }}</span
-                >
-              </td>
-              <td v-if="spec">
-                <div class="inline">
+              项目共享目录 <ArrowRight :size="15" /></button
+            ><button
+              v-if="canCreate"
+              class="button primary small"
+              @click="create()"
+            >
+              <Plus :size="16" />新建{{ spec.label }}
+            </button>
+          </div>
+        </div>
+        <div class="table-scroll sheet-scroll">
+          <table :aria-label="sheet.label">
+            <thead>
+              <tr>
+                <th class="row-number">#</th>
+                <th v-for="key in columns" :key="key">
+                  {{ captions[key] || key }}
+                </th>
+                <th v-if="spec || sheet.entity === 'source_records'">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="(r, index) in visible"
+                :key="r.id || `${r.route_id}:${r.field_id}`"
+              >
+                <td class="row-number">{{ (page - 1) * 50 + index + 1 }}</td>
+                <td v-for="(key, i) in columns" :key="key">
                   <button
-                    v-if="r.source_sheet && sourceOf(r)"
-                    class="icon-btn"
-                    aria-label="查看来源单元格"
-                    @click="showSource(sourceOf(r))"
-                  >
-                    <FileSpreadsheet :size="17" /></button
-                  ><button
-                    class="icon-btn"
-                    :aria-label="`查看 ${r.name || r.signal_name || r.id} 的配置`"
+                    v-if="i === 0 && spec"
+                    class="text-button record-name"
+                    :title="cell(r, key)"
                     @click="open(r)"
                   >
-                    <ChevronRight :size="17" />
+                    {{ cell(r, key) }}</button
+                  ><span
+                    v-else
+                    :class="{
+                      mono: [
+                        'resolved_sig_id',
+                        'enum_name',
+                        'effective_address',
+                        'register_address',
+                      ].includes(key),
+                    }"
+                    >{{ cell(r, key) }}</span
+                  >
+                </td>
+                <td v-if="spec">
+                  <div class="inline">
+                    <button
+                      v-if="r.source_sheet && sourceOf(r)"
+                      class="icon-btn"
+                      aria-label="查看来源单元格"
+                      @click="showSource(sourceOf(r))"
+                    >
+                      <FileSpreadsheet :size="17" /></button
+                    ><button
+                      class="icon-btn"
+                      :aria-label="`查看 ${r.name || r.signal_name || r.id} 的配置`"
+                      @click="open(r)"
+                    >
+                      <ChevronRight :size="17" />
+                    </button>
+                  </div>
+                </td>
+                <td v-else-if="sheet.entity === 'source_records'">
+                  <button class="text-button" @click="showSource(r)">
+                    查看单元格与公式
                   </button>
-                </div>
-              </td>
-              <td v-else-if="sheet.entity === 'source_records'">
-                <button class="text-button" @click="showSource(r)">
-                  查看单元格与公式
-                </button>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <Empty
-        v-if="!visible.length"
-        title="当前表格暂无匹配记录"
-        :detail="
-          sheet.role === 'client'
-            ? '此板卡的采集绑定会显示在这里。'
-            : sheet.role === 'server'
-              ? '此板卡的普通转发绑定会显示在这里；地址段透传单独配置。'
-              : '调整搜索，或添加当前板卡需要的配置。'
-        "
-      />
-      <div class="pagination">
-        <span>共 {{ filtered.length }} 条 · 每页 50 条</span>
-        <div class="inline">
-          <button
-            class="icon-btn"
-            :disabled="page <= 1"
-            aria-label="上一页"
-            @click="page--"
-          >
-            <ChevronLeft :size="18" /></button
-          ><span>{{ page }} / {{ pages }}</span
-          ><button
-            class="icon-btn"
-            :disabled="page >= pages"
-            aria-label="下一页"
-            @click="page++"
-          >
-            <ChevronRight :size="18" />
-          </button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
         </div>
-      </div>
+        <Empty
+          v-if="!visible.length"
+          title="当前表格暂无匹配记录"
+          :detail="
+            sheet.role === 'client'
+              ? '此板卡的采集绑定会显示在这里。'
+              : sheet.role === 'server'
+                ? '此板卡的普通转发绑定会显示在这里；地址段透传单独配置。'
+                : '调整搜索，或添加当前板卡需要的配置。'
+          "
+        />
+        <div class="pagination">
+          <span>共 {{ filtered.length }} 条 · 每页 50 条</span>
+          <div class="inline">
+            <button
+              class="icon-btn"
+              :disabled="page <= 1"
+              aria-label="上一页"
+              @click="page--"
+            >
+              <ChevronLeft :size="18" /></button
+            ><span>{{ page }} / {{ pages }}</span
+            ><button
+              class="icon-btn"
+              :disabled="page >= pages"
+              aria-label="下一页"
+              @click="page++"
+            >
+              <ChevronRight :size="18" />
+            </button>
+          </div>
+        </div>
+      </template>
     </section>
   </template>
   <ChangeEditor

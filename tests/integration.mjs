@@ -416,6 +416,222 @@ try {
     callback: "upp_passthrough_dsp1_callback",
   });
   let g = await graph();
+  // Business point tables have independent contracts; a process edit spans signal + range atomically.
+  const pointUrl = `${url}/board-models/${am.id}/point-tables`;
+  const pointPreview = async (
+    kind,
+    id,
+    values,
+    operation = "update",
+    who = e,
+    base = pointUrl,
+  ) => {
+    const revision = (await who.call(`${base}/${kind}`)).revision;
+    return who.call(`${base}/${kind}/preview`, "POST", {
+      revision,
+      operation,
+      id,
+      values,
+    });
+  };
+  equal((await new Client().raw("/point-tables/schema")).status, 401);
+  equal((await e.call("/point-tables/schema")).version, 1);
+  equal((await e.raw(`${pointUrl}/missing`)).status, 404);
+  equal(
+    (await e.raw(`${url}/board-models/999999/point-tables/process`)).status,
+    404,
+  );
+  equal(
+    (
+      await e.raw(
+        `/projects/${other.id}/board-models/${am.id}/point-tables/process`,
+      )
+    ).status,
+    403,
+  );
+  const processing = await v.call(`${pointUrl}/process`);
+  equal(processing.rows.length, 1);
+  equal(processing.rows[0].collection_count, 1);
+  equal(processing.rows[0].forward_count, 2);
+  equal(processing.rows[0].default_value, "10");
+  equal(processing.rows[0].edit_values.default_value, null);
+  equal(processing.rows[0].edit_values.manual_restore, true);
+  ok(processing.rows[0].contexts.includes("11"));
+  ok(processing.options.signals.every((s) => s.group_id === group.id));
+  equal(
+    (
+      await v.raw(`${pointUrl}/process/preview`, "POST", {
+        revision: processing.revision,
+        operation: "update",
+        id: sig.id,
+        values: { sig_id: 2601 },
+      })
+    ).status,
+    403,
+  );
+  const collected = await e.call(`${pointUrl}/collect`);
+  const forwarded = await e.call(`${pointUrl}/forward`);
+  equal(collected.rows.length, 1);
+  equal(forwarded.rows.length, 2);
+  equal(collected.rows[0].signal_name, "ARM电压");
+  equal(collected.rows[0].field_name, "电压字段");
+  const processChange = await pointPreview("process", sig.id, {
+    sig_id: 2601,
+    default_value: "12",
+    min_value: "1",
+    max_value: "99",
+  });
+  ok(processChange.allowed);
+  equal((await graph()).signals.find((s) => s.id === sig.id).sig_id, 2501);
+  equal((await e.call(`${pointUrl}/process`)).rows[0].default_value, "10");
+  await commit(processChange);
+  const pointAudit = (await e.call(`${url}/audit`)).find(
+    (a) => a.entity === `process_points:${sig.id}`,
+  );
+  equal(pointAudit.before_data.record.range.default_value, null);
+  equal(pointAudit.after_data.record.range.default_value, "12");
+  const updated = await e.call(`${pointUrl}/process`);
+  equal(updated.rows[0].resolved_sig_id, 2601);
+  equal(updated.rows[0].default_value, "12");
+  equal(updated.rows[0].manual_restore, true);
+  ok(
+    (await e.call(`${pointUrl}/forward`)).rows.every(
+      (r) => r.resolved_sig_id === 2601,
+    ),
+  );
+  equal((await graph()).signals.find((s) => s.id === bsig.id).sig_id, 88);
+  const invalidRange = await pointPreview("process", sig.id, {
+    sig_id: 2602,
+    min_value: "100",
+    max_value: "50",
+  });
+  equal(invalidRange.allowed, false);
+  equal((await e.call(`${pointUrl}/process`)).rows[0].resolved_sig_id, 2601);
+  equal((await e.call(`${pointUrl}/process`)).rows[0].min_value, "1");
+  equal(
+    (await pointPreview("process", sig.id, { effective_address: 44 })).allowed,
+    false,
+  );
+  equal(
+    (await pointPreview("process", bsig.id, { group_id: group.id })).allowed,
+    false,
+  );
+  equal(
+    (
+      await pointPreview("collect", collected.rows[0].id, {
+        context_id: bctx.id,
+      })
+    ).allowed,
+    false,
+  );
+  equal(
+    (
+      await pointPreview("collect", collected.rows[0].id, {
+        field_id: north.id,
+      })
+    ).allowed,
+    false,
+  );
+  equal(
+    (
+      await pointPreview("collect", collected.rows[0].id, {
+        endpoint_id: nep.id,
+      })
+    ).allowed,
+    false,
+  );
+  equal(
+    (await pointPreview("forward", collected.rows[0].id, { signal_id: sig.id }))
+      .allowed,
+    false,
+  );
+  equal(
+    (await pointPreview("forward", forwarded.rows[0].id, { poll_interval: 3 }))
+      .allowed,
+    false,
+  );
+  equal((await pointPreview("process", sig.id, {}, "delete")).allowed, false);
+  equal((await e.call(`${pointUrl}/process`)).rows[0].default_value, "12");
+  const restored = await pointPreview("process", sig.id, {
+    sig_id: 2501,
+    default_value: null,
+    min_value: null,
+    max_value: null,
+  });
+  ok(restored.allowed);
+  await commit(restored);
+  equal((await e.call(`${pointUrl}/process`)).rows[0].default_value, "10");
+  const freshPoint = await pointPreview(
+    "process",
+    null,
+    {
+      name: "Temporary point",
+      group_id: group.id,
+      data_item_id: data.id,
+      enum_name: "TEMP_POINT",
+      sig_id: 2603,
+      default_value: "15",
+      manual_restore: true,
+    },
+    "create",
+  );
+  ok(freshPoint.allowed);
+  const newPoint = (await commit(freshPoint)).record;
+  equal(newPoint.range.default_value, "15");
+  const extraField = await edit("protocol_fields", {
+    contract_id: mb.id,
+    data_item_id: data.id,
+    name: "Temporary alias",
+    address_mode: "manual",
+    address: 300,
+    register_type: 4,
+  });
+  const newMappingPreview = await pointPreview(
+    "forward",
+    null,
+    {
+      endpoint_id: nep.id,
+      context_id: ctx.id,
+      field_id: extraField.id,
+      signal_id: newPoint.id,
+    },
+    "create",
+  );
+  ok(newMappingPreview.allowed);
+  const newMapping = (await commit(newMappingPreview)).record;
+  equal(
+    (await e.call(`${pointUrl}/forward`)).rows.find(
+      (r) => r.id === newMapping.id,
+    ).signal_name,
+    "Temporary point",
+  );
+  equal(
+    (await pointPreview("process", newPoint.id, {}, "delete")).allowed,
+    false,
+  );
+  await commit(await pointPreview("forward", newMapping.id, {}, "delete"));
+  await commit(await preview("protocol_fields", {}, extraField.id, "delete"));
+  const removePoint = await pointPreview("process", newPoint.id, {}, "delete");
+  ok(removePoint.allowed);
+  await commit(removePoint);
+  equal((await e.call(`${pointUrl}/process`)).rows.length, 1);
+  ok(!(await graph()).signal_ranges.some((r) => r.signal_id === newPoint.id));
+  const stalePoint = await pointPreview("collect", collected.rows[0].id, {
+    poll_interval: 4,
+  });
+  ok(stalePoint.allowed);
+  const anotherChange = await pointPreview("collect", collected.rows[0].id, {
+    poll_interval: 5,
+  });
+  await commit(anotherChange);
+  equal(
+    (await e.raw(`${url}/changes/${stalePoint.id}/commit`, "POST", {})).status,
+    409,
+  );
+  await commit(
+    await pointPreview("collect", collected.rows[0].id, { poll_interval: 3 }),
+  );
+  g = await graph();
   equal(g.v_protocol_fields.find((f) => f.id === f2.id).effective_address, 8);
   equal(
     g.v_passthrough_fields.find((f) => f.field_id === f2.id).register_address,

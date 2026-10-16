@@ -5,6 +5,7 @@ mod db;
 mod error;
 mod importer;
 mod model;
+mod point_tables;
 mod project_config;
 mod sql_workspace;
 mod topology;
@@ -32,6 +33,7 @@ pub struct AppState {
     pub pool: PgPool,
     pub secure_cookie: bool,
     pub dummy_hash: String,
+    pub point_table_definition: std::sync::Arc<serde_json::Value>,
 }
 
 async fn csrf(request: Request, next: Next) -> std::result::Result<Response, StatusCode> {
@@ -99,12 +101,22 @@ async fn main() -> anyhow::Result<()> {
         pool,
         secure_cookie: std::env::var("COOKIE_SECURE").is_ok_and(|v| v == "true"),
         dummy_hash,
+        point_table_definition: std::sync::Arc::new(point_tables::load_definition()?),
     };
     let api = Router::new()
         .route("/health", get(api::health))
         .route("/auth/login", post(auth::login))
         .route("/auth/me", get(auth::me))
         .route("/auth/logout", post(auth::logout))
+        .route("/point-tables/schema", get(point_tables::schema))
+        .route(
+            "/projects/{pid}/board-models/{mid}/point-tables/{kind}",
+            get(point_tables::read),
+        )
+        .route(
+            "/projects/{pid}/board-models/{mid}/point-tables/{kind}/preview",
+            post(point_tables::preview),
+        )
         .route("/project-template", get(project_config::template))
         .route("/projects/{pid}/configuration", get(project_config::read))
         .route("/projects", get(api::projects).post(api::create_project))

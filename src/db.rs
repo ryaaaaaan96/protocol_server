@@ -11,7 +11,28 @@ pub async fn context(
     project: Option<i64>,
     write: bool,
 ) -> Result<Transaction<'static, Postgres>> {
+    begin_context(pool, user, project, write, false).await
+}
+pub async fn read_snapshot_context(
+    pool: &PgPool,
+    user: &User,
+    project: i64,
+) -> Result<Transaction<'static, Postgres>> {
+    begin_context(pool, user, Some(project), false, true).await
+}
+async fn begin_context(
+    pool: &PgPool,
+    user: &User,
+    project: Option<i64>,
+    write: bool,
+    snapshot: bool,
+) -> Result<Transaction<'static, Postgres>> {
     let mut tx = pool.begin().await?;
+    if snapshot {
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *tx)
+            .await?;
+    }
     sqlx::query("SELECT set_config('app.user_id',$1,true), set_config('app.project_id',$2,true)")
         .bind(user.id.to_string())
         .bind(project.map(|v| v.to_string()).unwrap_or_default())

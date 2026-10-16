@@ -1,0 +1,281 @@
+{
+  "version": 1,
+  "fields": {
+    "name": {
+      "label": "信号名称"
+    },
+    "group_name": {
+      "label": "信号组"
+    },
+    "resolved_sig_id": {
+      "label": "sigID"
+    },
+    "enum_name": {
+      "label": "枚举"
+    },
+    "data_type": {
+      "label": "内部类型"
+    },
+    "byte_length": {
+      "label": "内部字节数"
+    },
+    "unit": {
+      "label": "单位"
+    },
+    "default_value": {
+      "label": "默认值覆盖",
+      "nullable": true,
+      "hint": "留空继承数据定义；表格展示生效值。",
+      "column_label": "默认值"
+    },
+    "min_value": {
+      "label": "下限覆盖",
+      "nullable": true,
+      "hint": "留空继承数据定义；表格展示生效值。",
+      "column_label": "下限"
+    },
+    "max_value": {
+      "label": "上限覆盖",
+      "nullable": true,
+      "hint": "留空继承数据定义；表格展示生效值。",
+      "column_label": "上限"
+    },
+    "flags": {
+      "label": "处理标志",
+      "default": "0"
+    },
+    "callback": {
+      "label": "回调函数",
+      "default": "NULL"
+    },
+    "collection_count": {
+      "label": "采集绑定数"
+    },
+    "forward_count": {
+      "label": "转发绑定数"
+    },
+    "group_id": {
+      "label": "信号组",
+      "reference": "groups",
+      "type": "number"
+    },
+    "data_item_id": {
+      "label": "数据来源定义",
+      "reference": "data",
+      "type": "number",
+      "hint": "定义提供类型、长度、单位和默认范围，可由多个点共享。"
+    },
+    "sig_id": {
+      "label": "数字 sigID",
+      "type": "number",
+      "nullable": true,
+      "hint": "数字与公共符号二选一；引用通过固定记录 ID 关联。"
+    },
+    "sig_symbol": {
+      "label": "公共 sigID 符号",
+      "nullable": true
+    },
+    "internal_type": {
+      "label": "内部类型覆盖",
+      "nullable": true,
+      "options": ["U8", "U16", "S16", "U32", "S32", "F32", "STRING"]
+    },
+    "process_enabled": {
+      "label": "加入处理表",
+      "type": "boolean",
+      "default": true
+    },
+    "boot_restore": {
+      "label": "上电恢复默认值",
+      "type": "boolean",
+      "default": false
+    },
+    "manual_restore": {
+      "label": "允许手动恢复默认值",
+      "type": "boolean",
+      "default": false
+    },
+    "contexts": {
+      "label": "设备上下文"
+    },
+    "range_inherited": {
+      "label": "继承范围"
+    },
+    "signal_name": {
+      "label": "处理点"
+    },
+    "context_name": {
+      "label": "逻辑设备"
+    },
+    "dev_id": {
+      "label": "dev_id"
+    },
+    "endpoint_name": {
+      "label": "协议端点"
+    },
+    "protocol": {
+      "label": "协议"
+    },
+    "transport": {
+      "label": "传输方式"
+    },
+    "field_name": {
+      "label": "协议字段"
+    },
+    "upp_model": {
+      "label": "UPP 模型"
+    },
+    "effective_address": {
+      "label": "协议地址 / 偏移"
+    },
+    "effective_type": {
+      "label": "通信类型"
+    },
+    "effective_length": {
+      "label": "通信字节数"
+    },
+    "scale": {
+      "label": "协议系数"
+    },
+    "poll_interval": {
+      "label": "轮询周期参数",
+      "type": "number",
+      "default": 0
+    },
+    "endpoint_id": {
+      "label": "协议端点",
+      "reference": "endpoints",
+      "type": "number"
+    },
+    "context_id": {
+      "label": "逻辑设备",
+      "reference": "contexts",
+      "type": "number"
+    },
+    "signal_id": {
+      "label": "本地内部信号",
+      "reference": "signals",
+      "type": "number"
+    },
+    "field_id": {
+      "label": "协议字段",
+      "reference": "fields",
+      "type": "number"
+    },
+    "set_priority": {
+      "label": "设置优先级",
+      "type": "number",
+      "default": 0
+    },
+    "scan_priority": {
+      "label": "扫描优先级",
+      "type": "number",
+      "default": 0
+    },
+    "address_length": {
+      "label": "地址长度"
+    },
+    "register_type": {
+      "label": "寄存器区"
+    },
+    "access": {
+      "label": "读写属性"
+    },
+    "byte_order": {
+      "label": "字节序"
+    },
+    "port": {
+      "label": "端口"
+    }
+  },
+  "tables": {
+    "process": {
+      "label": "处理点表",
+      "description": "维护内部信号及 range；采集与转发通过固定记录 ID 引用。",
+      "columns": [
+        "name",
+        "group_name",
+        "resolved_sig_id",
+        "enum_name",
+        "data_type",
+        "byte_length",
+        "unit",
+        "default_value",
+        "min_value",
+        "max_value",
+        "flags",
+        "callback",
+        "collection_count",
+        "forward_count"
+      ],
+      "editor": [
+        "name",
+        "group_id",
+        "data_item_id",
+        "enum_name",
+        "sig_id",
+        "sig_symbol",
+        "internal_type",
+        "flags",
+        "callback",
+        "process_enabled",
+        "default_value",
+        "min_value",
+        "max_value",
+        "boot_restore",
+        "manual_restore"
+      ]
+    },
+    "collect": {
+      "label": "采集点表",
+      "description": "将下游协议字段关联到本板处理点；切换设备或端点会重新检查引用。",
+      "columns": [
+        "signal_name",
+        "context_name",
+        "dev_id",
+        "resolved_sig_id",
+        "endpoint_name",
+        "protocol",
+        "transport",
+        "field_name",
+        "upp_model",
+        "effective_address",
+        "effective_type",
+        "effective_length",
+        "data_type",
+        "scale",
+        "poll_interval"
+      ],
+      "editor": [
+        "endpoint_id",
+        "context_id",
+        "signal_id",
+        "field_id",
+        "poll_interval",
+        "set_priority",
+        "scan_priority"
+      ]
+    },
+    "forward": {
+      "label": "转发点表",
+      "description": "将处理点提供给对外协议；同一处理点可关联多种协议和多个地址。",
+      "columns": [
+        "signal_name",
+        "context_name",
+        "dev_id",
+        "resolved_sig_id",
+        "endpoint_name",
+        "protocol",
+        "transport",
+        "field_name",
+        "upp_model",
+        "effective_address",
+        "effective_type",
+        "effective_length",
+        "access",
+        "scale"
+      ],
+      "editor": ["endpoint_id", "context_id", "signal_id", "field_id"]
+    }
+  }
+}

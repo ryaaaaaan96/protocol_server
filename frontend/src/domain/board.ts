@@ -1,4 +1,5 @@
 import type { Row } from "../api";
+import type { PointKind } from "./pointTables";
 
 export type Sheet = {
   key: string;
@@ -7,18 +8,26 @@ export type Sheet = {
   role?: "client" | "server";
   view?: string;
   columns?: string[];
+  pointKind?: PointKind;
 };
 export const boardSheets: Sheet[] = [
-  { key: "signals", label: "内部信号表", entity: "signals" },
+  {
+    key: "signals",
+    label: "处理点表",
+    entity: "signals",
+    pointKind: "process",
+  },
   {
     key: "collect",
-    label: "采集表",
+    label: "采集点表",
+    pointKind: "collect",
     entity: "signal_bindings",
     role: "client",
   },
   {
     key: "transmit",
-    label: "转发表",
+    label: "转发点表",
+    pointKind: "forward",
     entity: "signal_bindings",
     role: "server",
   },

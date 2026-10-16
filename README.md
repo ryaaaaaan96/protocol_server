@@ -45,6 +45,25 @@ python3 scripts/seed-workbook.py
 
 「项目设置」维护共享模板、协议、数据目录和工作簿来源。修改共享数据时，预览列出受影响板卡类型及挂载数量。编辑关联项随类型、端点和逻辑设备联动；校验问题直接跳转到所属板卡的内部信息页。
 
+板卡内部信息默认展示 **处理点表、采集点表、转发点表**。处理点表合并展示信号和范围，可在一次事务中修改 sigID 与 range；采集、转发表按信号名称展示完整协议映射，支持按逻辑设备筛选及跳转到关联处理点。协议字段、端点、透传和来源定义等位于「展开辅助配置」。
+
+## 点表展示配置与接口
+
+[config/point-tables.json](config/point-tables.json) 独立维护字段标题、提示、显示列及编辑顺序：`fields` 是共享字段目录，`tables.process/collect/forward.columns` 是展示列，`editor` 是可编辑字段。调整这些配置后重启后端即可生效，不需要重新编译前端。通过 `POINT_TABLE_CONFIG` 可指定文件路径；默认路径相对于进程工作目录。启动时检查版本、字段标识和重复列，计算字段不能配置成可写字段。
+
+例如，在 `tables.process.columns` 中加入已有的 `contexts`，即可显示处理点被哪些逻辑设备复用；添加 `range_inherited` 可显示哪些范围值继承数据定义。`label` 控制编辑标题，`column_label` 可单独设置显示列标题。新增存储属性或协议行为仍需扩展后端字段契约和校验，JSON 配置不会自动修改数据库结构。
+
+业务接口与数据库实体分离：
+
+| 接口 | 用途 |
+| --- | --- |
+| `GET /api/point-tables/schema` | 获取字段目录和三个点表的展示定义 |
+| `GET /api/projects/{pid}/board-models/{mid}/point-tables/{kind}` | 获取指定板卡的点表、有效值、原始编辑值和关联选项 |
+| `POST /api/projects/{pid}/board-models/{mid}/point-tables/{kind}/preview` | 校验业务修改，预览所有关联影响 |
+| `POST /api/projects/{pid}/changes/{id}/commit` | 按预览版本提交事务 |
+
+`kind` 为 `process`、`collect` 或 `forward`；修改体为 `{revision, operation, id, values}`。`values` 只提交改变的字段，`null` 表示恢复范围继承，省略字段表示保持原值。读接口使用 PostgreSQL 只读一致性快照；写接口检查项目权限、板卡归属、端点角色、协议契约、上下文与信号组匹配。绑定始终引用信号记录 ID，修改 sigID 不改变关系。
+
 ## 项目 JSON 配置
 
 [config/project.example.json](config/project.example.json) 定义五种板卡及四条挂载关系：每个 CSU 挂载 24 个 UPM、1 个变压器 IDU、4 个整流模块 IDU；每个 UPM 挂载 8 个 DSP。拓扑按父子关系自动分支，每类只显示一个节点，数量不复制点表或展开成数百个节点。CSU ↔ UPM 同时配置 Modbus / CAN FD 与 UPP / CAN FD；UPM ↔ DSP 为 UPP / CAN；CSU 与两类 IDU 均为 Modbus RTU / RS485。变压器 IDU（`IDU_T`，模板 `IDU_TRANSFORMER`）和整流模块 IDU（`IDU_R`，模板 `IDU_RECTIFIER`）分别维护独立点表；新增模板为空，具体寄存器、地址与内部信号需按实际点表配置。

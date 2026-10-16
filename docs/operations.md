@@ -10,6 +10,7 @@
 | BIND_ADDR | Rust 监听地址，默认 127.0.0.1:8080 |
 | COOKIE_SECURE | HTTPS 环境设为 true |
 | STATIC_DIR | 生产前端目录，默认 frontend/dist |
+| POINT_TABLE_CONFIG | 点表展示配置路径，默认 config/point-tables.json；修改后重启后端生效 |
 
 不要把迁移管理员连接作为运行连接。本版迁移给名称为 `protocol_app` 的角色授权；如采用其他角色名，需在部署时单独授予等价权限并测试 RLS。
 
