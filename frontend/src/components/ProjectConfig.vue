@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { ref, onMounted, watch } from "vue";
-import { api, type Row } from "../api";
+import { api, revisionConflict, type Row } from "../api";
 import Modal from "./Modal.vue";
 import { Upload, Download, FileJson } from "@lucide/vue";
 const props = defineProps<{ pid: number; graph: Row; canWrite: boolean }>();
-const emit = defineEmits<{ close: []; done: [] }>();
+const emit = defineEmits<{ close: []; done: []; error: [message:string]; conflict: [] }>();
 const value = ref(""),
   error = ref(""),
   busy = ref(false),
@@ -18,6 +18,8 @@ onMounted(async () => {
     );
   } catch (e) {
     error.value = (e as Error).message;
+    emit("error", error.value);
+    if (revisionConflict(e)) emit("conflict");
   }
 });
 watch(value, () => {
@@ -63,8 +65,11 @@ async function review() {
         values: JSON.parse(value.value),
       },
     );
+    if (preview.value && !preview.value.allowed) emit("error", preview.value.errors.map((e:Row) => e.message).join("；"));
   } catch (e) {
     error.value = (e as Error).message;
+    emit("error", error.value);
+    if (revisionConflict(e)) emit("conflict");
   } finally {
     busy.value = false;
   }
@@ -80,6 +85,8 @@ async function commit() {
     emit("done");
   } catch (e) {
     error.value = (e as Error).message;
+    emit("error", error.value);
+    if (revisionConflict(e)) emit("conflict");
     preview.value = null;
   } finally {
     busy.value = false;

@@ -1,0 +1,105 @@
+import { expect } from "@playwright/test";
+
+// Real reads/previews only. Group and forwarding editors must preserve project data.
+export async function checkPointGroups(page, { pid, graph: g }) {
+  const model = g.board_models.find(m => m.code === "UPM_ARM");
+  const group = g.signal_groups.find(s => s.model_id === model.id && s.code === "DSP_PROXY");
+  const local = g.signal_groups.find(s => s.model_id === model.id && s.code === "ARM_LOCAL");
+  const groups = page.getByRole("group", { name: "点表分组", exact: true });
+  const dsp = groups.getByRole("button", { name: "DSP · 下级 DSP 数据", exact: true });
+  const all = groups.getByRole("button", { name: "全部分组", exact: true });
+  const tab = name => page.getByRole("tab", { name: new RegExp(`^${name}`) });
+  const close = async () => {
+    page.once("dialog", d => d.accept());
+    await page.locator("dialog").last().getByRole("button", { name: "关闭", exact: true }).last().click();
+    page.removeAllListeners("dialog");
+  };
+  await dsp.click();
+  await expect(dsp).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".point-group-contexts")).toContainText("11");
+  await expect(page.locator(".point-group-contexts")).toContainText("18");
+  const expected = new Set(g.signals.filter(s => s.group_id === group.id).map(s => String(s.id)));
+  await expect(page.locator(".sheet-scroll tbody tr").first()).toBeVisible();
+  expect((await page.locator(".sheet-scroll tbody tr").evaluateAll(rs => rs.map(r => r.dataset.rowId))).every(id => expected.has(id))).toBe(true);
+  await expect(page.locator(".drag-handle").first()).toBeEnabled();
+  await page.getByRole("button", { name: "新建处理点表", exact: true }).click();
+  await expect(page.locator("dialog").getByLabel("点表分组", { exact: true })).toHaveValue(String(group.id));
+  await expect(page.locator("dialog").getByLabel("点表分组", { exact: true })).toBeDisabled();
+  await close();
+
+  await page.locator(".sheet-scroll .record-name").first().click();
+  await page.getByLabel("信号名称", { exact: true }).fill("分组未保存检查");
+  page.once("dialog", d => d.dismiss());
+  await groups.getByRole("button", { name: "LOCAL · 本机数据", exact: true }).click();
+  await expect(dsp).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByLabel("信号名称", { exact: true })).toHaveValue("分组未保存检查");
+  await page.getByRole("button", { name: "取消修改", exact: true }).click();
+
+  let signal = g.signals.find(s => s.group_id === group.id);
+  await page.getByLabel("搜索当前表格").fill(signal.name);
+  let signalRow = page.locator(`.sheet-scroll tr[data-row-id="${signal.id}"]`);
+  await signalRow.getByRole("button", { name: "详细配置", exact: true }).click();
+  await page.getByLabel("信号名称", { exact: true }).fill(`${signal.name} 分组预览`);
+  const response = page.waitForResponse(r => r.url().endsWith("/point-tables/process/preview"));
+  await page.getByRole("button", { name: "检查关联影响", exact: true }).click();
+  const preview = await (await response).json();
+  expect(preview.allowed).toBe(true);
+  expect(preview.impact.affected_contexts.map(c => c.id).sort()).toEqual(g.device_contexts.filter(c => c.group_id === group.id).map(c => c.id).sort());
+  const commitRoute = `**/api/projects/${pid}/changes/*/commit`;
+  await page.route(commitRoute, route => route.fulfill({ json: { merged: false, revision: g.revision + 1 } }));
+  await page.getByRole("button", { name: "确认提交", exact: true }).click();
+  await expect(page.locator("dialog")).toHaveCount(0);
+  await expect(dsp).toHaveAttribute("aria-pressed", "true");
+  await expect(signalRow).toBeVisible();
+  await page.unroute(commitRoute);
+
+  await signalRow.getByRole("button", { name: "转发配置", exact: true }).click();
+  let panel = page.locator("dialog").first();
+  await expect(panel.getByText("当前表格暂无匹配记录", { exact: true })).toBeVisible();
+  await panel.getByRole("button", { name: "新建转发点表", exact: true }).click();
+  const dspEditor = page.locator("dialog").last();
+  await expect(dspEditor.getByLabel("本地内部信号", { exact: true })).toHaveValue(String(signal.id));
+  const dspContextIds = await dspEditor.getByLabel("逻辑设备", { exact: true }).locator("option").evaluateAll(os => os.map(o => o.value).filter(Boolean).map(Number));
+  expect(dspContextIds.sort()).toEqual(g.device_contexts.filter(c => c.group_id === group.id).map(c => c.id).sort());
+  await close();
+  await panel.getByRole("button", { name: "关闭转发配置", exact: true }).click();
+  await groups.getByRole("button", { name: "LOCAL · 本机数据", exact: true }).click();
+  const binding = g.v_bindings.find(b => b.model_id === model.id && b.role === "server");
+  signal = g.signals.find(s => s.id === binding.signal_id);
+  await page.getByLabel("搜索当前表格").fill(signal.name);
+  signalRow = page.locator(`.sheet-scroll tr[data-row-id="${signal.id}"]`);
+  await signalRow.getByRole("button", { name: "转发配置", exact: true }).click();
+  panel = page.locator("dialog").first();
+  await expect(panel.getByRole("heading").first()).toContainText(signal.name);
+  const records = g.v_bindings.filter(b => b.role === "server" && b.signal_id === signal.id);
+  await expect(panel.locator(".sheet-scroll tbody tr")).toHaveCount(records.length);
+  const existingRows = await panel.locator(".sheet-scroll tbody tr").evaluateAll(rs => rs.map(r => Number(r.dataset.rowId)));
+  expect(existingRows.sort()).toEqual(records.map(r => r.id).sort());
+  await panel.getByRole("button", { name: "新建转发点表", exact: true }).click();
+  const editor = page.locator("dialog").last();
+  await expect(editor.getByLabel("本地内部信号", { exact: true })).toHaveValue(String(signal.id));
+  await expect(editor.getByLabel("本地内部信号", { exact: true })).toBeDisabled();
+  const contextIds = await editor.getByLabel("逻辑设备", { exact: true }).locator("option").evaluateAll(os => os.map(o => o.value).filter(Boolean).map(Number));
+  expect(contextIds.sort()).toEqual(g.device_contexts.filter(c => c.group_id === signal.group_id).map(c => c.id).sort());
+  const target = g.device_contexts.find(c => c.id === binding.context_id);
+  await editor.getByLabel("协议端点", { exact: true }).selectOption(String(binding.endpoint_id));
+  await editor.getByLabel("逻辑设备", { exact: true }).selectOption(String(target.id));
+  await editor.getByLabel("协议字段", { exact: true }).selectOption(String(binding.field_id));
+  const forwardResponse = page.waitForResponse(r => r.url().endsWith("/point-tables/forward/preview"));
+  await editor.getByRole("button", { name: "检查关联影响", exact: true }).click();
+  const proposed = await (await forwardResponse).json();
+  expect(proposed.allowed).toBe(false); // Duplicate mapping must be rejected, not silently replace existing data.
+  await expect(page.locator(".toast.error")).toBeVisible();
+  await close();
+  await panel.getByRole("button", { name: "关闭转发配置", exact: true }).click();
+  await dsp.click();
+  await tab("采集点表").click();
+  await expect(dsp).toHaveAttribute("aria-pressed", "true");
+  await groups.getByRole("button", { name: "LOCAL · 本机数据", exact: true }).click();
+  const localSignals = new Set(g.signals.filter(s => s.group_id === local.id).map(s => s.id));
+  await expect(tab("采集点表")).toContainText(String(g.v_bindings.filter(b => b.role === "client" && localSignals.has(b.signal_id)).length));
+  await all.click();
+  const after = await (await page.request.get(`/api/projects/${pid}/topology`)).json();
+  expect(after.revision).toBe(g.revision);
+  console.log("PASS: point groups, shared-device impact, scoped creation, dirty guard and per-point forwarding previews");
+}

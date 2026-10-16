@@ -154,7 +154,10 @@ pub async fn commit_import(
     let rev = db::lock_project(&mut tx, pid).await?;
     let row:Value=sqlx::query_scalar("SELECT to_jsonb(i) FROM import_previews i WHERE project_id=$1 AND id=$2 AND created_by=$3 AND expires_at>now() FOR UPDATE").bind(pid).bind(id).bind(u.id).fetch_optional(&mut *tx).await?.ok_or(AppError::bad("预览已过期或已使用，请重新上传"))?;
     if row["revision"] != rev {
-        return Err(AppError::conflict("预览后项目已被修改，请重新上传并确认"));
+        return Err(AppError::revision_conflict(
+            row["revision"].as_i64().unwrap_or_default() as i32,
+            rev,
+        ));
     }
     let before = db::snapshot(&mut tx, pid).await?;
     if !input.replace
@@ -191,12 +194,8 @@ pub async fn generate(
     u: User,
     Path(pid): Path<i64>,
 ) -> Result<Json<Value>> {
-    let mut tx = db::context(&s.pool, &u, Some(pid), false).await?;
-    // A shared lock makes the multi-query generation consistent with project writes.
-    sqlx::query("SELECT id FROM projects WHERE id=$1 FOR SHARE")
-        .bind(pid)
-        .execute(&mut *tx)
-        .await?;
+    // PostgreSQL provides a consistent snapshot across all generation queries.
+    let mut tx = db::read_snapshot_context(&s.pool, &u, pid).await?;
     Ok(Json(codegen::generate(&mut tx, pid).await?))
 }
 pub async fn releases(
@@ -210,6 +209,7 @@ pub async fn releases(
 #[derive(Deserialize)]
 pub struct ReleaseInput {
     name: String,
+    revision: i32,
 }
 pub async fn release(
     State(s): State<AppState>,
@@ -222,6 +222,9 @@ pub async fn release(
     }
     let mut tx = db::context(&s.pool, &u, Some(pid), true).await?;
     let rev = db::lock_project(&mut tx, pid).await?;
+    if input.revision != rev {
+        return Err(AppError::revision_conflict(input.revision, rev));
+    }
     let generated = codegen::generate(&mut tx, pid).await?;
     if generated["blocked"] == true {
         return Err(AppError::conflict(

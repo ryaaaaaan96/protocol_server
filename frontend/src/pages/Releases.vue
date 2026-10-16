@@ -11,7 +11,7 @@ import {
   GitBranch,
   ArrowDownToLine,
 } from "@lucide/vue";
-import { api, time, type Row } from "../api";
+import { api, revisionConflict, time, type Row } from "../api";
 import Badge from "../components/Badge.vue";
 import Empty from "../components/Empty.vue";
 const props = defineProps<{ pid: number; tick: number; canWrite: boolean }>();
@@ -41,6 +41,7 @@ async function generate() {
   try {
     generated.value = await api(`/projects/${props.pid}/generate`);
     file.value = Object.keys(generated.value?.files || {})[0] || "";
+    emit("notify", generated.value?.blocked ? "生成失败，请先修复校验错误" : "配置预览已生成", !!generated.value?.blocked);
   } catch (e) {
     emit("notify", (e as Error).message, true);
   } finally {
@@ -50,12 +51,16 @@ async function generate() {
 async function publish() {
   publishing.value = true;
   try {
-    await api(`/projects/${props.pid}/releases`, "POST", { name: name.value });
+    await api(`/projects/${props.pid}/releases`, "POST", { name: name.value, revision: generated.value!.revision });
     name.value = "";
     emit("refresh");
     emit("notify", "配置版本已冻结，可以下载交付");
   } catch (e) {
     emit("notify", (e as Error).message, true);
+    if (revisionConflict(e)) {
+      generated.value = null;
+      emit("refresh");
+    }
   } finally {
     publishing.value = false;
   }

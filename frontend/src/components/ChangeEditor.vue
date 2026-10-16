@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, watch, computed } from "vue";
-import { api, type Row } from "../api";
+import { api, revisionConflict, type Row } from "../api";
 import { referenceOptions } from "../domain/board";
 import { specs, labelFor, labels, type FieldSpec } from "../domain/schema";
 import Modal from "./Modal.vue";
@@ -16,7 +16,7 @@ const props = defineProps<{
   defaults?: Row;
   bindingRole?: string;
 }>();
-const emit = defineEmits<{ close: []; done: [record: Row] }>();
+const emit = defineEmits<{ close: []; done: [record: Row, merged?: boolean]; error: [message: string]; conflict: [] }>();
 const spec = computed(() => specs[props.entity]);
 const values = ref<Row>({}),
   preview = ref<Row | null>(null),
@@ -35,6 +35,7 @@ for (const f of spec.value.fields)
         : f.ref || f.type === "number"
           ? null
           : "");
+const initial: Row = JSON.parse(JSON.stringify(values.value));
 watch(
   values,
   () => {
@@ -102,11 +103,15 @@ async function review(op = props.row ? "update" : "create") {
         entity: props.entity,
         operation: op,
         id: props.row?.id ?? null,
-        values: values.value,
+        values: op === "update" ? Object.fromEntries(Object.entries(values.value).filter(([key,value]) => JSON.stringify(value) !== JSON.stringify(initial[key]))) : values.value,
+        expected: initial,
       },
     );
+    if (preview.value && !preview.value.allowed) emit("error", preview.value.errors.map((e: Row) => e.message).join("；") || "关联检查未通过");
   } catch (e) {
     error.value = (e as Error).message;
+    emit("error", error.value);
+    if (revisionConflict(e)) emit("conflict");
   } finally {
     busy.value = false;
   }
@@ -120,9 +125,11 @@ async function commit() {
       "POST",
       {},
     );
-    emit("done", result.record);
+    emit("done", result.record, !!(result.merged || preview.value?.merged));
   } catch (e) {
     error.value = (e as Error).message;
+    emit("error", error.value);
+    if (revisionConflict(e)) emit("conflict");
     preview.value = null;
   } finally {
     busy.value = false;
@@ -238,6 +245,7 @@ const related = computed(() =>
         </div>
         <div v-if="error" class="notice danger" role="alert">{{ error }}</div>
         <section v-if="preview" class="change-preview">
+          <p v-if="preview.merged" class="notice">已合并其他成员的无关修改，请确认最新关联影响。</p>
           <h3>
             <GitBranch :size="18" />{{
               operation === "delete" ? "删除影响" : "关联变更预览"

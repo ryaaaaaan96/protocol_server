@@ -26,7 +26,7 @@ erDiagram
 - `data_items`：共享类型、字节长度、单位及默认范围。源 `F32` 与 ARM 的 `S32` 代理不是同一种内部类型；`signals.internal_type` 和 `protocol_fields.wire_type` 显式覆盖。
 - `board_models / boards`：模板定义固件配置，实例定义项目里的实际板卡。同模板实例共享端点和信号；需要独立固件配置时使用不同模板。
 - `signal_groups / signals`：板卡模板内的信号组及 sigID。数字 ID 与公共符号二选一；板卡对端的 sigID 不要求相同。
-- `device_contexts`：固件 DP 的 dev_id。在 UPM 内，LOCAL=247，DSP1..8=11..18，VIR=1；DSP 代理组可复用于八个上下文。这些值不是 CAN 通信地址。
+- `device_contexts`：固件 DP 的 dev_id。在 UPM 内，LOCAL=247，DSP1..8=11..18，VIR=1；DSP 代理组可复用于八个上下文。这些值不是 CAN 通信地址。VIR 是转发服务上下文，不是独立点表分组；AIDC 板卡有启用的服务端接口且没有显式虚拟上下文时，由生成器派生 `CFG_DEV_VIR / dev_id=1`，不写入数据库。已有虚拟上下文继续使用其配置；默认编号/代码冲突和多个虚拟上下文由统一校验拒绝。
 - `protocol_contracts / protocol_fields`：协议类型、模型、顺序、地址、字节序、读写属性、长度和精度。多端点引用同一协议契约，布局修改同时影响双方。
 - `endpoints / board_links`：端点归属模板，连接落到具体板卡实例；远端通信地址和 UPP DevCode 独立设置。
 - `signal_bindings`：端点/上下文/协议字段绑定到板内信号，保留轮询及优先级参数。多个北向地址可以绑定同一信号。
@@ -40,7 +40,7 @@ JSON 更新通过现有变更预览/提交事务完成，校验类型唯一性�
 
 ## 采集、处理、转发、range 的关系
 
-业务点表接口由 `src/point_tables.rs` 实现，前端 `PointTable.vue` / `PointEditor.vue` 使用独立契约，不根据数据库表结构生成主业务页面。`process_points`、`collect_points`、`forward_points` 是业务操作名，不新增重复存储表；处理点写入信号及可选的范围覆盖，采集和转发写入各自角色的绑定。底层外键仍是唯一的关联依据。
+业务点表接口由 `src/point_tables.rs` 实现，前端 `PointTable.vue` / `PointEditor.vue` 使用独立契约，不根据数据库表结构生成主业务页面。`process_points`、`collect_points`、`forward_points` 是业务操作名，不新增重复存储表；处理点写入信号及可选的范围覆盖，采集和转发写入各自角色的绑定。底层外键仍是唯一的关联依据。界面以 LOCAL、DSP 等点表分组组织编辑，处理点的转发配置入口筛选并维护同一份绑定。VIR 从启用的对外接口派生注册，转发数据来自既有映射，不复制处理点。
 
 显示定义在 `config/point-tables.json`：共享字段目录负责名称和控件元数据，三个点表分别声明展示列及编辑字段；Rust 白名单负责读写能力边界。返回的有效值用于显示，`edit_values` 保留真实覆盖值，包括继承用的 `null`。处理点删除与范围删除处于同一事务，被绑定引用时整体回滚；跨板卡移动、端点角色错误和协议不匹配在业务写入口直接拒绝。
 

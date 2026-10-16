@@ -36,11 +36,11 @@ impl FromRequestParts<AppState> for User {
             })
             .unwrap_or("");
         if token.len() != 64 {
-            return Err(AppError(StatusCode::UNAUTHORIZED, "请先登录".into()));
+            return Err(AppError::new(StatusCode::UNAUTHORIZED, "请先登录"));
         }
         let hash = hex::encode(Sha256::digest(token.as_bytes()));
         sqlx::query_as("SELECT u.id,u.username,u.display_name,u.is_admin FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.expires_at>now() AND u.active")
-            .bind(hash).fetch_optional(&state.pool).await?.ok_or(AppError(StatusCode::UNAUTHORIZED,"登录已过期，请重新登录".into()))
+            .bind(hash).fetch_optional(&state.pool).await?.ok_or(AppError::new(StatusCode::UNAUTHORIZED,"登录已过期，请重新登录"))
     }
 }
 impl User {
@@ -80,9 +80,9 @@ pub async fn login(
     let failures:i32=sqlx::query_scalar("INSERT INTO login_attempts(username,failures) VALUES($1,1) ON CONFLICT(username) DO UPDATE SET failures=CASE WHEN login_attempts.updated_at<now()-interval '15 minutes' THEN 1 ELSE login_attempts.failures+1 END,updated_at=CASE WHEN login_attempts.updated_at<now()-interval '15 minutes' THEN now() ELSE login_attempts.updated_at END RETURNING failures")
         .bind(&input.username).fetch_one(&state.pool).await?;
     if failures > 10 {
-        return Err(AppError(
+        return Err(AppError::new(
             StatusCode::TOO_MANY_REQUESTS,
-            "登录尝试过多，请 15 分钟后重试".into(),
+            "登录尝试过多，请 15 分钟后重试",
         ));
     }
     let record: Option<(i64, String)> =
@@ -104,10 +104,7 @@ pub async fn login(
     .await
     .unwrap_or(false);
     if !valid || record.is_none() {
-        return Err(AppError(
-            StatusCode::UNAUTHORIZED,
-            "用户名或密码错误".into(),
-        ));
+        return Err(AppError::new(StatusCode::UNAUTHORIZED, "用户名或密码错误"));
     }
     let uid = record.unwrap().0;
     let mut bytes = [0u8; 32];

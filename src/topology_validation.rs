@@ -115,6 +115,19 @@ fn range(out: &mut Vec<Value>, entity: &str, v: &Value, typ: &str, len: i64) {
 }
 pub fn validate(g: &Value) -> Value {
     let mut out = Vec::new();
+    for model in rows(g, "board_models") {
+        if let Err(message) = crate::virtual_service::contexts(g, model) {
+            add(
+                &mut out,
+                "error",
+                "board_models",
+                model,
+                "virtual_service",
+                message,
+                0,
+            );
+        }
+    }
     for d in rows(g, "data_items") {
         shape(
             &mut out,

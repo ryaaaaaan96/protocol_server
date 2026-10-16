@@ -31,7 +31,7 @@ pub struct ProjectFiles {
     projects: BTreeMap<String, ProjectFile>,
 }
 
-fn merge(base: &mut Value, patch: &Value) {
+pub(crate) fn merge(base: &mut Value, patch: &Value) {
     match (base, patch) {
         (Value::Object(base), Value::Object(patch)) => {
             for (key, value) in patch {

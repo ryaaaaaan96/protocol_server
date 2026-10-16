@@ -1,4 +1,16 @@
 export type Row = Record<string, any>;
+export class ApiError extends Error {
+  constructor(message: string, public status: number, public details: Row) {
+    super(message);
+    this.name = "ApiError";
+  }
+  get revisionConflict() {
+    return this.status === 409 && this.details.code === "REVISION_CONFLICT";
+  }
+}
+export function revisionConflict(error: unknown): boolean {
+  return error instanceof ApiError && error.revisionConflict;
+}
 export async function api(
   path: string,
   method = "GET",
@@ -22,7 +34,7 @@ export async function api(
   if (!response.ok) {
     if (response.status === 401 && path !== "/auth/login")
       window.dispatchEvent(new Event("session-expired"));
-    throw new Error(data.error || `请求失败 (${response.status})`);
+    throw new ApiError(data.error || `请求失败 (${response.status})`, response.status, data);
   }
   return data;
 }

@@ -1,10 +1,12 @@
 mod api;
 mod auth;
+mod change_merge;
 mod codegen;
 mod db;
 mod error;
 mod importer;
 mod model;
+mod point_order;
 mod point_tables;
 mod project_config;
 mod project_files;
@@ -13,6 +15,7 @@ mod topology;
 mod topology_codegen;
 mod topology_import;
 mod topology_validation;
+mod virtual_service;
 
 use anyhow::Context;
 use axum::{
@@ -143,6 +146,10 @@ async fn main() -> anyhow::Result<()> {
             post(point_tables::preview),
         )
         .route("/project-template", get(project_config::template))
+        .route(
+            "/projects/{pid}/board-models/{mid}/point-tables/{kind}/reorder/preview",
+            post(point_order::preview),
+        )
         .route("/projects/{pid}/configuration", get(project_config::read))
         .route("/projects", get(api::projects).post(api::create_project))
         .route("/projects/{pid}/overview", get(api::overview))

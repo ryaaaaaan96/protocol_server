@@ -17,6 +17,18 @@ export type PointDefinition = {
   columns: string[];
   editor: string[];
   fields: Record<string, PointField>;
+  inline: Record<string, string>;
+  ordering: { mode: "disabled" | "display" | "protocol"; group_by: string[] };
+};
+export type PointSchema = {
+  tables: Record<PointKind, Omit<PointDefinition, "fields">>;
+  workspace?: {
+    default_tables: string[];
+    boards?: Record<
+      string,
+      { tables: string[]; labels?: Record<string, string> }
+    >;
+  };
 };
 export type PointTableData = {
   revision: number;
@@ -25,6 +37,15 @@ export type PointTableData = {
   rows: Row[];
   options: Record<string, Row[]>;
 };
+
+export function pointGroupLabel(group: Row): string {
+  const names: Record<string, string> = {
+    ARM_LOCAL: "LOCAL · 本机数据",
+    DSP_LOCAL: "LOCAL · DSP 内部数据",
+    DSP_PROXY: "DSP · 下级 DSP 数据",
+  };
+  return names[group.code] || `${group.code} · ${group.name}`;
+}
 
 // All relations refer to stable record IDs. Captions and sigID are display values.
 export function pointChoices(

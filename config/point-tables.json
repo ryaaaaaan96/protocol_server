@@ -1,11 +1,37 @@
 {
   "version": 1,
+  "workspace": {
+    "default_tables": [
+      "process",
+      "collect",
+      "forward",
+      "fields",
+      "data",
+      "routes",
+      "expansion",
+      "links",
+      "endpoints",
+      "contexts",
+      "groups"
+    ],
+    "boards": {
+      "DSP": {
+        "tables": [
+          "process",
+          "forward"
+        ],
+        "labels": {
+          "process": "DSP内部数据"
+        }
+      }
+    }
+  },
   "fields": {
     "name": {
       "label": "信号名称"
     },
     "group_name": {
-      "label": "信号组"
+      "label": "点表分组"
     },
     "resolved_sig_id": {
       "label": "sigID"
@@ -55,7 +81,7 @@
       "label": "转发绑定数"
     },
     "group_id": {
-      "label": "信号组",
+      "label": "点表分组",
       "reference": "groups",
       "type": "number"
     },
@@ -78,7 +104,15 @@
     "internal_type": {
       "label": "内部类型覆盖",
       "nullable": true,
-      "options": ["U8", "U16", "S16", "U32", "S32", "F32", "STRING"]
+      "options": [
+        "U8",
+        "U16",
+        "S16",
+        "U32",
+        "S32",
+        "F32",
+        "STRING"
+      ]
     },
     "process_enabled": {
       "label": "加入处理表",
@@ -191,7 +225,7 @@
   "tables": {
     "process": {
       "label": "处理点表",
-      "description": "维护内部信号及 range；采集与转发通过固定记录 ID 引用。",
+      "description": "统一维护内部信号、默认值、上下限及恢复策略；采集与转发通过固定记录 ID 引用。",
       "columns": [
         "name",
         "group_name",
@@ -203,6 +237,8 @@
         "default_value",
         "min_value",
         "max_value",
+        "boot_restore",
+        "manual_restore",
         "flags",
         "callback",
         "collection_count",
@@ -224,7 +260,27 @@
         "max_value",
         "boot_restore",
         "manual_restore"
-      ]
+      ],
+      "ordering": {
+        "mode": "display",
+        "group_by": [
+          "group_id"
+        ]
+      },
+      "inline": {
+        "name": "name",
+        "enum_name": "enum_name",
+        "flags": "flags",
+        "callback": "callback",
+        "default_value": "default_value",
+        "min_value": "min_value",
+        "max_value": "max_value",
+        "boot_restore": "boot_restore",
+        "manual_restore": "manual_restore",
+        "group_name": "group_id",
+        "resolved_sig_id": "sig_id",
+        "data_type": "internal_type"
+      }
     },
     "collect": {
       "label": "采集点表",
@@ -254,7 +310,21 @@
         "poll_interval",
         "set_priority",
         "scan_priority"
-      ]
+      ],
+      "ordering": {
+        "mode": "display",
+        "group_by": [
+          "endpoint_id",
+          "context_id"
+        ]
+      },
+      "inline": {
+        "signal_name": "signal_id",
+        "context_name": "context_id",
+        "endpoint_name": "endpoint_id",
+        "field_name": "field_id",
+        "poll_interval": "poll_interval"
+      }
     },
     "forward": {
       "label": "转发点表",
@@ -275,7 +345,26 @@
         "access",
         "scale"
       ],
-      "editor": ["endpoint_id", "context_id", "signal_id", "field_id"]
+      "editor": [
+        "endpoint_id",
+        "context_id",
+        "signal_id",
+        "field_id"
+      ],
+      "ordering": {
+        "mode": "display",
+        "group_by": [
+          "endpoint_id",
+          "upp_model",
+          "bank"
+        ]
+      },
+      "inline": {
+        "signal_name": "signal_id",
+        "context_name": "context_id",
+        "endpoint_name": "endpoint_id",
+        "field_name": "field_id"
+      }
     }
   }
 }

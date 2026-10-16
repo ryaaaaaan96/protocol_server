@@ -1,5 +1,6 @@
 // Real PostgreSQL + HTTP tests in an isolated, disposable database.
 import fs from "node:fs";
+import { checkPointEditing } from "./point-editing.mjs";
 import path from "node:path";
 import crypto from "node:crypto";
 import assert from "node:assert/strict";
@@ -48,6 +49,9 @@ fs.writeFileSync(
   JSON.stringify({
     fields: { name: { label: "UPM 自定义名称" } },
     tables: { process: { columns: ["name", "sig_id"] } },
+    workspace: {
+      boards: { DSP: { tables: ["forward", "process", "fields"], labels: { forward: "自定义转发表" } } },
+    },
   }),
 );
 for (const [key, workbook] of [
@@ -65,6 +69,16 @@ for (const [key, workbook] of [
     }),
   );
 }
+const orderDefaults = JSON.parse(fs.readFileSync("config/point-tables.json", "utf8"));
+orderDefaults.workspace.boards.ORDER_PROTOCOL = {
+  tables: ["process", "forward"],
+  rules: { forward: { ordering: { mode: "protocol", group_by: ["endpoint_id", "upp_model", "bank"] } } },
+};
+orderDefaults.workspace.boards.ORDER_DISABLED = {
+  tables: ["process"], rules: { process: { ordering: { mode: "disabled", group_by: [] } } },
+};
+const orderConfig = path.join(projectConfigs, "point-tables-defaults.json");
+fs.writeFileSync(orderConfig, JSON.stringify(orderDefaults));
 let server;
 const testEnv = {
   ...process.env,
@@ -76,6 +90,7 @@ const testEnv = {
   BIND_ADDR: "127.0.0.1:18081",
   RUST_LOG: "warn",
   PROJECT_CONFIG_DIR: projectConfigs,
+  POINT_TABLE_CONFIG: orderConfig,
 };
 const base = "http://127.0.0.1:18081/api";
 let assertions = 0;
@@ -191,6 +206,13 @@ try {
     (await client.call("/point-tables/schema")).fields.name.label !==
       "UPM 自定义名称",
   );
+  const projectDisplay = await client.call(`${seededUrl}/point-tables/schema`);
+  const defaultDisplay = await client.call("/point-tables/schema");
+  equal(projectDisplay.workspace.boards.DSP.tables.join(","), "forward,process,fields");
+  equal(defaultDisplay.workspace.boards.DSP.tables.join(","), "process,forward");
+  equal(projectDisplay.workspace.boards.DSP.labels.process, "DSP内部数据");
+  equal(projectDisplay.workspace.boards.DSP.labels.forward, "自定义转发表");
+  equal(projectDisplay.workspace.default_tables.join(","), defaultDisplay.workspace.default_tables.join(","));
   const savedEdit = await client.call(`${seededUrl}/changes/preview`, "POST", {
     revision: seededGraph.revision,
     entity: "data_items",
@@ -397,7 +419,7 @@ try {
     dev_id: 247,
     kind: "local",
   });
-  await edit("device_contexts", {
+  const savedVir = await edit("device_contexts", {
     model_id: am.id,
     name: "虚拟转发",
     code: "CFG_DEV_VIR",
@@ -850,10 +872,9 @@ try {
   );
   const stale = await preview("data_items", { unit: "V" }, data.id);
   await edit("boards", { name: "控制板改名" }, ab.id);
-  equal(
-    (await e.raw(`${url}/changes/${stale.id}/commit`, "POST", {})).status,
-    409,
-  );
+  const mergedUnrelated = await commit(stale);
+  equal(mergedUnrelated.merged, true);
+  equal((await graph()).boards.find(b => b.id === ab.id).name, "控制板改名");
   const privatePreview = await preview("data_items", { unit: "V" }, data.id);
   equal(
     (await client.raw(`${url}/changes/${privatePreview.id}/commit`, "POST", {}))
@@ -953,8 +974,25 @@ try {
     field_id: floatField.id,
     signal_id: floatSig.id,
   });
+  const explicitGenerated = await e.call(`${url}/generate`);
+  equal(explicitGenerated.blocked, false);
+  const explicitContexts = JSON.parse(explicitGenerated.files["boards/ARM_1/connections.json"]).contexts;
+  equal(explicitContexts.find(c => c.kind === "virtual").id, savedVir.id);
+  const removeVir = await preview("device_contexts", {}, savedVir.id, "delete");
+  ok(removeVir.allowed, JSON.stringify(removeVir.errors));
+  await commit(removeVir);
   const generated = await e.call(`${url}/generate`);
   equal(generated.blocked, false);
+  const autoContexts = JSON.parse(generated.files["boards/ARM_1/connections.json"]).contexts;
+  equal(autoContexts.filter(c => c.kind === "virtual").length, 1);
+  equal(autoContexts.find(c => c.kind === "virtual").generated, true);
+  equal(autoContexts.find(c => c.kind === "virtual").dev_id, 1);
+  equal((await graph()).device_contexts.some(c => c.model_id === am.id && c.kind === "virtual"), false);
+  equal(generated.files["boards/ARM_1/dev_cfg.c"], explicitGenerated.files["boards/ARM_1/dev_cfg.c"]);
+  const collision = await preview("device_contexts", { dev_id: 1 }, ctx.id);
+  equal(collision.allowed, false);
+  ok(collision.errors.some(e => e.code === "virtual_service"));
+  equal((await graph()).device_contexts.find(c => c.id === ctx.id).dev_id, 11);
   ok(
     generated.files["boards/ARM_1/collect.c"].includes(".dec_p=0.1"),
     "fractional conversion retained",
@@ -971,11 +1009,16 @@ try {
     generated.files["boards/DSP_1/SERVE.xml"].includes('DevCode="1"'),
     "peer protocol contract generated",
   );
+  const staleRelease = await e.raw(`${url}/releases`, "POST", { name: "stale", revision: generated.revision - 1 });
+  equal(staleRelease.status, 409);
+  equal(staleRelease.data.code, "REVISION_CONFLICT");
+  equal((await e.call(`${url}/releases`)).length, 0);
   const release = await e.call(`${url}/releases`, "POST", {
     name: "topology-test",
+    revision: generated.revision,
   });
   equal(
-    (await v.raw(`${url}/releases`, "POST", { name: "denied" })).status,
+    (await v.raw(`${url}/releases`, "POST", { name: "denied", revision: generated.revision })).status,
     403,
   );
   const zipResponse = await fetch(
@@ -1272,6 +1315,7 @@ try {
   equal(exportedEndpoints.length, 2);
   ok(exportedEndpoints.every((e) => e.transport === "CANFD"));
 
+  await checkPointEditing({ client, engineer: e, viewer: v, engineerId: engineer.id, viewerId: viewer.id, equal, ok });
   const direct = new pg.Client({ connectionString: appUrl.toString() });
   await direct.connect();
   equal(

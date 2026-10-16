@@ -74,7 +74,7 @@ export const specs: Record<string, EntitySpec> = {
     ],
   },
   signal_groups: {
-    label: "信号组",
+    label: "点表分组",
     fields: [name, code, model],
     columns: ["name", "code", "model_id"],
   },
@@ -83,13 +83,13 @@ export const specs: Record<string, EntitySpec> = {
     view: "v_signals",
     fields: [
       name,
-      ref("group_id", "信号组", "signal_groups"),
+      ref("group_id", "点表分组", "signal_groups"),
       data,
       f("enum_name", "枚举名"),
       f("sig_id", "数字 sigID", {
         type: "number",
         nullable: true,
-        hint: "作用域为信号组。数字与公共符号二选一；修改不会改变对端板卡的 sigID。",
+        hint: "作用域为点表分组。数字与公共符号二选一；修改不会改变对端板卡的 sigID。",
       }),
       f("sig_symbol", "公共 sigID 符号", { nullable: true }),
       f("internal_type", "内部类型覆盖", {
@@ -142,7 +142,7 @@ export const specs: Record<string, EntitySpec> = {
       name,
       code,
       model,
-      ref("group_id", "共享信号组", "signal_groups", true),
+      ref("group_id", "共享点表分组", "signal_groups", true),
       f("dev_id", "固件 dev_id", { type: "number", default: 247 }),
       f("kind", "设备角色", {
         options: ["local", "proxy", "virtual"],
@@ -319,7 +319,7 @@ export const specs: Record<string, EntitySpec> = {
 export const labels: Record<string, string> = {
   id: "记录 ID",
   name: "名称",
-  group_name: "所属信号组",
+  group_name: "所属点表分组",
   resolved_sig_id: "sigID",
   contract_name: "协议契约",
   effective_address: "计算地址",

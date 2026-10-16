@@ -1,5 +1,11 @@
 # 部署与数据库迁移
 
+## 迁移环境检查
+
+在旧机器和目标机器分别运行 `./scripts/check-env.sh`，需要时将输出保存为报告比较。它列出 Node/npm、Rust、Python、C 编译器版本，检查配置文件、本地 PostgreSQL 工具、前端依赖、Playwright Chromium 及其缺失动态库，并提供补齐命令。它不执行安装、不启动服务、不连接数据库、不打印 `.env` 内容；缺项返回退出码 1。
+
+浏览器库缺失时可按提示执行 `cd frontend && npx playwright install-deps chromium`；浏览器也缺失时执行 `npx playwright install --with-deps chromium`。系统库安装需要相应权限。检查通过后仍需验证实际构建、数据库恢复和浏览器测试；数据库内容不会随 Git 或 `config/` 自动迁移。
+
 ## 配置职责
 
 | 参数 | 用途 |
@@ -52,6 +58,10 @@ pg_dump -h DB_HOST -U postgres -d protocol_studio -Fc -f protocol_studio.dump
 ## 升级与回退
 
 先备份，再运行新版本迁移，随后启动新服务。已应用的迁移文件不能直接修改，否则 SQLx 校验和检查会报错；应追加新迁移。需要回退数据模式时，使用已验证的反向迁移或从备份恢复。
+
+点表编辑与排序需要迁移 `0009_point_display_order.sql` 和 `0010_change_merge.sql`，分别增加独立显示顺序和预览合并基线，不重编已有 sigID 或协议地址。升级后同时部署前后端；旧预览没有合并基线时仍严格检查版本。发布接口现在要求携带生成预览返回的 `revision`。
+
+迁移到其他电脑时运行 `cargo fetch --locked` 准备锁定的 Rust 依赖（包括 `json-patch`），再构建。可先用 `scripts/check-env.sh` 查看缺少的工具、库与配置。点表排序和编辑保存在 PostgreSQL，跨机器保留这些修改仍需数据库备份。
 
 代码生成遵循参考工程接口，目标固件的宏、回调实现和 ABI 由目标工程提供。平台不会自动改写参考工程，也不会将生成文件直接覆盖进固件目录。
 

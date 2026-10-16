@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
+import Toast from "./components/Toast.vue";
 import {
   Network,
   Layers3,
@@ -99,18 +100,39 @@ function fail(message: string) {
   notify(message, true);
 }
 function refresh() {
+  if (!leaveWorkspace()) return;
   tick.value++;
 }
+const workspaceDirty = ref(false);
+function leaveWorkspace() {
+  if (workspaceDirty.value && !window.confirm("有未保存的点表修改，是否放弃？")) return false;
+  workspaceDirty.value = false;
+  return true;
+}
+function beforeUnload(event: BeforeUnloadEvent) {
+  if (workspaceDirty.value) { event.preventDefault(); event.returnValue = ""; }
+}
+function changeProject(event:Event) {
+  const select = event.target as HTMLSelectElement;
+  if (!leaveWorkspace()) { select.value = String(pid.value); return; }
+  pid.value = Number(select.value);
+  navigate("overview");
+}
 function navigate(page: string) {
+  if (page === tab.value) { menu.value = false; return true; }
+  if (!leaveWorkspace()) return false;
   focus.value = null;
   tab.value = page;
   menu.value = false;
+  return true;
 }
 function openSharedData() {
-  navigate("devices");
+  if (!navigate("devices")) return;
   focus.value = { entity: "data_items", id: null };
 }
 function enterBoard(id: number) {
+  if (tab.value === "board" && boardId.value === id) return;
+  if (!leaveWorkspace()) return;
   boardId.value = id;
   navigate("board");
 }
@@ -124,6 +146,7 @@ function expired() {
   modal.value = null;
 }
 onMounted(async () => {
+  window.addEventListener("beforeunload", beforeUnload);
   window.addEventListener("session-expired", expired);
   try {
     user.value = await api("/auth/me");
@@ -133,6 +156,7 @@ onMounted(async () => {
   }
 });
 onBeforeUnmount(() => {
+  window.removeEventListener("beforeunload", beforeUnload);
   window.removeEventListener("session-expired", expired);
   clearTimeout(toastTimer);
 });
@@ -213,12 +237,19 @@ function openIssue(issue: Row) {
   focus.value = { entity: issue.entity, id: issue.id };
 }
 
-function topologyDone() {
+function topologyConflict() {
+  workspaceDirty.value = false;
   focus.value = null;
   refresh();
-  notify("修改已提交，关联配置已同步更新");
+}
+function topologyDone(merged = false) {
+  workspaceDirty.value = false;
+  focus.value = null;
+  refresh();
+  notify(merged ? "修改已提交，已自动合并其他成员的无关修改" : "修改已提交，关联配置已同步更新");
 }
 async function logout() {
+  if (!leaveWorkspace()) return;
   try {
     await api("/auth/logout", "POST", {});
     expired();
@@ -262,8 +293,8 @@ function userCreated() {
           <small>当前工作空间</small
           ><select
             aria-label="当前项目"
-            v-model.number="pid"
-            @change="navigate('overview')"
+            :value="pid"
+            @change="changeProject"
           >
             <option v-if="!projects.length" :value="0">尚未加入项目</option>
             <option v-for="p in projects" :key="p.id" :value="p.id">
@@ -445,11 +476,13 @@ function userCreated() {
             :board-id="boardId"
             :focus="focus"
             @done="topologyDone"
+            @conflict="topologyConflict"
             @error="fail"
             @board="enterBoard"
             @settings="openSharedData"
             @configuration="modal = 'config'"
             @sheet="sheetLabel = $event"
+            @dirty="workspaceDirty = $event"
           />
           <SqlWorkspace
             v-else-if="tab === 'sql'"
@@ -503,20 +536,10 @@ function userCreated() {
         </footer>
       </main>
     </div>
-    <div
-      v-if="toast"
-      :class="['toast', { error: toast.error }]"
-      :role="toast.error ? 'alert' : 'status'"
-    >
-      <AlertTriangle v-if="toast.error" :size="18" /><CheckCircle2
-        v-else
-        :size="18"
-      /><span>{{ toast.message }}</span
-      ><button class="icon-btn" aria-label="关闭提示" @click="toast = null">
-        <X :size="16" />
-      </button>
-    </div>
+    <Toast v-if="toast" :message="toast.message" :error="toast.error" @close="toast = null" />
     <ProjectConfig
+      @error="fail"
+      @conflict="modal = null; topologyConflict()"
       v-if="modal === 'config' && graph"
       :pid="pid"
       :graph="graph"

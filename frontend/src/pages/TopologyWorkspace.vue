@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { ref, watch, computed } from "vue";
+import { ref, watch, computed, onBeforeUnmount } from "vue";
 import { api, type Row } from "../api";
 import { specs, labels, labelFor } from "../domain/schema";
 import {
   boardSheets,
+  configuredBoardSheets,
   projectSheets,
   scopedRows,
   rows,
@@ -24,6 +25,7 @@ import Modal from "../components/Modal.vue";
 import Loading from "../components/Loading.vue";
 import Empty from "../components/Empty.vue";
 import PointTable from "../components/PointTable.vue";
+import { pointGroupLabel, type PointSchema } from "../domain/pointTables";
 const props = defineProps<{
   pid: number;
   graph: Row | null;
@@ -33,13 +35,26 @@ const props = defineProps<{
   focus?: Row | null;
 }>();
 const emit = defineEmits<{
-  done: [];
+  done: [merged?: boolean];
+  conflict: [];
   error: [message: string];
   board: [id: number];
   settings: [];
   configuration: [];
   sheet: [label: string];
+  dirty: [value: boolean];
 }>();
+const pointDirty = ref(false);
+watch(pointDirty, value => emit("dirty", value), {flush:"sync"});
+onBeforeUnmount(() => emit("dirty", false));
+function selectSheet(key:string) {
+  if (key === sheet.value.key) return;
+  if (pointDirty.value && !window.confirm("有未保存的修改，是否放弃并切换表格？")) return;
+  pointDirty.value = false;
+  sheetKey.value = key;
+  query.value = "";
+  pointFocus.value = undefined;
+}
 const types = computed(() => boardTypes(props.graph));
 const board = computed(() =>
   props.mode === "board"
@@ -49,6 +64,31 @@ const board = computed(() =>
 const boardModel = computed(() =>
   props.graph?.board_models.find((m: Row) => m.id === board.value?.model_id),
 );
+const groupId = ref<number>();
+const groups = computed<Row[]>(() => props.mode === "board"
+  ? rows(props.graph || {}, "signal_groups").filter(g => g.model_id === board.value?.model_id)
+  : []);
+let groupModelId: number | undefined;
+watch([groups, () => board.value?.model_id], ([available, modelId]) => {
+  // A successful commit briefly clears graph while reloading; retain this group's selection.
+  if (!props.graph || modelId == null) return;
+  if (modelId !== groupModelId) {
+    groupModelId = modelId;
+    groupId.value = available[0]?.id;
+  } else if (groupId.value != null && !available.some(g => g.id === groupId.value)) {
+    groupId.value = available[0]?.id;
+  }
+}, { immediate: true });
+const groupContexts = computed(() => rows(props.graph || {}, "device_contexts")
+  .filter(c => groupId.value != null && c.group_id === groupId.value));
+function selectGroup(id?: number) {
+  if (id === groupId.value) return;
+  if (pointDirty.value && !window.confirm("有未保存的修改，是否放弃并切换点表分组？")) return;
+  pointDirty.value = false;
+  groupId.value = id;
+  pointFocus.value = undefined;
+  query.value = "";
+}
 function typeSignals(type: Row) {
   return (
     props.graph?.v_signals.filter((s: Row) => s.model_id === type.model_id)
@@ -58,8 +98,29 @@ function typeSignals(type: Row) {
 const sheetKey = ref(props.mode === "settings" ? "models" : "signals"),
   query = ref(""),
   page = ref(1);
-const advanced = ref(false),
-  pointFocus = ref<number>();
+const pointFocus = ref<number>();
+const displaySchema = ref<PointSchema | null>(null),
+  schemaError = ref(""),
+  schemaReload = ref(0);
+watch(
+  () => [props.pid, props.mode, schemaReload.value],
+  async (_, __, cleanup) => {
+    let cancelled = false;
+    cleanup(() => {
+      cancelled = true;
+    });
+    displaySchema.value = null;
+    schemaError.value = "";
+    if (props.mode !== "board") return;
+    try {
+      const result = await api(`/projects/${props.pid}/point-tables/schema`);
+      if (!cancelled) displaySchema.value = result;
+    } catch (e) {
+      if (!cancelled) schemaError.value = (e as Error).message;
+    }
+  },
+  { immediate: true },
+);
 const edit = ref<{
     entity: string;
     row: Row | null;
@@ -68,15 +129,25 @@ const edit = ref<{
   } | null>(null),
   source = ref<Row | null>(null);
 const sheets = computed(() =>
-  props.mode === "settings" ? projectSheets : boardSheets,
+  props.mode === "settings"
+    ? projectSheets
+    : displaySchema.value
+      ? configuredBoardSheets(displaySchema.value, board.value?.code || "")
+      : [],
 );
 const sheet = computed<Sheet>(
-  () => sheets.value.find((s) => s.key === sheetKey.value) || sheets.value[0],
+  () =>
+    sheets.value.find((s) => s.key === sheetKey.value) ||
+    sheets.value[0] ||
+    boardSheets[0],
 );
-const visibleSheets = computed(() =>
-  sheets.value.filter(
-    (s) => props.mode === "settings" || advanced.value || s.pointKind,
-  ),
+watch(
+  sheets,
+  (available) => {
+    if (!available.some((s) => s.key === sheetKey.value))
+      sheetKey.value = available[0]?.key || "";
+  },
+  { immediate: true },
 );
 const spec = computed(() => specs[sheet.value.entity]);
 const columns = computed(
@@ -110,23 +181,27 @@ watch(
   },
 );
 watch(
-  () => [props.graph, props.focus],
+  () => [props.graph, props.focus, displaySchema.value],
   () => {
     if (!props.graph || !props.focus) return;
-    const target = sheets.value.find(
+    if (props.mode === "board" && !displaySchema.value) return;
+    const target = (props.mode === "settings" ? projectSheets : boardSheets).find(
       (s) =>
         s.entity === props.focus!.entity &&
         (!s.role ||
           props.graph!.v_bindings.find((b: Row) => b.id === props.focus!.id)
             ?.role === s.role),
     );
-    if (target) {
+    if (target && sheets.value.some((s) => s.key === target.key)) {
       sheetKey.value = target.key;
       if (target.pointKind) {
+        edit.value = null;
+        const signalId = target.pointKind === "process" ? props.focus.id
+          : props.graph.signal_bindings.find((b: Row) => b.id === props.focus!.id)?.signal_id;
+        groupId.value = props.graph.signals.find((s: Row) => s.id === signalId)?.group_id;
         pointFocus.value = props.focus.id;
         return;
       }
-      advanced.value = true;
     }
     const row = props.graph[props.focus.entity]?.find(
       (r: Row) => r.id === props.focus!.id,
@@ -137,7 +212,7 @@ watch(
   { immediate: true },
 );
 watch(
-  () => sheet.value.label,
+  () => (sheets.value.length ? sheet.value.label : ""),
   (label) => emit("sheet", label),
   { immediate: true },
 );
@@ -151,20 +226,9 @@ function entries(s: Sheet): Row[] {
   let records = rows(props.graph, s.view || specs[s.entity]?.view || s.entity);
   records = scopedRows(props.graph, board.value, s.entity, records);
   if (s.role) records = records.filter((r) => r.role === s.role);
-  if (s.entity === "signal_ranges")
-    records = records.map((r) => {
-      const signal = props.graph!.v_signals.find(
-        (v: Row) => v.id === r.signal_id,
-      );
-      return {
-        ...r,
-        signal_name: signal?.name,
-        resolved_sig_id: signal?.resolved_sig_id,
-        default_value: signal?.default_value,
-        min_value: signal?.min_value,
-        max_value: signal?.max_value,
-      };
-    });
+  if (s.pointKind && groupId.value != null) records = records.filter(r =>
+    s.pointKind === "process" ? r.group_id === groupId.value
+      : props.graph!.signals.some((p: Row) => p.id === r.signal_id && p.group_id === groupId.value));
   return records;
 }
 const sheetRecords = computed(() => entries(sheet.value));
@@ -251,23 +315,25 @@ function create(entity = sheet.value.entity) {
   }
   edit.value = { entity, row: null, defaults, role: sheet.value.role };
 }
-function done(record: Row) {
+function done(record: Row, merged = false) {
   const entering = edit.value?.entity === "boards" && !edit.value.row;
   edit.value = null;
-  emit("done");
+  emit("done", merged);
   if (entering) emit("board", record.id);
 }
-function pointDone() {
+function pointDone(merged = false) {
   pointFocus.value = undefined;
-  emit("done");
+  emit("done", merged);
 }
 function openProcess(id: number) {
-  sheetKey.value = "signals";
-  pointFocus.value = id;
-}
-function toggleAdvanced() {
-  advanced.value = !advanced.value;
-  if (!advanced.value && !sheet.value.pointKind) sheetKey.value = "signals";
+  if (sheets.value.some((s) => s.pointKind === "process")) {
+    groupId.value = props.graph?.signals.find((r: Row) => r.id === id)?.group_id;
+    sheetKey.value = "signals";
+    pointFocus.value = id;
+  } else {
+    const row = props.graph?.signals.find((r: Row) => r.id === id);
+    if (row) edit.value = { entity: "signals", row };
+  }
 }
 async function showSource(row: Row) {
   try {
@@ -315,50 +381,63 @@ function sourceOf(row: Row) {
         <small>{{ typeSignals(type) }} 个信号</small>
       </button>
     </div>
-    <section class="panel table-panel board-tables">
+    <div v-if="schemaError" class="notice danger" role="alert">
+      {{ schemaError }}
+      <button class="text-button" @click="schemaReload++">重试</button>
+    </div>
+    <Loading v-else-if="mode === 'board' && !displaySchema" />
+    <Empty
+      v-else-if="!sheets.length"
+      title="此板卡暂无展示表格"
+      detail="当前板卡未配置需要显示的表格。"
+    />
+    <section v-else class="panel table-panel board-tables">
+      <div v-if="board && groups.length" class="point-groups" role="group" aria-label="点表分组">
+        <span>点表分组</span>
+        <button v-for="g in groups" :key="g.id" class="button small"
+          :class="{ primary: groupId === g.id }" :aria-pressed="groupId === g.id"
+          @click="selectGroup(g.id)">{{ pointGroupLabel(g) }}</button>
+        <button class="button small" :aria-pressed="groupId == null" @click="selectGroup()">全部分组</button>
+      </div>
+      <p v-if="sheet.pointKind && groupContexts.length" class="point-group-contexts">
+        使用此组的设备：{{ groupContexts.map(c => `${c.name} [${c.dev_id}]`).join('、') }}。
+        点定义和范围共用；采集、转发按设备分别配置。
+      </p>
       <div
         class="entity-tabs"
         role="tablist"
         :aria-label="board ? '板卡内表格' : '项目共享配置'"
       >
         <button
-          v-for="s in visibleSheets"
+          v-for="s in sheets"
           :key="s.key"
           role="tab"
           :aria-selected="sheetKey === s.key"
           :class="{ selected: sheetKey === s.key }"
-          @click="
-            sheetKey = s.key;
-            query = '';
-            pointFocus = undefined;
-          "
+          @click="selectSheet(s.key)"
         >
           {{ s.label }}<small>{{ entries(s).length }}</small>
         </button>
       </div>
-      <div v-if="mode === 'board'" class="point-settings-toggle">
-        <span>处理点定义内部数据，采集和转发维护协议映射。</span>
-        <button
-          class="text-button"
-          :aria-expanded="advanced"
-          @click="toggleAdvanced"
-        >
-          {{ advanced ? "收起辅助配置" : "展开辅助配置" }}
-        </button>
-      </div>
       <PointTable
         v-if="sheet.pointKind && board && graph"
-        :key="`${board.model_id}:${sheet.pointKind}`"
+        :key="`${board.model_id}:${sheet.pointKind}:${groupId ?? 'all'}`"
         :pid="pid"
         :model-id="board.model_id"
         :kind="sheet.pointKind"
+        :label="sheet.label"
         :revision="graph.revision"
         :can-write="canWrite"
         :process-enabled="boardModel?.firmware_profile === 'aidc'"
         :focus-id="pointFocus"
+        :group-id="groupId"
+        :allow-forward="sheets.some(s => s.pointKind === 'forward')"
+        :forward-label="sheets.find(s => s.pointKind === 'forward')?.label"
         @done="pointDone"
+        @conflict="emit('conflict')"
         @process="openProcess"
         @error="emit('error', $event)"
+        @dirty="pointDirty = $event"
       />
       <template v-else>
         <div class="sheet-heading">
@@ -368,8 +447,6 @@ function sourceOf(row: Row) {
               ? "从协议端点采集到本板内部信号"
               : "将本板内部信号映射到对外协议字段"
           }}</span
-          ><span v-else-if="sheet.entity === 'signal_ranges'"
-            >显示当前生效的范围值，支持单独覆盖与恢复策略。</span
           ><span v-else-if="board && sheet.entity === 'data_items'"
             >显示本板引用的数据定义；新定义在项目共享目录中维护。</span
           ><span v-else-if="sheet.entity === 'source_records'"
@@ -525,6 +602,8 @@ function sourceOf(row: Row) {
     :can-write="canWrite"
     @close="edit = null"
     @done="done"
+    @error="emit('error', $event)"
+    @conflict="edit = null; emit('conflict')"
   />
   <Modal
     v-if="source"

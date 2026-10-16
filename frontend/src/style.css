@@ -3011,18 +3011,6 @@ body {
   gap: 12px;
   padding: 10px 12px 6px;
 }
-.point-settings-toggle {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 9px 16px;
-  color: var(--muted);
-  font-size: 14px;
-  border-bottom: 1px solid var(--border);
-}
-.point-settings-toggle > span { min-width: 0; }
-.point-settings-toggle > button { flex-shrink: 0; }
 .point-filter {
   min-width: 140px;
   max-width: 240px;
@@ -3035,7 +3023,6 @@ body {
 }
 .point-inheritance { margin-bottom: 14px; }
 @media (max-width: 640px) {
-  .point-settings-toggle { flex-wrap: wrap; }
   .point-filter { max-width: 100%; }
 }
 .sheet-heading h2 {
@@ -3463,3 +3450,27 @@ body {
     font-size: 14px;
   }
 }
+
+/* Point-table editing and ordering controls. */
+.point-draft-bar { display:flex; align-items:center; flex-wrap:wrap; gap:10px; padding:10px 14px; background:#eef6f3; border-block:1px solid var(--border); }
+.point-draft-bar > span { flex:1; min-width:220px; }
+.point-draft-bar label { display:flex; align-items:center; gap:8px; }
+.point-draft-bar input[type=number] { width:85px; padding:6px; }
+.point-order-hint { margin:0; padding:6px 14px; color:var(--muted); font-size:12px; }
+.point-row-order { min-width:76px; white-space:nowrap; }
+.drag-handle { display:inline-flex; vertical-align:middle; cursor:grab; }
+.drag-handle:active { cursor:grabbing; }
+.drag-handle:disabled { cursor:default; opacity:.3; }
+.point-drop-target > td { box-shadow:inset 0 3px #267b64; background:#e6f4ed; }
+.point-editing-row > td { background:#f0f8f4; vertical-align:top; }
+.point-editable-cell { min-height:30px; width:100%; text-align:left; border-radius:3px; }
+.point-editable-cell:hover { background:#e5f1ec; box-shadow:inset 0 0 0 1px #a9cbbd; }
+.point-value-input { min-width:125px; max-width:270px; }
+.point-value-input input:not([type=checkbox]), .point-value-input select { width:100%; padding:7px; border:1px solid #8bb5a4; border-radius:4px; font:inherit; background:white; color:inherit; }
+.point-value-input small { display:block; white-space:normal; color:var(--muted); margin-top:4px; font-size:11px; }
+
+.point-groups { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 16px 20px; border-bottom: 1px solid var(--border); }
+.point-groups > span { font-weight: 600; margin-right: 8px; }
+.point-group-contexts { margin: 12px 20px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.point-forwarding { min-width: 0; }
+.point-forwarding .sheet-heading, .point-forwarding .table-toolbar { padding-left: 0; padding-right: 0; }

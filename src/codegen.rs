@@ -29,7 +29,9 @@ pub(crate) fn c_string(s: &str) -> String {
 }
 pub async fn generate(tx: &mut Transaction<'_, Postgres>, pid: i64) -> Result<Value> {
     let graph = crate::topology::snapshot(tx, pid, true).await?;
-    crate::topology_codegen::generate(&graph)
+    let mut generated = crate::topology_codegen::generate(&graph)?;
+    generated["revision"] = graph["revision"].clone();
+    Ok(generated)
 }
 pub fn zip_files(files: &Value, manifest: &Value) -> Result<Vec<u8>> {
     let mut z = zip::ZipWriter::new(Cursor::new(Vec::new()));

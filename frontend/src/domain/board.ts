@@ -1,5 +1,5 @@
 import type { Row } from "../api";
-import type { PointKind } from "./pointTables";
+import type { PointKind, PointSchema } from "./pointTables";
 
 export type Sheet = {
   key: string;
@@ -31,20 +31,6 @@ export const boardSheets: Sheet[] = [
     entity: "signal_bindings",
     role: "server",
   },
-  {
-    key: "ranges",
-    label: "范围表 · range",
-    entity: "signal_ranges",
-    columns: [
-      "signal_name",
-      "resolved_sig_id",
-      "default_value",
-      "min_value",
-      "max_value",
-      "boot_restore",
-      "manual_restore",
-    ],
-  },
   { key: "fields", label: "协议字段", entity: "protocol_fields" },
   { key: "data", label: "数据定义", entity: "data_items" },
   { key: "routes", label: "透传路由", entity: "passthrough_routes" },
@@ -69,7 +55,7 @@ export const boardSheets: Sheet[] = [
   },
   { key: "endpoints", label: "协议端点", entity: "endpoints" },
   { key: "contexts", label: "逻辑设备", entity: "device_contexts" },
-  { key: "groups", label: "信号组", entity: "signal_groups" },
+  { key: "groups", label: "点表分组", entity: "signal_groups" },
 ];
 export const projectSheets: Sheet[] = [
   { key: "models", label: "板卡模板", entity: "board_models" },
@@ -83,6 +69,31 @@ export const projectSheets: Sheet[] = [
     columns: ["sheet", "row_number", "classification"],
   },
 ];
+export function configuredBoardSheets(
+  schema: PointSchema,
+  code: string,
+): Sheet[] {
+  const board = schema.workspace?.boards?.[code];
+  const keys =
+    board?.tables ??
+    schema.workspace?.default_tables ??
+    ["process", "collect", "forward"];
+  return keys.flatMap((key) => {
+    const sheet = boardSheets.find((s) => (s.pointKind || s.key) === key);
+    return sheet
+      ? [
+          {
+            ...sheet,
+            label:
+              board?.labels?.[key] ??
+              (sheet.pointKind
+                ? schema.tables[sheet.pointKind].label
+                : sheet.label),
+          },
+        ]
+      : [];
+  });
+}
 export const rows = (g: Row, table: string): Row[] => g[table] || [];
 export function boardScope(g: Row, board: Row) {
   const modelId = board.model_id;

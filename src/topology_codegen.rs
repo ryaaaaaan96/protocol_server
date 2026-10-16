@@ -112,10 +112,9 @@ pub fn generate(g: &Value) -> Result<Value> {
             .iter()
             .filter(|e| n(e, "model_id") == mid && e["enabled"] == true)
             .collect();
-        let contexts: Vec<_> = rows(g, "device_contexts")
-            .iter()
-            .filter(|c| n(c, "model_id") == mid)
-            .collect();
+        let resolved_contexts =
+            crate::virtual_service::contexts(g, model).map_err(AppError::bad)?;
+        let contexts: Vec<_> = resolved_contexts.iter().collect();
         let links: Vec<_> = rows(g, "board_links")
             .iter()
             .filter(|l| l["client_board_id"] == board["id"])

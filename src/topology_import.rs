@@ -15,6 +15,7 @@ async fn insert(tx: &mut Transaction<'_, Postgres>, pid: i64, t: &str, v: Value)
             pid,
             &Change {
                 revision: 0,
+                expected: Value::Null,
                 entity: t.into(),
                 operation: "create".into(),
                 id: None,

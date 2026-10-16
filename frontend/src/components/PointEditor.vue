@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
-import { api, type Row } from "../api";
+import { computed, ref, watch, onBeforeUnmount } from "vue";
+import { api, revisionConflict, type Row } from "../api";
 import {
   choiceLabel,
   pointChoices,
@@ -16,8 +16,11 @@ const props = defineProps<{
   row: Row | null;
   canWrite: boolean;
   processEnabled: boolean;
+  groupId?: number;
+  signalId?: number;
+  contextId?: number;
 }>();
-const emit = defineEmits<{ close: []; done: [] }>();
+const emit = defineEmits<{ close: []; done: [merged?: boolean]; error: [message: string]; conflict: []; dirty: [value: boolean] }>();
 const def = props.data.definition;
 const values = ref<Row>({});
 for (const key of def.editor) {
@@ -34,13 +37,14 @@ for (const key of def.editor) {
 }
 if (!props.row) {
   if (props.data.kind === "process") {
-    values.value.group_id = props.data.options.groups[0]?.id ?? null;
+    values.value.group_id = props.groupId ?? props.data.options.groups[0]?.id ?? null;
     values.value.process_enabled = props.processEnabled;
   } else {
     values.value.endpoint_id =
       pointChoices(props.data, "endpoint_id", values.value)[0]?.id ?? null;
     values.value.context_id =
-      pointChoices(props.data, "context_id", values.value)[0]?.id ?? null;
+      props.contextId ?? pointChoices(props.data, "context_id", values.value)[0]?.id ?? null;
+    if (props.signalId != null) values.value.signal_id = props.signalId;
   }
 }
 const initial: Row = JSON.parse(JSON.stringify(values.value));
@@ -48,6 +52,17 @@ const preview = ref<Row | null>(null),
   busy = ref(false),
   error = ref("");
 const operation = ref(props.row ? "update" : "create");
+const dirty = computed(() => JSON.stringify(values.value) !== JSON.stringify(initial));
+watch(dirty, value => emit("dirty", value), { immediate: true, flush: "sync" });
+onBeforeUnmount(() => emit("dirty", false));
+function close() {
+  if (busy.value) return;
+  if (dirty.value && !window.confirm("有未保存的修改，是否放弃？")) return;
+  emit("close");
+}
+function locked(key: string) {
+  return (key === "group_id" && props.groupId != null) || (key === "signal_id" && props.signalId != null);
+}
 const inherited = computed(() =>
   props.data.options.data.find((d) => d.id === values.value.data_item_id),
 );
@@ -100,10 +115,14 @@ async function review(op = props.row ? "update" : "create") {
         operation: op,
         id: props.row?.id ?? null,
         values: op === "delete" ? {} : changed,
+        expected: initial,
       },
     );
+    if (preview.value && !preview.value.allowed) emit("error", preview.value.errors.map((e: Row) => e.message).join("；") || "关联检查未通过");
   } catch (e) {
     error.value = (e as Error).message;
+    emit("error", error.value);
+    if (revisionConflict(e)) emit("conflict");
   } finally {
     busy.value = false;
   }
@@ -112,14 +131,16 @@ async function commit() {
   busy.value = true;
   error.value = "";
   try {
-    await api(
+    const result = await api(
       `/projects/${props.pid}/changes/${preview.value!.id}/commit`,
       "POST",
       {},
     );
-    emit("done");
+    emit("done", !!(result.merged || preview.value?.merged));
   } catch (e) {
     error.value = (e as Error).message;
+    emit("error", error.value);
+    if (revisionConflict(e)) emit("conflict");
     preview.value = null;
   } finally {
     busy.value = false;
@@ -145,11 +166,15 @@ function delta(change: Row): string {
   <Modal
     :title="`${row ? (canWrite ? '编辑' : '查看') : '新建'}${def.label}`"
     wide
-    @close="!busy && emit('close')"
+    @close="close"
   >
     <form @submit.prevent="review()">
       <div class="modal-body">
         <p class="muted">{{ def.description }}</p>
+        <p v-if="data.kind === 'process' && values.group_id != null" class="notice">
+          使用此组的设备：{{ data.options.contexts.filter(c => c.group_id === values.group_id).map(c => `${c.name} [${c.dev_id}]`).join('、') || '暂无' }}。
+          点定义和范围修改会作用于这些设备。
+        </p>
         <div
           v-if="data.kind === 'process' && inherited"
           class="notice point-inheritance"
@@ -170,7 +195,7 @@ function delta(change: Row): string {
               v-if="def.fields[key].reference"
               :aria-label="def.fields[key].label"
               :value="values[key] ?? ''"
-              :disabled="!canWrite || busy"
+              :disabled="!canWrite || busy || locked(key)"
               :required="!def.fields[key].nullable"
               @change="set(key, $event)"
             >
@@ -214,6 +239,7 @@ function delta(change: Row): string {
         </div>
         <div v-if="error" class="notice danger" role="alert">{{ error }}</div>
         <section v-if="preview" class="change-preview">
+          <p v-if="preview.merged" class="notice">已合并其他成员的无关修改，请确认最新关联影响。</p>
           <h3>关联变更预览 · {{ preview.impact.count }} 项变化</h3>
           <div :class="['notice', { danger: !preview.allowed }]" role="status">
             {{
@@ -228,6 +254,7 @@ function delta(change: Row): string {
               preview.impact.affected_types.map((t: Row) => t.code).join("、")
             }}
           </p>
+          <p v-if="preview.impact.affected_contexts?.length">涉及设备：{{ preview.impact.affected_contexts.map((c: Row) => `${c.name} [${c.dev_id}]`).join('、') }}</p>
           <div class="impact-list">
             <article v-for="(c, i) in preview.impact.changes" :key="i">
               <strong>{{
@@ -255,7 +282,7 @@ function delta(change: Row): string {
           type="button"
           class="button"
           :disabled="busy"
-          @click="emit('close')"
+          @click="close"
         >
           关闭
         </button>
