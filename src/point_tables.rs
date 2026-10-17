@@ -37,7 +37,7 @@ pub fn is_point_entity(entity: &str) -> bool {
 fn keys(csv: &str) -> BTreeSet<&str> {
     csv.split(',').collect()
 }
-fn writable(kind: &str) -> BTreeSet<&str> {
+pub(crate) fn writable(kind: &str) -> BTreeSet<&str> {
     match kind {
         "process" => keys(PROCESS).union(&keys(RANGE)).copied().collect(),
         "collect" => keys(BINDING).union(&keys(COLLECTION)).copied().collect(),

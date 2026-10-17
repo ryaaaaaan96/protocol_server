@@ -34,35 +34,75 @@ export async function checkPointInteractions(page, { pid, modelId, record, table
   await expect(page.locator(".drag-handle").first()).toBeDisabled();
   await page.getByLabel("搜索当前表格").fill("");
 
-  const startInline = async () => {
-    await expect(record().first()).toHaveText(firstName);
-    await record().first().click();
+  await expect(page.getByLabel("保存方式", { exact: true })).toHaveCount(0);
+  await record().first().click();
+  await expect(page.locator("dialog")).toHaveCount(0);
+  await expect(tableRows().locator("input,select")).toHaveCount(0);
+  await expect(tableRows().first().locator("td").last()).toHaveClass("point-actions");
+  await expect(page.locator(".point-table th.point-actions .point-fixed-label")).toHaveText("固定");
+  const colors = await tableRows().first().evaluate(row => ({
+    action: getComputedStyle(row.querySelector(".point-actions")).backgroundColor,
+    data: getComputedStyle(row.querySelector("[data-column-key]")).backgroundColor,
+  }));
+  expect(colors.action).not.toBe(colors.data);
+  const scroll = page.locator(".point-table");
+  const settings = () => tableRows().first().getByRole("button", { name: "设置", exact: true });
+  const close = async () => {
+    await page.locator("dialog").getByRole("button", { name: "关闭", exact: true }).last().click();
     await expect(page.locator("dialog")).toHaveCount(0);
+  };
+  const desktop = page.viewportSize();
+  for (const viewport of [desktop, { width: 390, height: 844 }]) {
+    await page.setViewportSize(viewport);
+    await settings().scrollIntoViewIfNeeded();
+    const overflow = await scroll.evaluate(el => el.scrollWidth - el.clientWidth);
+    expect(overflow).toBeGreaterThan(100);
+    for (const fraction of [0, 0.5, 1]) {
+      await scroll.evaluate((el, fraction) => { el.scrollLeft = (el.scrollWidth - el.clientWidth) * fraction; }, fraction);
+      // The final column stays at the scroll viewport's right edge, at every offset.
+      await expect.poll(() => scroll.evaluate(el => {
+        const edge = el.getBoundingClientRect().left + el.clientLeft + el.clientWidth;
+        return Math.abs(el.querySelector("tbody td.point-actions").getBoundingClientRect().right - edge);
+      })).toBeLessThan(2);
+      await expect(settings()).toBeInViewport();
+      await settings().click();
+      await expect(page.locator("dialog")).toContainText("编辑DSP内部数据");
+      await close();
+    }
+  }
+  await page.setViewportSize(desktop);
+  await scroll.evaluate(el => { el.scrollLeft = 0; });
+  const startSettings = async () => {
+    await expect(record().first()).toHaveText(firstName);
+    await settings().click();
     await page.getByLabel("信号名称", { exact: true }).fill(`${firstName} UI 检查`);
   };
-  await startInline();
-  // Declining navigation preserves the draft.
+  await startSettings();
+  // Closing without confirmation preserves form input; editing sends no autosave/check requests.
+  const writes = [];
+  const track = request => { if (request.method() === "POST") writes.push(request.url()); };
+  page.on("request", track);
+  await page.waitForTimeout(900);
+  page.off("request", track);
+  expect(writes).toEqual([]);
   page.once("dialog", d => d.dismiss());
-  await page.getByRole("tab", { name: /^转发点表/ }).click();
+  await page.locator("dialog").getByRole("button", { name: "关闭", exact: true }).last().click();
   await expect(page.getByLabel("信号名称", { exact: true })).toHaveValue(`${firstName} UI 检查`);
   await review();
-  await expect(page.locator("dialog")).toContainText("单元格变更预览");
+  await expect(page.locator("dialog")).toContainText("关联变更预览");
   const commitRoute = `**/api/projects/${pid}/changes/*/commit`;
-  await page.route(commitRoute, route => route.fulfill({ status: 500, json: { error: "测试：保存失败" } }));
-  await confirm();
-  await expect(page.locator(".toast.error")).toContainText("测试：保存失败");
-  await expect(page.locator("dialog")).toBeVisible();
-  await back();
-  await page.unroute(commitRoute);
-  await review();
-  // A business 409 (duplicate name) must preserve edits, not act as a revision conflict.
-  await page.route(commitRoute, route => route.fulfill({ status: 409, json: { error: "名称或编号已存在" } }));
-  await confirm();
-  await expect(page.locator(".toast.error")).toContainText("名称或编号已存在");
-  await expect(page.locator("dialog")).toBeVisible();
-  await back();
-  await page.unroute(commitRoute);
-  await review();
+  for (const [status, json] of [
+    [500, { error: "测试：保存失败" }],
+    [409, { error: "名称或编号已存在" }],
+  ]) {
+    await page.route(commitRoute, route => route.fulfill({ status, json }));
+    await confirm();
+    await expect(page.locator(".toast.error")).toContainText(json.error);
+    await expect(page.locator("dialog")).toBeVisible();
+    await expect(page.getByLabel("信号名称", { exact: true })).toHaveValue(`${firstName} UI 检查`);
+    await page.unroute(commitRoute);
+    await review();
+  }
   await page.route(commitRoute, route => route.fulfill({ status: 409, json: {
     error: "相同字段已被其他成员修改，本次修改未保存", code: "REVISION_CONFLICT",
     expected_revision: before.revision, current_revision: before.revision + 1,
@@ -70,20 +110,19 @@ export async function checkPointInteractions(page, { pid, modelId, record, table
   await confirm();
   await expect(page.locator(".toast.error")).toContainText("本次修改未保存");
   await expect(page.locator("dialog")).toHaveCount(0);
-  await expect(page.locator(".point-draft-bar")).toHaveCount(0);
   await expect(record().first()).toHaveText(firstName);
   await page.unroute(commitRoute);
 
-  await startInline();
+  await startSettings();
   await review();
   await page.route(commitRoute, route => route.fulfill({ json: { merged: true, revision: before.revision + 1 } }));
   await confirm();
   await expect(page.locator(".toast:not(.error)")).toContainText("已自动合并");
-  await expect(page.locator(".point-draft-bar")).toHaveCount(0);
+  await expect(page.locator("dialog")).toHaveCount(0);
   await expect(record().first()).toHaveText(firstName);
   await page.unroute(commitRoute);
   const after = await (await page.request.get(dataUrl)).json();
   expect(after.revision).toBe(before.revision);
   expect(after.rows.map(r => r.id)).toEqual(before.rows.map(r => r.id));
-  console.log("PASS: native drag, keyboard and cross-page order, inline edit, dirty guard, success/failure toasts and conflict rollback");
+  console.log("PASS: row ordering, fixed final actions on desktop/mobile, read-only cells, explicit settings/preview/commit, toasts and conflict rollback");
 }

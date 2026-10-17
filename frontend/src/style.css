@@ -3474,3 +3474,30 @@ body {
 .point-group-contexts { margin: 12px 20px; color: var(--muted); font-size: 13px; line-height: 1.6; }
 .point-forwarding { min-width: 0; }
 .point-forwarding .sheet-heading, .point-forwarding .table-toolbar { padding-left: 0; padding-right: 0; }
+
+.point-table .point-actions {
+  position: sticky;
+  right: 0;
+  z-index: 3;
+  width: 1%;
+  white-space: nowrap;
+  background: #eff6ff;
+  box-shadow: -2px 0 0 #bfd4ed, -5px 0 9px #20374b14;
+}
+.point-table th.point-actions { z-index: 5; background: #dceafb; color: #254e7c; }
+.point-table tbody tr:hover .point-actions,
+.point-table .point-actions:focus-within { background: #e0edfc; }
+.point-actions-title { display: flex; align-items: center; gap: 8px; }
+.point-fixed-label { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; font-weight: 500; color: #39628f; }
+.point-action-buttons { display: flex; align-items: center; gap: 12px; }
+.point-table .record-name { color: inherit; }
+.point-table td[data-column-key] { position: static; background: inherit; box-shadow: none; }
+.point-table th[data-column-key] { left: auto; z-index: 2; background: #f3f6f8; box-shadow: 0 1px 0 #dce5eb; }
+.point-table td.point-frozen { position: sticky; z-index: 1; background: #fff; box-shadow: 1px 0 0 #e6edf0; }
+.point-table th.point-frozen { z-index: 4; }
+.point-column-list { display: grid; gap: 4px; margin: 16px 0; }
+.point-column-item { display: flex; align-items: center; gap: 8px; padding: 7px; border: 1px solid var(--border); border-radius: 5px; }
+.point-column-item label { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+.point-column-item .point-column-visible { flex: 1; }
+.point-column-item .icon-btn { flex-shrink: 0; width: 26px; height: 26px; }
+.column-drag-handle { cursor: grab; }

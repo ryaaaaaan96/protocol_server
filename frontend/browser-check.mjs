@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import { checkPointInteractions } from "./point-interactions-check.mjs";
 import { checkPointGroups } from "./point-groups-check.mjs";
+import { checkPointColumns } from "./point-columns-check.mjs";
 import { fileURLToPath } from "node:url";
 import { chromium, expect } from "@playwright/test";
 process.chdir(fileURLToPath(new URL(".", import.meta.url)));
@@ -18,6 +19,11 @@ const page = await browser.newPage({
   }),
   errors = [];
 page.on("pageerror", (e) => errors.push(e.message));
+// Every intended commit is intercepted by its test; never write development data.
+await page.route("**/api/projects/*/changes/*/commit", route => {
+  errors.push("Unexpected commit: " + route.request().url());
+  return route.fulfill({ status: 500, json: { error: "浏览器测试禁止未拦截的提交" } });
+});
 const nav = page.getByRole("navigation", { name: "项目与板卡导航" });
 const tab = (name) => page.getByRole("tab", { name: new RegExp(`^${name}`) });
 const auxiliary = async (name) => {
@@ -36,7 +42,7 @@ const close = async () => {
 const record = () => page.locator(".sheet-scroll .record-name");
 const openRecord = async (name = record().first()) => {
   await expect(name).toBeVisible();
-  const details = name.locator("xpath=ancestor::tr").getByRole("button", { name: "详细配置", exact: true });
+  const details = name.locator("xpath=ancestor::tr").getByRole("button", { name: /^(设置|查看)$/, exact: true });
   if (await details.count()) await details.click();
   else await name.click();
 };
@@ -363,7 +369,7 @@ try {
     ),
     signal = g.v_signals.find((s) => s.id === range.signal_id);
   await page.getByLabel("搜索当前表格").fill(signal.name);
-  await openRecord(page.locator(".sheet-scroll").getByRole("button", { name: signal.name, exact: true }));
+  await openRecord(page.locator(".sheet-scroll").getByText(signal.name, { exact: true }));
   await expect(page.getByLabel("默认值覆盖", { exact: true })).toHaveValue(
     range.default_value ?? "",
   );
@@ -408,6 +414,7 @@ try {
     expect(group).toBe("DSP 源变量");
   await expect(tab("逻辑设备")).toHaveCount(0);
   await checkPointInteractions(page, { pid, modelId: dsp.id, record, tableRows });
+  await checkPointColumns(page, { pid, modelId: dsp.id });
   // Override only the response: exercise presentation without editing project data.
   const schemaRoute = `**/api/projects/${pid}/point-tables/schema`;
   const display = await (await page.request.get(`/api/projects/${pid}/point-tables/schema`)).json();

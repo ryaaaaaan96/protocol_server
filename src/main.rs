@@ -6,6 +6,7 @@ mod db;
 mod error;
 mod importer;
 mod model;
+mod point_batch;
 mod point_order;
 mod point_tables;
 mod project_config;
@@ -144,6 +145,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/projects/{pid}/board-models/{mid}/point-tables/{kind}/preview",
             post(point_tables::preview),
+        )
+        .route(
+            "/projects/{pid}/board-models/{mid}/point-tables/{kind}/batch/preview",
+            post(point_batch::preview),
         )
         .route("/project-template", get(project_config::template))
         .route(

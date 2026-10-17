@@ -429,15 +429,24 @@ pub async fn preview(
     // SQLx manages the savepoint and rolls it back on early return/drop.
     let mut proposed = tx.begin().await?;
     let applied = apply_change(&s, &mut proposed, pid, &c).await;
-    if let Err(e) = applied {
-        proposed.rollback().await?;
-        return Ok(Json(
-            json!({"allowed":false,"revision":revision,"errors":[{"message":e.1}],"impact":{"count":0,"changes":[]}}),
-        ));
-    }
+    let applied = match applied {
+        Ok(record) => record,
+        Err(e) => {
+            proposed.rollback().await?;
+            let errors =
+                e.2.and_then(|details| details.get("errors").cloned())
+                    .unwrap_or_else(|| json!([{"message":e.1}]));
+            return Ok(Json(
+                json!({"allowed":false,"revision":revision,"errors":errors,"impact":{"count":0,"changes":[]}}),
+            ));
+        }
+    };
     let after = snapshot(&mut proposed, pid, true).await?;
     let after_report = crate::topology_validation::validate(&after);
-    let errors = new_errors(&before_report, &after_report);
+    let mut errors = new_errors(&before_report, &after_report);
+    if c.entity == "point_batch" {
+        crate::point_batch::annotate(&mut errors, &applied);
+    }
     let effects = impact(&before, &after);
     proposed.rollback().await?;
     if !errors.is_empty() {
@@ -473,7 +482,14 @@ pub async fn commit(
     let has_baseline = crate::change_merge::eligible(&c)
         && !pending["merge_base"].is_null()
         && !pending["merge_patch"].is_null();
-    if merged && !has_baseline {
+    if c.entity == "point_batch" {
+        crate::point_batch::guard(
+            &pending["merge_base"],
+            &crate::change_merge::document(&before),
+            &c,
+            revision,
+        )?;
+    } else if merged && !has_baseline {
         return Err(AppError::revision_conflict(c.revision, revision));
     }
     let target = if has_baseline {
@@ -491,7 +507,15 @@ pub async fn commit(
     };
     let row = apply_change(&s, &mut tx, pid, &c).await.map_err(|error| {
         if merged {
-            crate::change_merge::conflict(&c, revision, &format!("合并后无法应用修改：{}", error.1))
+            let mut conflict = crate::change_merge::conflict(
+                &c,
+                revision,
+                &format!("合并后无法应用修改：{}", error.1),
+            );
+            if let Some(errors) = error.2.and_then(|details| details.get("errors").cloned()) {
+                conflict.2.as_mut().unwrap()["errors"] = errors;
+            }
+            conflict
         } else {
             error
         }
@@ -504,17 +528,21 @@ pub async fn commit(
             "合并后关联影响已超出原预览，需重新确认",
         ));
     }
-    if !new_errors(
+    let mut errors = new_errors(
         &crate::topology_validation::validate(&before),
         &crate::topology_validation::validate(&after),
-    )
-    .is_empty()
-    {
-        return Err(if merged {
+    );
+    if !errors.is_empty() {
+        if c.entity == "point_batch" {
+            crate::point_batch::annotate(&mut errors, &row);
+        }
+        let mut error = if merged {
             crate::change_merge::conflict(&c, revision, "合并后关联配置不一致")
         } else {
             AppError::conflict("变更导致关联配置不一致")
-        });
+        };
+        error.2.get_or_insert(json!({}))["errors"] = json!(errors);
+        return Err(error);
     }
     let effects = impact(&before, &after);
     let before_record = if c.entity == "point_order" {
@@ -549,7 +577,9 @@ async fn apply_change(
     pid: i64,
     c: &Change,
 ) -> Result<Value> {
-    if c.entity == "point_order" {
+    if c.entity == "point_batch" {
+        crate::point_batch::apply(tx, pid, c).await
+    } else if c.entity == "point_order" {
         crate::point_order::apply(tx, pid, c, &s.project_files).await
     } else {
         apply(tx, pid, c).await

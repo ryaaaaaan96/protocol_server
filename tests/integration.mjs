@@ -1,6 +1,7 @@
 // Real PostgreSQL + HTTP tests in an isolated, disposable database.
 import fs from "node:fs";
 import { checkPointEditing } from "./point-editing.mjs";
+import { checkPointBatch } from "./point-batch.mjs";
 import path from "node:path";
 import crypto from "node:crypto";
 import assert from "node:assert/strict";
@@ -1316,6 +1317,7 @@ try {
   ok(exportedEndpoints.every((e) => e.transport === "CANFD"));
 
   await checkPointEditing({ client, engineer: e, viewer: v, engineerId: engineer.id, viewerId: viewer.id, equal, ok });
+  await checkPointBatch({ client, engineer: e, viewer: v, engineerId: engineer.id, viewerId: viewer.id, password, equal, ok });
   const direct = new pg.Client({ connectionString: appUrl.toString() });
   await direct.connect();
   equal(

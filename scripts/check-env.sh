@@ -73,6 +73,11 @@ if [[ -f .runtime/db-tools/node_modules/pg/lib/index.js ]]; then ready '集成�
 else need '集成测试所需 pg 客户端' 'npm install --prefix .runtime/db-tools pg'; fi
 
 printf '\n前端与浏览器测试\n'
+if [[ -f scripts/excel-batch/node_modules/exceljs/excel.js ]]; then
+  ready 'Excel 批量追加示例依赖（ExcelJS）'
+else
+  need 'Excel 批量追加示例依赖（集成测试也使用）' 'npm ci --prefix scripts/excel-batch'
+fi
 if [[ -x frontend/node_modules/.bin/vite && -x frontend/node_modules/.bin/vue-tsc ]]; then
   ready '前端构建依赖'
 else

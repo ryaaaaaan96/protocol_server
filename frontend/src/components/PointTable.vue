@@ -1,17 +1,17 @@
 <script setup lang="ts">
-import { computed, ref, watch, onBeforeUnmount } from "vue";
+import { computed, ref, watch, nextTick, onBeforeUnmount } from "vue";
 import { api, revisionConflict, type Row } from "../api";
 import {
   pointText,
-  pointChoices,
   type PointKind,
   type PointTableData,
 } from "../domain/pointTables";
-import { Search, Plus, ChevronLeft, ChevronRight, GripVertical } from "@lucide/vue";
+import { Search, Plus, ChevronLeft, ChevronRight, GripVertical, Pin } from "@lucide/vue";
 import Loading from "./Loading.vue";
 import Empty from "./Empty.vue";
 import PointEditor from "./PointEditor.vue";
-import PointValueInput from "./PointValueInput.vue";
+import PointColumns from "./PointColumns.vue";
+import { restoreColumns, orderedColumns, type TableColumn } from "../domain/tableColumns";
 import PointChangePreview from "./PointChangePreview.vue";
 import Modal from "./Modal.vue";
 const props = defineProps<{
@@ -44,14 +44,10 @@ const editing = ref(false),
   selected = ref<Row | null>(null);
 const reload = ref(0);
 const editorDirty = ref(false), forwardDirty = ref(false), forwardSignal = ref<Row | null>(null);
-const draft = ref<{row: Row; values: Row; initial: Row; column: string} | null>(null);
 const orderDraft = ref<{key: string; ids: number[]; original: Row[]} | null>(null);
 const moving = ref<Row | null>(null), movePosition = ref(1), dragging = ref<Row | null>(null);
 const dropId = ref<number>(), review = ref<Row | null>(null), busy = ref(false), actionError = ref("");
-const changedValues = computed(() => draft.value ? Object.fromEntries(
-  Object.entries(draft.value.values).filter(([key,value]) => JSON.stringify(value) !== JSON.stringify(draft.value!.initial[key])),
-) : {});
-const dirty = computed(() => !!orderDraft.value || Object.keys(changedValues.value).length > 0 || editorDirty.value || forwardDirty.value);
+const dirty = computed(() => !!orderDraft.value || editorDirty.value || forwardDirty.value);
 watch(dirty, value => emit("dirty", value), {flush:"sync"});
 onBeforeUnmount(() => emit("dirty", false));
 watch(
@@ -66,7 +62,6 @@ watch(
     data.value = null;
     error.value = "";
     editing.value = false;
-    draft.value = null;
     orderDraft.value = null;
     moving.value = null;
     review.value = null;
@@ -93,6 +88,44 @@ watch(
   },
 );
 const def = computed(() => data.value?.definition);
+const columnSettings = ref(false), columns = ref<TableColumn[]>([]);
+const columnKey = computed(() => `point-columns:${props.pid}:${props.modelId}:${props.kind}`);
+const displayColumns = computed(() => orderedColumns(columns.value).filter(c => c.visible));
+watch([() => def.value?.columns, columnKey], ([keys]) => {
+  if (!keys) return;
+  let saved: unknown;
+  try { saved = JSON.parse(localStorage.getItem(columnKey.value) || "null"); } catch {}
+  columns.value = restoreColumns(keys, saved);
+}, { immediate: true });
+function applyColumns(settings: TableColumn[]) {
+  columns.value = restoreColumns(def.value!.columns, settings);
+  columnSettings.value = false;
+  try { localStorage.setItem(columnKey.value, JSON.stringify(columns.value)); }
+  catch { emit("error", "列设置已应用，但浏览器未能保存；刷新后会恢复默认。"); }
+}
+const tableHead = ref<HTMLElement>(), frozenLeft = ref<Record<string, number>>({});
+function measureColumns() {
+  const head = tableHead.value;
+  if (!head) return;
+  let left = head.querySelector(".row-number")?.getBoundingClientRect().width || 0;
+  const offsets: Record<string, number> = {};
+  for (const column of displayColumns.value.filter(c => c.frozen)) {
+    offsets[column.key] = left;
+    const cell = [...head.querySelectorAll<HTMLElement>("[data-column-key]")].find(el => el.dataset.columnKey === column.key);
+    left += cell?.getBoundingClientRect().width || 0;
+  }
+  if (JSON.stringify(offsets) !== JSON.stringify(frozenLeft.value)) frozenLeft.value = offsets;
+}
+watch([tableHead, displayColumns], async (_, __, cleanup) => {
+  let cancelled = false;
+  let observer: ResizeObserver | undefined;
+  cleanup(() => { cancelled = true; observer?.disconnect(); });
+  await nextTick();
+  if (cancelled || !tableHead.value) return;
+  observer = new ResizeObserver(measureColumns);
+  for (const cell of tableHead.value.querySelectorAll("th")) observer.observe(cell);
+  measureColumns();
+}, { flush: "post" });
 const scopedData = computed<PointTableData | null>(() => {
   if (!data.value) return null;
   const options = { ...data.value.options };
@@ -103,6 +136,11 @@ const scopedData = computed<PointTableData | null>(() => {
   }
   if (props.signalId != null) options.signals = options.signals.filter(s => s.id === props.signalId);
   return { ...data.value, options };
+});
+const contextOptions = computed(() => scopedData.value?.options.contexts.filter(c => c.group_id != null) || []);
+watch(contextOptions, options => {
+  if (!data.value) return;
+  if (filter.value !== "" && !options.some(c => c.id === filter.value)) filter.value = "";
 });
 function inScope(row: Row) {
   return (props.signalId == null || row.signal_id === props.signalId) &&
@@ -123,9 +161,7 @@ const filtered = computed(() =>
     .filter(
       ({ row, search }) =>
         inScope(row) &&
-        (!filter.value ||
-          row[props.kind === "process" ? "group_id" : "context_id"] ===
-            filter.value) &&
+        (!filter.value || row.context_id === filter.value) &&
         search.includes(query.value.trim().toLowerCase()),
     )
     .map(({ row }) => row),
@@ -163,40 +199,14 @@ function discard() {
 }
 function cancel() {
   if (data.value && orderDraft.value) data.value.rows = orderDraft.value.original;
-  draft.value = null;
   orderDraft.value = null;
   moving.value = null;
   dragging.value = null;
   dropId.value = undefined;
   actionError.value = "";
 }
-function editCell(row:Row, column:string) {
-  if (!props.canWrite || !def.value?.inline[column]) { open(row); return; }
-  if (draft.value && draft.value.row.id === row.id) { draft.value.column = column; return; }
-  if (!discard()) return;
-  const values = Object.fromEntries(def.value.editor.map(key => [key,
-    Object.hasOwn(row.edit_values,key) ? row.edit_values[key] : (def.value!.fields[key].default ?? null),
-  ]));
-  draft.value = {row, values, initial: structuredClone(values), column};
-}
-function setValue(key:string, value:unknown) {
-  if (!draft.value || !data.value || !def.value || busy.value || review.value) return;
-  draft.value.values[key] = value;
-  actionError.value = "";
-  if (key === "sig_id" && value != null && def.value.editor.includes("sig_symbol")) draft.value.values.sig_symbol = null;
-  if (def.value.fields[key].reference) {
-    for (let pass=0; pass<2; pass++) for (const field of def.value.editor) {
-      if (def.value.fields[field].reference && draft.value.values[field] != null &&
-          !pointChoices(scopedData.value!,field,draft.value.values).some(r => r.id === draft.value!.values[field])) draft.value.values[field] = null;
-    }
-  }
-}
-const missingReferences = computed(() => !draft.value || !def.value ? [] : def.value.editor.filter(key =>
-  def.value!.fields[key].reference && !def.value!.fields[key].nullable && draft.value!.values[key] == null &&
-  !def.value!.columns.some(column => def.value!.inline[column] === key),
-));
 const orderEnabled = computed(() => props.canWrite && def.value?.ordering.mode !== "disabled");
-const canReorder = computed(() => orderEnabled.value && !query.value.trim() && !draft.value && !busy.value);
+const canReorder = computed(() => orderEnabled.value && !query.value.trim() && !busy.value);
 function groupKey(row:Row) { return JSON.stringify(def.value!.ordering.group_by.map(key => row[key] ?? 0)); }
 function groupRows(row:Row) { return data.value!.rows.filter(r => groupKey(r) === groupKey(row)); }
 const filteredIds = computed(() => new Set(filtered.value.map(r => r.id)));
@@ -240,14 +250,16 @@ function choosePosition(row:Row) {
   movePosition.value = groupRows(row).findIndex(r => r.id === row.id)+1;
 }
 async function previewChange() {
-  if (!data.value || !dirty.value || busy.value) return;
+  if (!data.value || !orderDraft.value || busy.value || review.value) return;
   busy.value = true;
   actionError.value = "";
   try {
     const base = `/projects/${props.pid}/board-models/${props.modelId}/point-tables/${props.kind}`;
-    review.value = await api(orderDraft.value ? `${base}/reorder/preview` : `${base}/preview`,"POST", orderDraft.value
-      ? {revision:data.value.revision,ids:orderDraft.value.ids,expected:orderDraft.value.original.filter(r => groupKey(r) === orderDraft.value!.key).map(r => r.id)}
-      : {revision:data.value.revision,operation:"update",id:draft.value!.row.id,values:changedValues.value,expected:draft.value!.initial});
+    review.value = await api(`${base}/reorder/preview`, "POST", {
+      revision: data.value.revision,
+      ids: orderDraft.value.ids,
+      expected: orderDraft.value.original.filter(r => groupKey(r) === orderDraft.value!.key).map(r => r.id),
+    });
     if (review.value && !review.value.allowed) emit("error", review.value.errors.map((e:Row) => e.message).join("；") || "关联检查未通过");
   } catch(e) {
     actionError.value = (e as Error).message;
@@ -287,30 +299,31 @@ function text(row: Row, key: string) {
       <div class="search">
         <Search :size="17" /><input
           v-model="query"
-          :disabled="!!draft || !!orderDraft"
+          :disabled="busy || !!review || !!orderDraft"
           aria-label="搜索当前表格"
           placeholder="搜索名称、sigID、地址或枚举…"
         />
       </div>
       <select
-        v-if="kind !== 'process' || groupId == null"
+        v-if="kind !== 'process' && contextOptions.length > 1"
         v-model="filter"
-        :disabled="!!draft || !!orderDraft"
+        :disabled="busy || !!review || !!orderDraft"
         class="point-filter"
-        :aria-label="kind === 'process' ? '筛选点表分组' : '筛选逻辑设备'"
+        aria-label="筛选逻辑设备"
       >
         <option value="">
-          {{ kind === "process" ? "全部点表分组" : "全部逻辑设备" }}
+          全部逻辑设备
         </option>
         <option
-          v-for="o in scopedData!.options[kind === 'process' ? 'groups' : 'contexts'].filter(o => kind === 'process' || o.group_id != null)"
+          v-for="o in contextOptions"
           :key="o.id"
           :value="o.id"
         >
-          {{ o.name }}
+          {{ o.name }} [{{ o.dev_id }}]
         </option>
       </select>
       <div class="inline">
+        <button class="button small" :disabled="busy || !!review" @click="columnSettings = true">列设置</button>
         <span class="muted">{{ filtered.length }} 条</span
         ><button
           v-if="canWrite"
@@ -321,12 +334,10 @@ function text(row: Row, key: string) {
         </button>
       </div>
     </div>
-    <div v-if="draft || orderDraft" class="point-draft-bar" @keydown.esc="!busy && cancel()">
-      <span v-if="draft">正在编辑 {{ draft.row.name || draft.row.signal_name }}；范围留空表示继承。<template v-if="draft.initial.sig_symbol">数字 sigID 生效时将替代公共符号绑定。</template></span>
-      <span v-else>{{ def.ordering.mode === 'protocol' ? '协议布局已调整，提交前检查地址及共享协议影响。' : '显示顺序已调整，保存后项目成员共享此顺序。' }}</span>
+    <div v-if="orderDraft" class="point-draft-bar" @keydown.esc="!busy && cancel()">
+      <span>{{ def.ordering.mode === 'protocol' ? '协议布局已调整，提交前检查地址及共享协议影响。' : '显示顺序已调整，保存后项目成员共享此顺序。' }}</span>
       <button class="button small" :disabled="busy" @click="cancel">取消修改</button>
       <button class="button primary small" :disabled="busy || !dirty" @click="previewChange">检查关联影响</button>
-      <div v-for="key in missingReferences" :key="key"><label>{{ def.fields[key].label }}</label><PointValueInput :disabled="busy || !!review" :data="scopedData!" :field-key="key" :values="draft!.values" @change="setValue(key,$event)" /></div>
     </div>
     <div v-if="actionError" class="notice danger" role="alert">{{ actionError }} <button class="text-button" @click="discard() && reload++">重新载入数据</button></div>
     <div v-if="moving" class="point-draft-bar">
@@ -334,58 +345,54 @@ function text(row: Row, key: string) {
       <button class="button small" @click="move(moving,movePosition)">移动</button><button class="text-button" @click="moving = null">关闭</button>
     </div>
     <p v-if="orderEnabled" class="point-order-hint">拖动第一列手柄调整同组顺序；点击手柄可跨页移动，聚焦后用方向键上下移动。搜索或筛选隐藏了排序组内记录时，需清除筛选或选择全部分组。</p>
-    <div class="table-scroll sheet-scroll">
+    <div class="table-scroll sheet-scroll point-table">
       <table :aria-label="def.label">
-        <thead>
+        <thead ref="tableHead">
           <tr>
             <th class="row-number">#</th>
-            <th v-for="key in def.columns" :key="key">
-              {{ def.fields[key].column_label || def.fields[key].label }}
+            <th v-for="column in displayColumns" :key="column.key" :data-column-key="column.key"
+              :class="{ 'point-frozen': column.frozen }" :style="column.frozen ? { left: `${frozenLeft[column.key] ?? 0}px` } : undefined">
+              {{ def.fields[column.key].column_label || def.fields[column.key].label }}
             </th>
-            <th>操作</th>
+            <th class="point-actions">
+              <span class="point-actions-title">操作 <span class="point-fixed-label" title="固定在右侧，横向滚动时保持可见"><Pin :size="12" aria-hidden="true" />固定</span></span>
+            </th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="(row, i) in visible" :key="row.id" :data-row-id="row.id" :class="{'point-editing-row':draft?.row.id === row.id,'point-drop-target':dropId === row.id}" @dragover="dragOver(row,$event)" @drop="drop(row,$event)" @keydown.esc="!busy && cancel()">
+          <tr v-for="(row, i) in visible" :key="row.id" :data-row-id="row.id" :class="{'point-drop-target':dropId === row.id}" @dragover="dragOver(row,$event)" @drop="drop(row,$event)" @keydown.esc="!busy && cancel()">
             <td class="row-number point-row-order">
               <button v-if="orderEnabled" class="icon-btn drag-handle" :draggable="canMove(row)" :disabled="!canMove(row)" :aria-label="`调整 ${row.name || row.signal_name} 的顺序`" title="拖动排序；点击指定位置；方向键上下移动" @dragstart="startDrag(row,$event)" @dragend="dragging = null; dropId = undefined" @click="choosePosition(row)" @keydown.up.prevent="move(row,groupRows(row).findIndex(r => r.id === row.id))" @keydown.down.prevent="move(row,groupRows(row).findIndex(r => r.id === row.id)+2)"><GripVertical :size="16" /></button>
               {{ (page - 1) * 50 + i + 1 }}
             </td>
-            <td v-for="(key, j) in def.columns" :key="key">
-              <PointValueInput :disabled="busy || !!review || (groupId != null && def.inline[key] === 'group_id') || (signalId != null && def.inline[key] === 'signal_id')" v-if="draft && draft.row.id === row.id && def.inline[key]" :data="scopedData!" :field-key="def.inline[key]" :values="draft.values" :autofocus="draft.column === key" @change="setValue(def.inline[key],$event)" />
-              <button v-else-if="kind === 'process' && key === 'forward_count' && allowForward" class="text-button" :disabled="busy" :aria-label="`${row.name} 的转发配置`" @click="openForward(row)">{{ row.forward_count }} 条配置</button>
-              <button
-                v-else-if="(canWrite && def.inline[key]) || j === 0"
-                :class="['text-button',j === 0 ? 'record-name' : 'point-editable-cell']"
-                :aria-label="j === 0 ? undefined : `编辑 ${row.name || row.signal_name} 的${def.fields[key].column_label || def.fields[key].label}`"
-                :disabled="busy || (!!orderDraft) || (!!draft && draft.row.id !== row.id)"
-                @click="editCell(row,key)"
-              >
-                {{ text(row, key) }}
-              </button>
+            <td v-for="column in displayColumns" :key="column.key" :data-column-key="column.key"
+              :class="{ 'point-frozen': column.frozen }" :style="column.frozen ? { left: `${frozenLeft[column.key] ?? 0}px` } : undefined">
               <span
-                v-else
+                :class="{ 'record-name': column.key === def.columns[0] }"
                 :title="
                   kind === 'process' &&
-                  ['default_value', 'min_value', 'max_value'].includes(key)
-                    ? row.edit_values[key] == null
+                  ['default_value', 'min_value', 'max_value'].includes(column.key)
+                    ? row.edit_values[column.key] == null
                       ? '继承数据定义'
                       : '处理点覆盖值'
                     : undefined
                 "
-                >{{ text(row, key) }}</span
+                >{{ text(row, column.key) }}</span
               >
             </td>
-            <td>
-              <button class="text-button" :disabled="busy" @click="open(row)">详细配置</button>
-              <button v-if="kind === 'process' && allowForward" class="text-button" :disabled="busy" @click="openForward(row)">转发配置</button>
-              <button
-                v-if="kind !== 'process' && signalId == null"
-                class="text-button"
-                @click="discard() && emit('process', row.signal_id)"
-              >
-                关联处理点</button
-              >
+            <td class="point-actions">
+              <div class="point-action-buttons">
+                <button class="text-button" :disabled="busy || !!review" @click="open(row)">{{ canWrite ? '设置' : '查看' }}</button>
+                <button v-if="kind === 'process' && allowForward" class="text-button" :disabled="busy || !!review" @click="openForward(row)">转发配置</button>
+                <button
+                  v-if="kind !== 'process' && signalId == null"
+                  class="text-button"
+                  :disabled="busy || !!review"
+                  @click="discard() && emit('process', row.signal_id)"
+                >
+                  关联处理点</button
+                >
+              </div>
             </td>
           </tr>
         </tbody>
@@ -402,7 +409,7 @@ function text(row: Row, key: string) {
         <button
           class="icon-btn"
           aria-label="上一页"
-          :disabled="page <= 1 || !!draft"
+          :disabled="page <= 1 || busy || !!review"
           @click="page--"
         >
           <ChevronLeft :size="18" /></button
@@ -410,14 +417,15 @@ function text(row: Row, key: string) {
         <button
           class="icon-btn"
           aria-label="下一页"
-          :disabled="page >= pages || !!draft"
+          :disabled="page >= pages || busy || !!review"
           @click="page++"
         >
           <ChevronRight :size="18" />
         </button>
       </div>
     </div>
-    <PointChangePreview v-if="review" :pid="pid" :preview="review" :title="orderDraft ? '排序变更预览' : '单元格变更预览'" @close="review = null" @done="saved" @error="emit('error', $event)" @conflict="conflict" />
+    <PointChangePreview v-if="review" :pid="pid" :preview="review" title="排序变更预览" @close="review = null" @done="saved" @error="emit('error', $event)" @conflict="conflict" />
+    <PointColumns v-if="columnSettings" :definition="def" :columns="columns" @close="columnSettings = false" @apply="applyColumns" />
     <PointEditor
       v-if="editing"
       :key="selected?.id || 'new'"
@@ -427,7 +435,7 @@ function text(row: Row, key: string) {
       :row="selected"
       :can-write="canWrite"
       :process-enabled="processEnabled"
-      :group-id="groupId ?? (kind === 'process' && filter !== '' ? filter : undefined)"
+      :group-id="groupId"
       :signal-id="signalId"
       :context-id="kind !== 'process' && filter !== '' ? filter : undefined"
       @dirty="editorDirty = $event"

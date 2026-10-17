@@ -27,18 +27,18 @@ export async function checkPointGroups(page, { pid, graph: g }) {
   await expect(page.locator("dialog").getByLabel("点表分组", { exact: true })).toBeDisabled();
   await close();
 
-  await page.locator(".sheet-scroll .record-name").first().click();
+  await page.locator(".sheet-scroll tbody tr").first().getByRole("button", { name: "设置", exact: true }).click();
   await page.getByLabel("信号名称", { exact: true }).fill("分组未保存检查");
   page.once("dialog", d => d.dismiss());
-  await groups.getByRole("button", { name: "LOCAL · 本机数据", exact: true }).click();
+  await page.locator("dialog").getByRole("button", { name: "关闭", exact: true }).last().click();
   await expect(dsp).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByLabel("信号名称", { exact: true })).toHaveValue("分组未保存检查");
-  await page.getByRole("button", { name: "取消修改", exact: true }).click();
+  await close();
 
   let signal = g.signals.find(s => s.group_id === group.id);
   await page.getByLabel("搜索当前表格").fill(signal.name);
   let signalRow = page.locator(`.sheet-scroll tr[data-row-id="${signal.id}"]`);
-  await signalRow.getByRole("button", { name: "详细配置", exact: true }).click();
+  await signalRow.getByRole("button", { name: "设置", exact: true }).click();
   await page.getByLabel("信号名称", { exact: true }).fill(`${signal.name} 分组预览`);
   const response = page.waitForResponse(r => r.url().endsWith("/point-tables/process/preview"));
   await page.getByRole("button", { name: "检查关联影响", exact: true }).click();
@@ -98,6 +98,19 @@ export async function checkPointGroups(page, { pid, graph: g }) {
   await groups.getByRole("button", { name: "LOCAL · 本机数据", exact: true }).click();
   const localSignals = new Set(g.signals.filter(s => s.group_id === local.id).map(s => s.id));
   await expect(tab("采集点表")).toContainText(String(g.v_bindings.filter(b => b.role === "client" && localSignals.has(b.signal_id)).length));
+  await all.click();
+  await tab("处理点表").click();
+  await expect(all).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("combobox", { name: "筛选点表分组" })).toHaveCount(0);
+  await expect(page.locator(".table-toolbar .point-filter")).toHaveCount(0);
+  await dsp.click();
+  await tab("采集点表").click();
+  const devices = page.getByRole("combobox", { name: "筛选逻辑设备" });
+  await expect(devices).toBeVisible();
+  const context = g.device_contexts.find(c => c.group_id === group.id);
+  await devices.selectOption(String(context.id));
+  await expect(devices).toHaveValue(String(context.id));
+  await expect(dsp).toHaveAttribute("aria-pressed", "true");
   await all.click();
   const after = await (await page.request.get(`/api/projects/${pid}/topology`)).json();
   expect(after.revision).toBe(g.revision);
