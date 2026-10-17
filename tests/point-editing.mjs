@@ -49,7 +49,9 @@ export async function checkPointEditing({ client, engineer, viewer, engineerId, 
   equal(JSON.stringify(audit.before_data.record.ids), JSON.stringify(ids));
   equal(JSON.stringify(audit.after_data.record.ids), JSON.stringify([...ids].reverse()));
 
-  // Separate users submit from the same base revision, with actual concurrent HTTP calls.
+  // Separate users prepare from the same base revision. The integration harness
+  // obtains successive editing leases while these requests race, so stale drafts
+  // still exercise three-way merging across editing sessions.
   const race = async (a, b) => Promise.all([
     client.raw(`${url}/changes/${a.id}/commit`, "POST", {}),
     engineer.raw(`${url}/changes/${b.id}/commit`, "POST", {}),

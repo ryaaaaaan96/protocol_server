@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, watch, onMounted, onBeforeUnmount, provide } from "vue";
 import Toast from "./components/Toast.vue";
 import {
   Network,
@@ -24,6 +24,8 @@ import {
   CheckCircle2,
   X,
   LoaderCircle,
+  LockKeyhole,
+  Pencil,
 } from "@lucide/vue";
 import { api, roles, type Row } from "./api";
 import { belongsToBoard } from "./domain/board";
@@ -43,6 +45,9 @@ import UsersPanel from "./pages/UsersPanel.vue";
 import ImportModal from "./components/ImportModal.vue";
 import CreateProject from "./components/CreateProject.vue";
 import CreateUser from "./components/CreateUser.vue";
+import { useProjectEditLock } from "./composables/useProjectEditLock";
+import { permissionKey, useProjectPermissions } from "./composables/useProjectPermissions";
+import { allowsBoard } from "./domain/permissions";
 const nav = [
   { id: "overview", label: "项目拓扑", icon: LayoutDashboard },
   { id: "board", label: "板卡内部信息", icon: Box },
@@ -60,7 +65,7 @@ const descriptions: Record<string, string> = {
   sql: "用 SQL 查看数据关系，替代复杂的表格公式。",
   validation: "在配置进入工程之前，发现并定位数据问题。",
   releases: "从同一份数据生成配置，冻结每次交付的版本。",
-  members: "按项目分配成员，让每个人拥有合适的权限。",
+  members: "按项目、板卡和协议分配成员的编辑范围。",
   audit: "记录数据与权限变化，追溯每一次操作。",
   users: "统一维护账号、登录权限与平台管理员。",
 };
@@ -79,8 +84,10 @@ const user = ref<Row | null>(null),
   modal = ref<string | null>(null),
   focus = ref<Row | null>(null),
   menu = ref(false);
+const permissions = useProjectPermissions({ pid, user, tick });
+provide(permissionKey, permissions);
 const project = computed(() => projects.value.find((p) => p.id === pid.value)),
-  canWrite = computed(() => !!project.value && project.value.role !== "viewer"),
+  canEditProject = computed(() => !!project.value && project.value.role !== "viewer" && permissions.eligible.value),
   report = computed(() => overview.value?.validation),
   types = computed(() => boardTypes(graph.value)),
   selectedBoard = computed(() =>
@@ -101,9 +108,43 @@ function fail(message: string) {
 }
 function refresh() {
   if (!leaveWorkspace()) return;
+  void editLock.sync();
   tick.value++;
 }
 const workspaceDirty = ref(false);
+const editLock = useProjectEditLock({
+  pid, user, eligible: canEditProject, notify,
+  acquired: () => { if (!workspaceDirty.value && !document.querySelector("dialog[open]")) tick.value++; },
+});
+provide("project-edit-lock", { ...editLock, eligible: canEditProject });
+watch(() => editLock.state.value?.permissions, summary => { if (summary) permissions.acceptSummary(summary); });
+const canWrite = computed(() => editLock.owned.value && !editLock.pending.value);
+const canManageWrite = computed(() => canWrite.value && permissions.canManage.value);
+const canStartHere = computed(() => canEditProject.value && (
+  tab.value === "board" && selectedBoard.value
+    ? allowsBoard(permissions.state.value, selectedBoard.value.model_id)
+    : tab.value === "releases" ? permissions.canManage.value : true
+));
+const editStatusMessage = computed(() => {
+  if (editLock.failure.value) return editLock.message.value;
+  if (permissions.error.value) return permissions.error.value;
+  if (permissions.state.value?.role === "engineer" && !permissions.eligible.value)
+    return "尚未分配可编辑的板卡或协议，请联系管理员授权；当前可以查看和复制。";
+  if (canEditProject.value && !canStartHere.value && !editLock.owned.value)
+    return "当前页面不在你的编辑范围内，可以查看和复制；授权范围见“成员与权限”。";
+  return editLock.message.value + (permissions.state.value?.edit_scope === "scoped" && permissions.eligible.value ? " · 仅限已授权板卡和协议" : "");
+});
+async function retryEditing() {
+  await Promise.all([editLock.retry(), permissions.refresh()]);
+}
+async function endEditing() {
+  if (workspaceDirty.value && !window.confirm("结束编辑会放弃尚未提交的点表修改，是否继续？")) return;
+  if (await editLock.release()) {
+    workspaceDirty.value = false;
+    tick.value++;
+    notify("已结束编辑，其他成员现在可以开始编辑。");
+  }
+}
 function leaveWorkspace() {
   if (workspaceDirty.value && !window.confirm("有未保存的点表修改，是否放弃？")) return false;
   workspaceDirty.value = false;
@@ -112,9 +153,11 @@ function leaveWorkspace() {
 function beforeUnload(event: BeforeUnloadEvent) {
   if (workspaceDirty.value) { event.preventDefault(); event.returnValue = ""; }
 }
-function changeProject(event:Event) {
+async function changeProject(event:Event) {
   const select = event.target as HTMLSelectElement;
+  const wasDirty = workspaceDirty.value;
   if (!leaveWorkspace()) { select.value = String(pid.value); return; }
+  if (!await editLock.release()) { workspaceDirty.value = wasDirty; select.value = String(pid.value); return; }
   pid.value = Number(select.value);
   navigate("overview");
 }
@@ -249,7 +292,9 @@ function topologyDone(merged = false) {
   notify(merged ? "修改已提交，已自动合并其他成员的无关修改" : "修改已提交，关联配置已同步更新");
 }
 async function logout() {
+  const wasDirty = workspaceDirty.value;
   if (!leaveWorkspace()) return;
+  if (!await editLock.release()) { workspaceDirty.value = wasDirty; return; }
   try {
     await api("/auth/logout", "POST", {});
     expired();
@@ -263,7 +308,8 @@ function importDone() {
   navigate("validation");
   notify("点表已导入，查看校验结果以继续完善配置");
 }
-function projectCreated(p: Row) {
+async function projectCreated(p: Row) {
+  await editLock.release();
   modal.value = null;
   pid.value = p.id;
   navigate("overview");
@@ -368,7 +414,7 @@ function userCreated() {
         </div>
       </div>
     </aside>
-    <div class="main-wrap">
+    <div class="main-wrap" :class="{ 'board-layout': tab === 'board' }">
       <header class="topbar">
         <button
           class="mobile-menu icon-btn"
@@ -400,38 +446,46 @@ function userCreated() {
         </div>
       </header>
       <main>
-        <div class="page-heading">
-          <div>
-            <h1>{{ pageTitle }}</h1>
-            <p>{{ pageDescription }}</p>
+        <div class="workspace-heading">
+          <div v-if="project && tab !== 'users'" :class="['project-edit-status', { owned: editLock.owned.value, occupied: editLock.occupied.value }]" role="status" aria-live="polite">
+            <LockKeyhole :size="16" /><span>{{ editStatusMessage }}</span>
+            <button v-if="editLock.failure.value || permissions.error.value" class="button small" :disabled="editLock.checking.value || editLock.pending.value" @click="retryEditing">重试检查</button>
+            <button v-if="editLock.owned.value" class="button small" :disabled="editLock.pending.value" @click="endEditing">结束编辑</button>
+            <button v-else-if="canEditProject" class="button small" :disabled="!canStartHere || editLock.pending.value || editLock.occupied.value || !editLock.state.value" @click="editLock.acquire"><Pencil :size="14" />{{ editLock.pending.value ? '获取中…' : '开始编辑' }}</button>
           </div>
-          <div class="heading-actions">
-            <button
-              v-if="tab === 'devices' && project"
-              class="button"
-              @click="modal = 'config'"
-            >
-              项目 JSON 配置
-            </button>
-            <button
-              v-if="tab === 'devices' && user.is_admin"
-              class="button"
-              @click="modal = 'project'"
-            >
-              <FolderPlus :size="16" />新建项目</button
-            ><button
-              v-if="['board', 'devices'].includes(tab) && canWrite"
-              class="button"
-              @click="modal = 'import'"
-            >
-              <Upload :size="16" />导入 Excel</button
-            ><button
-              v-if="tab === 'users'"
-              class="button primary"
-              @click="modal = 'user'"
-            >
-              <Plus :size="17" />创建账号
-            </button>
+          <div class="page-heading">
+            <div>
+              <h1>{{ pageTitle }}</h1>
+              <p>{{ pageDescription }}</p>
+            </div>
+            <div class="heading-actions">
+              <button
+                v-if="tab === 'devices' && project"
+                class="button"
+                @click="modal = 'config'"
+              >
+                项目 JSON 配置
+              </button>
+              <button
+                v-if="tab === 'devices' && user.is_admin"
+                class="button"
+                @click="modal = 'project'"
+              >
+                <FolderPlus :size="16" />新建项目</button
+              ><button
+                v-if="['board', 'devices'].includes(tab) && canManageWrite"
+                class="button"
+                @click="modal = 'import'"
+              >
+                <Upload :size="16" />导入 Excel</button
+              ><button
+                v-if="tab === 'users'"
+                class="button primary"
+                @click="modal = 'user'"
+              >
+                <Plus :size="17" />创建账号
+              </button>
+            </div>
           </div>
         </div>
         <Empty
@@ -501,7 +555,7 @@ function userCreated() {
             :key="pid"
             :pid="pid"
             :tick="tick"
-            :can-write="canWrite"
+            :can-write="canManageWrite"
             @notify="notify"
             @refresh="refresh"
             @validate="navigate('validation')"
@@ -530,7 +584,7 @@ function userCreated() {
             @refresh="refresh"
           />
         </template>
-        <footer class="page-footer">
+        <footer v-if="tab !== 'board'" class="page-footer">
           <span>Protocol Studio</span><span>统一数据源，清晰的工程协作。</span
           ><span>{{ project?.name }}</span>
         </footer>
@@ -543,7 +597,7 @@ function userCreated() {
       v-if="modal === 'config' && graph"
       :pid="pid"
       :graph="graph"
-      :can-write="canWrite"
+      :can-write="canManageWrite"
       @close="modal = null"
       @done="
         modal = null;
@@ -553,6 +607,7 @@ function userCreated() {
     <ImportModal
       v-if="modal === 'import'"
       :pid="pid"
+      :can-write="canManageWrite"
       :has-points="!!overview?.has_configuration"
       @close="modal = null"
       @done="importDone"

@@ -1,7 +1,10 @@
 import { expect } from "@playwright/test";
+import { openColumnMenu, openRowAction } from "./point-menus-check.mjs";
+import { ensureProjectEditing, fulfillSuccessfulCommit } from "./project-edit-lock-check.mjs";
 
 // Real reads/previews only. Group and forwarding editors must preserve project data.
 export async function checkPointGroups(page, { pid, graph: g }) {
+  await ensureProjectEditing(page);
   const model = g.board_models.find(m => m.code === "UPM_ARM");
   const group = g.signal_groups.find(s => s.model_id === model.id && s.code === "DSP_PROXY");
   const local = g.signal_groups.find(s => s.model_id === model.id && s.code === "ARM_LOCAL");
@@ -27,7 +30,7 @@ export async function checkPointGroups(page, { pid, graph: g }) {
   await expect(page.locator("dialog").getByLabel("点表分组", { exact: true })).toBeDisabled();
   await close();
 
-  await page.locator(".sheet-scroll tbody tr").first().getByRole("button", { name: "设置", exact: true }).click();
+  await openRowAction(page, page.locator(".sheet-scroll tbody tr").first());
   await page.getByLabel("信号名称", { exact: true }).fill("分组未保存检查");
   page.once("dialog", d => d.dismiss());
   await page.locator("dialog").getByRole("button", { name: "关闭", exact: true }).last().click();
@@ -38,7 +41,7 @@ export async function checkPointGroups(page, { pid, graph: g }) {
   let signal = g.signals.find(s => s.group_id === group.id);
   await page.getByLabel("搜索当前表格").fill(signal.name);
   let signalRow = page.locator(`.sheet-scroll tr[data-row-id="${signal.id}"]`);
-  await signalRow.getByRole("button", { name: "设置", exact: true }).click();
+  await openRowAction(page, signalRow);
   await page.getByLabel("信号名称", { exact: true }).fill(`${signal.name} 分组预览`);
   const response = page.waitForResponse(r => r.url().endsWith("/point-tables/process/preview"));
   await page.getByRole("button", { name: "检查关联影响", exact: true }).click();
@@ -46,14 +49,16 @@ export async function checkPointGroups(page, { pid, graph: g }) {
   expect(preview.allowed).toBe(true);
   expect(preview.impact.affected_contexts.map(c => c.id).sort()).toEqual(g.device_contexts.filter(c => c.group_id === group.id).map(c => c.id).sort());
   const commitRoute = `**/api/projects/${pid}/changes/*/commit`;
-  await page.route(commitRoute, route => route.fulfill({ json: { merged: false, revision: g.revision + 1 } }));
+  await page.route(commitRoute, route => fulfillSuccessfulCommit(page, route, pid, { merged: false, revision: g.revision + 1 }));
   await page.getByRole("button", { name: "确认提交", exact: true }).click();
   await expect(page.locator("dialog")).toHaveCount(0);
   await expect(dsp).toHaveAttribute("aria-pressed", "true");
   await expect(signalRow).toBeVisible();
   await page.unroute(commitRoute);
+  await expect(page.getByRole("button", { name: "开始编辑", exact: true })).toBeEnabled();
+  await ensureProjectEditing(page);
 
-  await signalRow.getByRole("button", { name: "转发配置", exact: true }).click();
+  await openRowAction(page, signalRow, "转发配置");
   let panel = page.locator("dialog").first();
   await expect(panel.getByText("当前表格暂无匹配记录", { exact: true })).toBeVisible();
   await panel.getByRole("button", { name: "新建转发点表", exact: true }).click();
@@ -68,13 +73,22 @@ export async function checkPointGroups(page, { pid, graph: g }) {
   signal = g.signals.find(s => s.id === binding.signal_id);
   await page.getByLabel("搜索当前表格").fill(signal.name);
   signalRow = page.locator(`.sheet-scroll tr[data-row-id="${signal.id}"]`);
-  await signalRow.getByRole("button", { name: "转发配置", exact: true }).click();
+  await openRowAction(page, signalRow, "转发配置");
   panel = page.locator("dialog").first();
   await expect(panel.getByRole("heading").first()).toContainText(signal.name);
   const records = g.v_bindings.filter(b => b.role === "server" && b.signal_id === signal.id);
   await expect(panel.locator(".sheet-scroll tbody tr")).toHaveCount(records.length);
   const existingRows = await panel.locator(".sheet-scroll tbody tr").evaluateAll(rs => rs.map(r => Number(r.dataset.rowId)));
   expect(existingRows.sort()).toEqual(records.map(r => r.id).sort());
+  // Menus must remain interactive above the forwarding dialog's native top layer.
+  await openColumnMenu(page, undefined, "rightclick", panel);
+  await page.screenshot({ path: "../.runtime/point-forwarding-menu.png" });
+  await page.getByRole("menuitem", { name: "列设置…", exact: true }).click();
+  await expect(page.locator("dialog").last().getByRole("heading", { name: "列设置", exact: true })).toBeVisible();
+  await page.locator("dialog").last().getByRole("button", { name: "取消", exact: true }).click();
+  await openRowAction(page, panel.locator(".sheet-scroll tbody tr").first());
+  await expect(page.locator("dialog").last().getByLabel("本地内部信号", { exact: true })).toHaveValue(String(signal.id));
+  await close();
   await panel.getByRole("button", { name: "新建转发点表", exact: true }).click();
   const editor = page.locator("dialog").last();
   await expect(editor.getByLabel("本地内部信号", { exact: true })).toHaveValue(String(signal.id));

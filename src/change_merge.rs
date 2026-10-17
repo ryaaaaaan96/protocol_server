@@ -61,6 +61,9 @@ pub async fn can_preview(
     c: &Change,
     graph: &Value,
 ) -> Result<bool> {
+    if c.entity == "point_batch" && c.operation == "update" {
+        return crate::point_batch::can_preview(s, tx, pid, c).await;
+    }
     if !eligible(c) || c.expected.is_null() {
         return Ok(false);
     }

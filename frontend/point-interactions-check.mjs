@@ -1,7 +1,10 @@
 import { expect } from "@playwright/test";
+import { openRowAction } from "./point-menus-check.mjs";
+import { ensureProjectEditing, fulfillSuccessfulCommit } from "./project-edit-lock-check.mjs";
 
 // Real previews; intercepted commits leave the user's development project unchanged.
 export async function checkPointInteractions(page, { pid, modelId, record, tableRows }) {
+  await ensureProjectEditing(page);
   const dataUrl = `/api/projects/${pid}/board-models/${modelId}/point-tables/process`;
   const before = await (await page.request.get(dataUrl)).json();
   const firstId = String(before.rows[0].id), secondId = String(before.rows[1].id);
@@ -38,15 +41,12 @@ export async function checkPointInteractions(page, { pid, modelId, record, table
   await record().first().click();
   await expect(page.locator("dialog")).toHaveCount(0);
   await expect(tableRows().locator("input,select")).toHaveCount(0);
-  await expect(tableRows().first().locator("td").last()).toHaveClass("point-actions");
-  await expect(page.locator(".point-table th.point-actions .point-fixed-label")).toHaveText("固定");
-  const colors = await tableRows().first().evaluate(row => ({
-    action: getComputedStyle(row.querySelector(".point-actions")).backgroundColor,
-    data: getComputedStyle(row.querySelector("[data-column-key]")).backgroundColor,
-  }));
-  expect(colors.action).not.toBe(colors.data);
+  await expect(page.locator(".point-table .point-actions")).toHaveCount(0);
+  await expect(tableRows().first().locator("td")).toHaveCount(before.definition.columns.length + 1);
+  await expect(page.locator(".table-toolbar").getByRole("button", { name: "列设置", exact: true })).toHaveCount(0);
   const scroll = page.locator(".point-table");
-  const settings = () => tableRows().first().getByRole("button", { name: "设置", exact: true });
+  const recordMenu = () => tableRows().first().getByRole("button", { name: /^记录操作 / });
+  const settings = () => openRowAction(page, tableRows().first());
   const close = async () => {
     await page.locator("dialog").getByRole("button", { name: "关闭", exact: true }).last().click();
     await expect(page.locator("dialog")).toHaveCount(0);
@@ -54,18 +54,19 @@ export async function checkPointInteractions(page, { pid, modelId, record, table
   const desktop = page.viewportSize();
   for (const viewport of [desktop, { width: 390, height: 844 }]) {
     await page.setViewportSize(viewport);
-    await settings().scrollIntoViewIfNeeded();
+    await recordMenu().scrollIntoViewIfNeeded();
     const overflow = await scroll.evaluate(el => el.scrollWidth - el.clientWidth);
     expect(overflow).toBeGreaterThan(100);
     for (const fraction of [0, 0.5, 1]) {
       await scroll.evaluate((el, fraction) => { el.scrollLeft = (el.scrollWidth - el.clientWidth) * fraction; }, fraction);
-      // The final column stays at the scroll viewport's right edge, at every offset.
+      // Row actions live beside the frozen row number, never in a permanent right column.
       await expect.poll(() => scroll.evaluate(el => {
-        const edge = el.getBoundingClientRect().left + el.clientLeft + el.clientWidth;
-        return Math.abs(el.querySelector("tbody td.point-actions").getBoundingClientRect().right - edge);
+        const edge = el.getBoundingClientRect().left + el.clientLeft;
+        return Math.abs(el.querySelector("tbody td.row-number").getBoundingClientRect().left - edge);
       })).toBeLessThan(2);
-      await expect(settings()).toBeInViewport();
-      await settings().click();
+      await expect(recordMenu()).toBeInViewport();
+      await expect(page.locator(".point-table .point-actions")).toHaveCount(0);
+      await settings();
       await expect(page.locator("dialog")).toContainText("编辑DSP内部数据");
       await close();
     }
@@ -73,14 +74,15 @@ export async function checkPointInteractions(page, { pid, modelId, record, table
   await page.setViewportSize(desktop);
   await scroll.evaluate(el => { el.scrollLeft = 0; });
   const startSettings = async () => {
+    await ensureProjectEditing(page);
     await expect(record().first()).toHaveText(firstName);
-    await settings().click();
+    await settings();
     await page.getByLabel("信号名称", { exact: true }).fill(`${firstName} UI 检查`);
   };
   await startSettings();
   // Closing without confirmation preserves form input; editing sends no autosave/check requests.
   const writes = [];
-  const track = request => { if (request.method() === "POST") writes.push(request.url()); };
+  const track = request => { if (request.method() === "POST" && !request.url().includes("/edit-lock/")) writes.push(request.url()); };
   page.on("request", track);
   await page.waitForTimeout(900);
   page.off("request", track);
@@ -115,14 +117,15 @@ export async function checkPointInteractions(page, { pid, modelId, record, table
 
   await startSettings();
   await review();
-  await page.route(commitRoute, route => route.fulfill({ json: { merged: true, revision: before.revision + 1 } }));
+  await page.route(commitRoute, route => fulfillSuccessfulCommit(page, route, pid, { merged: true, revision: before.revision + 1 }));
   await confirm();
   await expect(page.locator(".toast:not(.error)")).toContainText("已自动合并");
   await expect(page.locator("dialog")).toHaveCount(0);
   await expect(record().first()).toHaveText(firstName);
   await page.unroute(commitRoute);
+  await expect(page.getByRole("button", { name: "开始编辑", exact: true })).toBeEnabled();
   const after = await (await page.request.get(dataUrl)).json();
   expect(after.revision).toBe(before.revision);
   expect(after.rows.map(r => r.id)).toEqual(before.rows.map(r => r.id));
-  console.log("PASS: row ordering, fixed final actions on desktop/mobile, read-only cells, explicit settings/preview/commit, toasts and conflict rollback");
+  console.log("PASS: row ordering, row-number menus without an action column on desktop/mobile, cell selection, record details/preview/commit, toasts and conflict rollback");
 }

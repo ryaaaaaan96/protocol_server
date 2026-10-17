@@ -2,6 +2,9 @@
 import fs from "node:fs";
 import { checkPointEditing } from "./point-editing.mjs";
 import { checkPointBatch } from "./point-batch.mjs";
+import { checkStringRanges } from "./string-ranges.mjs";
+import { checkEditLocks } from "./edit-locks.mjs";
+import { checkEditScopes } from "./edit-scopes.mjs";
 import path from "node:path";
 import crypto from "node:crypto";
 import assert from "node:assert/strict";
@@ -95,6 +98,7 @@ const testEnv = {
 };
 const base = "http://127.0.0.1:18081/api";
 let assertions = 0;
+const projectRequestQueues = new Map();
 const equal = (a, b) => {
   assert.equal(a, b);
   assertions++;
@@ -106,6 +110,27 @@ const ok = (v, message) => {
 class Client {
   cookie = "";
   async raw(p, method = "GET", body, extra = {}) {
+    const project = /^\/projects\/(\d+)\/(?!edit-lock(?:\/|$)|members(?:\/|$)|sql(?:\/|$))/.exec(p)?.[1];
+    if (method === "GET" || !project) return this.rawUnlocked(p, method, body, extra);
+    // Legacy domain tests explicitly take/release a lease around each request.
+    // Their old-revision merge scenarios remain valid across editing sessions;
+    // dedicated lease tests below use rawUnlocked to exercise real contention.
+    const previous = projectRequestQueues.get(project) || Promise.resolve();
+    let unlock;
+    const pending = new Promise(resolve => { unlock = resolve; });
+    projectRequestQueues.set(project, pending);
+    await previous;
+    let acquired = false;
+    try {
+      acquired = (await this.rawUnlocked(`/projects/${project}/edit-lock/acquire`, "POST", {})).status === 200;
+      return await this.rawUnlocked(p, method, body, extra);
+    } finally {
+      if (acquired) await this.rawUnlocked(`/projects/${project}/edit-lock/release`, "POST", {});
+      unlock();
+      if (projectRequestQueues.get(project) === pending) projectRequestQueues.delete(project);
+    }
+  }
+  async rawUnlocked(p, method = "GET", body, extra = {}) {
     const response = await fetch(base + p, {
       method,
       headers: {
@@ -1318,6 +1343,9 @@ try {
 
   await checkPointEditing({ client, engineer: e, viewer: v, engineerId: engineer.id, viewerId: viewer.id, equal, ok });
   await checkPointBatch({ client, engineer: e, viewer: v, engineerId: engineer.id, viewerId: viewer.id, password, equal, ok });
+  await checkStringRanges({ client, engineer: e, viewer: v, engineerId: engineer.id, viewerId: viewer.id, equal, ok });
+  await checkEditLocks({ client, engineer: e, viewer: v, engineerId: engineer.id, viewerId: viewer.id, password, migrationUrl: migration.toString(), equal, ok });
+  await checkEditScopes({ client, engineer: e, viewer: v, engineerId: engineer.id, viewerId: viewer.id, password, migrationUrl: migration.toString(), equal, ok });
   const direct = new pg.Client({ connectionString: appUrl.toString() });
   await direct.connect();
   equal(

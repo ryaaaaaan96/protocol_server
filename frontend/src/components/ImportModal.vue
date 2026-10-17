@@ -10,13 +10,14 @@ import {
 import { api, type Row } from "../api";
 import Modal from "./Modal.vue";
 import Badge from "./Badge.vue";
-const props = defineProps<{ pid: number; hasPoints: boolean }>();
+const props = defineProps<{ pid: number; hasPoints: boolean; canWrite: boolean }>();
 const emit = defineEmits<{ close: []; done: [] }>();
 const preview = ref<Row | null>(null),
   busy = ref(false),
   error = ref(""),
   replace = ref(false);
 async function upload(event: Event) {
+  if (!props.canWrite || busy.value) return;
   const file = (event.target as HTMLInputElement).files?.[0];
   if (!file) return;
   busy.value = true;
@@ -36,6 +37,7 @@ async function upload(event: Event) {
   }
 }
 async function commit() {
+  if (!props.canWrite || busy.value) return;
   busy.value = true;
   error.value = "";
   try {
@@ -53,8 +55,9 @@ async function commit() {
 }
 </script>
 <template>
-  <Modal title="导入 Excel 点表" wide @close="emit('close')"
+  <Modal title="导入 Excel 点表" wide lock-guard @close="emit('close')"
     ><div class="modal-body">
+      <p v-if="!canWrite" class="notice">当前为只读，请关闭窗口并重新取得编辑权后导入。</p>
       <div class="import-steps">
         <span :class="{ current: !preview }">01 选择文件</span
         ><ChevronRight :size="15" /><span :class="{ current: preview }"
@@ -69,7 +72,7 @@ async function commit() {
           ><input
             type="file"
             accept=".xlsx"
-            :disabled="busy"
+            :disabled="busy || !canWrite"
             aria-label="选择 Excel 文件"
             @change="upload"
         /></label>
@@ -150,7 +153,7 @@ async function commit() {
           重新选择</button
         ><button
           class="button primary"
-          :disabled="busy || (hasPoints && !replace)"
+          :disabled="busy || !canWrite || (hasPoints && !replace)"
           @click="commit"
         >
           <LoaderCircle v-if="busy" class="spin" :size="16" /><Database

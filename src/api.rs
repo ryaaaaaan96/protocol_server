@@ -103,7 +103,8 @@ pub async fn preview_import(
     Path(pid): Path<i64>,
     mut multipart: Multipart,
 ) -> Result<Json<Value>> {
-    let tx = db::context(&s.pool, &u, Some(pid), true).await?;
+    let mut tx = db::context(&s.pool, &u, Some(pid), true).await?;
+    crate::permissions::require_all(&mut tx, pid).await?;
     tx.rollback().await?;
     let field = multipart
         .next_field()
@@ -124,6 +125,7 @@ pub async fn preview_import(
         .await
         .map_err(|_| AppError::bad("Excel 解析失败"))??;
     let mut tx = db::context(&s.pool, &u, Some(pid), true).await?;
+    crate::permissions::require_all(&mut tx, pid).await?;
     let revision: i32 = sqlx::query_scalar("SELECT revision FROM projects WHERE id=$1")
         .bind(pid)
         .fetch_one(&mut *tx)
@@ -151,6 +153,7 @@ pub async fn commit_import(
     Json(input): Json<CommitImport>,
 ) -> Result<Json<Value>> {
     let mut tx = db::context(&s.pool, &u, Some(pid), true).await?;
+    crate::permissions::require_all(&mut tx, pid).await?;
     let rev = db::lock_project(&mut tx, pid).await?;
     let row:Value=sqlx::query_scalar("SELECT to_jsonb(i) FROM import_previews i WHERE project_id=$1 AND id=$2 AND created_by=$3 AND expires_at>now() FOR UPDATE").bind(pid).bind(id).bind(u.id).fetch_optional(&mut *tx).await?.ok_or(AppError::bad("预览已过期或已使用，请重新上传"))?;
     if row["revision"] != rev {
@@ -186,6 +189,7 @@ pub async fn commit_import(
         .await?;
     db::touch(&mut tx, pid).await?;
     db::audit(&mut tx,u.id,Some(pid),"import.commit","workbook",Some(before),Some(json!({"filename":row["filename"],"sha256":row["sha256"],"point_count":data.points.len(),"validation":report}))).await?;
+    crate::edit_lock::release_owned(&mut tx, pid, u.id).await?;
     tx.commit().await?;
     Ok(Json(report))
 }
@@ -221,6 +225,7 @@ pub async fn release(
         return Err(AppError::bad("版本名称应为 1～80 字符"));
     }
     let mut tx = db::context(&s.pool, &u, Some(pid), true).await?;
+    crate::permissions::require_all(&mut tx, pid).await?;
     let rev = db::lock_project(&mut tx, pid).await?;
     if input.revision != rev {
         return Err(AppError::revision_conflict(input.revision, rev));
@@ -244,6 +249,7 @@ pub async fn release(
         Some(row.clone()),
     )
     .await?;
+    crate::edit_lock::release_owned(&mut tx, pid, u.id).await?;
     tx.commit().await?;
     Ok(Json(row))
 }
@@ -314,12 +320,14 @@ pub async fn members(
     Path(pid): Path<i64>,
 ) -> Result<Json<Value>> {
     let mut tx = db::context(&s.pool, &u, Some(pid), false).await?;
-    Ok(Json(json!(db::all_json(&mut tx,"SELECT to_jsonb(t) FROM (SELECT u.id,u.username,u.display_name,u.active,m.role FROM project_members m JOIN users u ON u.id=m.user_id WHERE m.project_id=$1 ORDER BY u.id) t",pid).await?)))
+    Ok(Json(json!(db::all_json(&mut tx,"SELECT to_jsonb(t) FROM (SELECT u.id,u.username,u.display_name,u.active,m.role,m.edit_scope,COALESCE((SELECT jsonb_agg(jsonb_build_object('model_id',g.model_id,'scope',g.scope,'contract_id',g.contract_id) ORDER BY g.model_id,g.scope,g.contract_id) FROM project_member_grants g WHERE g.project_id=m.project_id AND g.user_id=m.user_id),'[]'::jsonb) AS grants FROM project_members m JOIN users u ON u.id=m.user_id WHERE m.project_id=$1 ORDER BY u.id) t",pid).await?)))
 }
 #[derive(Deserialize)]
 pub struct MemberInput {
     user_id: i64,
     role: String,
+    edit_scope: Option<String>,
+    grants: Option<Vec<crate::permissions::Grant>>,
 }
 pub async fn set_member(
     State(s): State<AppState>,
@@ -331,8 +339,20 @@ pub async fn set_member(
     if !["engineer", "viewer", "remove"].contains(&input.role.as_str()) {
         return Err(AppError::bad("角色无效"));
     }
-    let mut tx = db::context(&s.pool, &u, Some(pid), true).await?;
+    let mut tx = db::unlocked_write_context(&s.pool, &u, pid).await?;
     db::require_admin(&mut tx).await?;
+    db::lock_project(&mut tx, pid).await?;
+    if input
+        .edit_scope
+        .as_ref()
+        .is_some_and(|scope| !["all", "scoped"].contains(&scope.as_str()))
+    {
+        return Err(AppError::bad("编辑范围必须为 all 或 scoped"));
+    }
+    if let Some(grants) = &input.grants {
+        crate::permissions::validate_grants(&mut tx, pid, grants).await?;
+    }
+    let before: Option<Value> = sqlx::query_scalar("SELECT to_jsonb(m)||jsonb_build_object('grants',COALESCE((SELECT jsonb_agg(to_jsonb(g)-'project_id'-'user_id') FROM project_member_grants g WHERE g.project_id=m.project_id AND g.user_id=m.user_id),'[]'::jsonb)) FROM project_members m WHERE m.project_id=$1 AND m.user_id=$2").bind(pid).bind(input.user_id).fetch_optional(&mut *tx).await?;
     if input.role == "remove" {
         sqlx::query("DELETE FROM project_members WHERE project_id=$1 AND user_id=$2")
             .bind(pid)
@@ -340,16 +360,27 @@ pub async fn set_member(
             .execute(&mut *tx)
             .await?;
     } else {
-        sqlx::query("INSERT INTO project_members(project_id,user_id,role) VALUES($1,$2,$3) ON CONFLICT(project_id,user_id) DO UPDATE SET role=excluded.role").bind(pid).bind(input.user_id).bind(&input.role).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO project_members(project_id,user_id,role,edit_scope) VALUES($1,$2,$3,COALESCE($4,'all')) ON CONFLICT(project_id,user_id) DO UPDATE SET role=excluded.role,edit_scope=COALESCE($4,project_members.edit_scope)").bind(pid).bind(input.user_id).bind(&input.role).bind(&input.edit_scope).execute(&mut *tx).await?;
+        if let Some(grants) = &input.grants {
+            sqlx::query("DELETE FROM project_member_grants WHERE project_id=$1 AND user_id=$2")
+                .bind(pid)
+                .bind(input.user_id)
+                .execute(&mut *tx)
+                .await?;
+            for grant in grants {
+                sqlx::query("INSERT INTO project_member_grants(project_id,user_id,model_id,scope,contract_id) VALUES($1,$2,$3,$4,$5)").bind(pid).bind(input.user_id).bind(grant.model_id).bind(&grant.scope).bind(grant.contract_id).execute(&mut *tx).await?;
+            }
+        }
     }
+    let after: Option<Value> = sqlx::query_scalar("SELECT to_jsonb(m)||jsonb_build_object('grants',COALESCE((SELECT jsonb_agg(to_jsonb(g)-'project_id'-'user_id') FROM project_member_grants g WHERE g.project_id=m.project_id AND g.user_id=m.user_id),'[]'::jsonb)) FROM project_members m WHERE m.project_id=$1 AND m.user_id=$2").bind(pid).bind(input.user_id).fetch_optional(&mut *tx).await?;
     db::audit(
         &mut tx,
         u.id,
         Some(pid),
         "member.update",
         &input.user_id.to_string(),
-        None,
-        Some(json!({"role":input.role})),
+        before,
+        after,
     )
     .await?;
     tx.commit().await?;
@@ -388,6 +419,10 @@ pub async fn create_user(
     }
     let hash = hash_password(input.password).await?;
     let mut tx = db::context(&s.pool, &u, None, true).await?;
+    // Same ordering as update_user: serialize user creation with revocation.
+    sqlx::query("LOCK TABLE users IN SHARE ROW EXCLUSIVE MODE")
+        .execute(&mut *tx)
+        .await?;
     db::require_admin(&mut tx).await?;
     let row:Value=sqlx::query_scalar("INSERT INTO users(username,display_name,password_hash,is_admin) VALUES($1,$2,$3,$4) RETURNING to_jsonb(users.*)-'password_hash'").bind(input.username).bind(input.display_name).bind(hash).bind(input.is_admin).fetch_one(&mut *tx).await?;
     db::audit(

@@ -2,16 +2,23 @@
 import { computed, ref, watch, nextTick, onBeforeUnmount } from "vue";
 import { api, revisionConflict, type Row } from "../api";
 import {
+  choiceLabel,
   pointText,
+  pointIsString,
   type PointKind,
   type PointTableData,
 } from "../domain/pointTables";
-import { Search, Plus, ChevronLeft, ChevronRight, GripVertical, Pin } from "@lucide/vue";
+import { Search, Plus, ChevronLeft, ChevronRight, GripVertical, Ellipsis, ChevronDown, Undo2, Redo2, Pencil, Check, Copy, CircleHelp } from "@lucide/vue";
+import { usePointGrid } from "../composables/usePointGrid";
+import { pageSizeOptions, usePageSize } from "../composables/usePageSize";
+import { usePermissionContext } from "../composables/useProjectPermissions";
+import { allowsPoint } from "../domain/permissions";
 import Loading from "./Loading.vue";
 import Empty from "./Empty.vue";
 import PointEditor from "./PointEditor.vue";
 import PointColumns from "./PointColumns.vue";
-import { restoreColumns, orderedColumns, type TableColumn } from "../domain/tableColumns";
+import ContextMenu from "./ContextMenu.vue";
+import { defaultColumns, restoreColumns, orderedColumns, type TableColumn } from "../domain/tableColumns";
 import PointChangePreview from "./PointChangePreview.vue";
 import Modal from "./Modal.vue";
 const props = defineProps<{
@@ -40,6 +47,13 @@ const data = ref<PointTableData | null>(null),
   query = ref(""),
   page = ref(1);
 const filter = ref<number | "">("");
+const showHelp = ref(false);
+const permissions = usePermissionContext();
+function scopeEditable(row?: Row | null, values?: Row) {
+  return !!data.value && allowsPoint(permissions.state.value, props.modelId, props.kind, data.value,
+    row && values ? { ...row, edit_values: { ...row.edit_values, ...values } } : row);
+}
+const canEditTable = computed(() => props.canWrite && scopeEditable());
 const editing = ref(false),
   selected = ref<Row | null>(null);
 const reload = ref(0);
@@ -47,7 +61,9 @@ const editorDirty = ref(false), forwardDirty = ref(false), forwardSignal = ref<R
 const orderDraft = ref<{key: string; ids: number[]; original: Row[]} | null>(null);
 const moving = ref<Row | null>(null), movePosition = ref(1), dragging = ref<Row | null>(null);
 const dropId = ref<number>(), review = ref<Row | null>(null), busy = ref(false), actionError = ref("");
-const dirty = computed(() => !!orderDraft.value || editorDirty.value || forwardDirty.value);
+const reviewMode = ref<"check" | "save">("save");
+const gridDirty = ref(false);
+const dirty = computed(() => !!orderDraft.value || editorDirty.value || forwardDirty.value || gridDirty.value);
 watch(dirty, value => emit("dirty", value), {flush:"sync"});
 onBeforeUnmount(() => emit("dirty", false));
 watch(
@@ -90,6 +106,7 @@ watch(
 const def = computed(() => data.value?.definition);
 const columnSettings = ref(false), columns = ref<TableColumn[]>([]);
 const columnKey = computed(() => `point-columns:${props.pid}:${props.modelId}:${props.kind}`);
+const { pageSize, setPageSize } = usePageSize(computed(() => `point-page-size:${props.pid}:${props.modelId}:${props.kind}`));
 const displayColumns = computed(() => orderedColumns(columns.value).filter(c => c.visible));
 watch([() => def.value?.columns, columnKey], ([keys]) => {
   if (!keys) return;
@@ -98,6 +115,7 @@ watch([() => def.value?.columns, columnKey], ([keys]) => {
   columns.value = restoreColumns(keys, saved);
 }, { immediate: true });
 function applyColumns(settings: TableColumn[]) {
+  if (!grid.finish()) return;
   columns.value = restoreColumns(def.value!.columns, settings);
   columnSettings.value = false;
   try { localStorage.setItem(columnKey.value, JSON.stringify(columns.value)); }
@@ -167,11 +185,197 @@ const filtered = computed(() =>
     .map(({ row }) => row),
 );
 const pages = computed(() =>
-  Math.max(1, Math.ceil(filtered.value.length / 50)),
+  Math.max(1, Math.ceil(filtered.value.length / pageSize.value)),
 );
 const visible = computed(() =>
-  filtered.value.slice((page.value - 1) * 50, page.value * 50),
+  filtered.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value),
 );
+const grid = usePointGrid({
+  data, scoped: scopedData, rows: filtered, columns: displayColumns, page, pageSize,
+  writable: () => canEditTable.value,
+  rowWritable: (row, values) => scopeEditable(row) && scopeEditable(row, values),
+  allowedChoice: (row, key, choice, values) => key !== "endpoint_id" || scopeEditable(row, { ...values, endpoint_id: choice.id }),
+  blocked: () => busy.value || !!review.value || !!orderDraft.value,
+  locked: key => (key === "group_id" && props.groupId != null) || (key === "signal_id" && props.signalId != null),
+  error: message => { actionError.value = message; },
+});
+const gridTable = grid.table, gridInput = grid.input;
+const gridEditorDef = computed(() => grid.editorDefinition.value || null);
+const draftWithinScope = computed(() => Object.keys(grid.draft.value).every(id => {
+  const row = data.value?.rows.find(item => item.id === Number(id));
+  return !!row && scopeEditable(row) && scopeEditable(row, grid.values(row));
+}));
+const orderWithinScope = computed(() => !orderDraft.value || orderDraft.value.ids.every(id => {
+  const row = data.value?.rows.find(item => item.id === id);
+  return !!row && scopeEditable(row);
+}));
+watch(grid.dirty, value => { gridDirty.value = value; }, { flush: "sync" });
+const copyFeedback = ref("");
+const pageSelected = computed(() => visible.value.length > 0 && visible.value.every(row => grid.isRowSelected(row.id)));
+const pagePartSelected = computed(() => !pageSelected.value && visible.value.some(row => grid.isRowSelected(row.id)));
+const selectionLabel = computed(() => {
+  if (grid.selectedRowIds.value.length) return `已选择 ${grid.selectedRowIds.value.length} 行`;
+  const selection = grid.selection.value;
+  return selection ? `已选择 ${selection.lastRow - selection.firstRow + 1} 行 × ${selection.lastColumn - selection.firstColumn + 1} 列` : "";
+});
+async function copyGrid(row?: Row) {
+  if (!grid.finish()) return;
+  const success = row ? await grid.copyRows(row) : await grid.copySelection();
+  if (success) copyFeedback.value = row ? "已复制此行，可粘贴到 Excel 或其他表格。" : "已复制所选内容，可粘贴到 Excel 或其他表格。";
+}
+function selectPage(event: Event) {
+  grid.selectPage(visible.value);
+  const checkbox = event.target as HTMLInputElement;
+  checkbox.checked = pageSelected.value;
+  checkbox.indeterminate = pagePartSelected.value;
+}
+function changePageSize(event: Event) {
+  const select = event.target as HTMLSelectElement;
+  const size = Number(select.value);
+  if (busy.value || review.value || !grid.finish()) {
+    select.value = String(pageSize.value);
+    return;
+  }
+  const firstRow = (page.value - 1) * pageSize.value;
+  const activeRow = filtered.value.findIndex(row => row.id === grid.active.value?.id);
+  const anchor = activeRow >= firstRow && activeRow < firstRow + pageSize.value ? activeRow : firstRow;
+  if (setPageSize(size)) page.value = Math.min(pages.value, Math.floor(anchor / size) + 1);
+  select.value = String(pageSize.value);
+}
+watch([grid.selectedRowIds, grid.active, grid.changedCells], () => { copyFeedback.value = ""; });
+type TableMenu = { x: number; y: number; serial: number } & (
+  { type: "column"; key: string } | { type: "row"; row: Row }
+);
+const tableMenu = ref<TableMenu | null>(null);
+let menuSerial = 0;
+const columnLabel = (key: string) => def.value!.fields[key].column_label || def.value!.fields[key].label;
+const menuLabel = computed(() => tableMenu.value?.type === "column" ? `${columnLabel(tableMenu.value.key)}列菜单` : "记录操作");
+function columnNeighbor(key: string, step: number) {
+  const index = displayColumns.value.findIndex(c => c.key === key);
+  const current = displayColumns.value[index], neighbor = displayColumns.value[index + step];
+  return current && neighbor?.frozen === current.frozen ? neighbor : undefined;
+}
+const menuItems = computed(() => {
+  const menu = tableMenu.value;
+  if (!menu) return [];
+  if (menu.type === "row") {
+    return [
+      { key: "detail", label: "记录详情" },
+      { key: "copy-row", label: "复制此行" },
+      ...(grid.selectedRowIds.value.length ? [{ key: "copy-rows", label: "复制选中行" }] : []),
+      ...(props.kind === "process" && props.allowForward ? [{ key: "forward", label: "转发配置" }] : []),
+      ...(props.kind !== "process" && props.signalId == null ? [{ key: "process", label: "关联处理点" }] : []),
+    ];
+  }
+  const column = columns.value.find(c => c.key === menu.key)!;
+  return [
+    { key: "freeze", label: column.frozen ? "取消冻结" : "冻结到左侧" },
+    { key: "hide", label: "隐藏此列", disabled: displayColumns.value.length <= 1 },
+    { key: "left", label: "向左移动", disabled: !columnNeighbor(menu.key, -1) },
+    { key: "right", label: "向右移动", disabled: !columnNeighbor(menu.key, 1) },
+    { key: "columns", label: "列设置…", separator: true },
+    { key: "reset", label: "恢复默认列" },
+  ];
+});
+function menuPosition(event: MouseEvent | KeyboardEvent) {
+  const target = event.currentTarget as HTMLElement;
+  target.focus({ preventScroll: true });
+  const rect = target.getBoundingClientRect();
+  return event instanceof MouseEvent && event.type === "contextmenu" && (event.clientX || event.clientY)
+    ? { x: event.clientX, y: event.clientY }
+    : { x: rect.left, y: rect.bottom };
+}
+function openColumnMenu(key: string, event: MouseEvent | KeyboardEvent) {
+  if (busy.value || review.value || !grid.finish()) return;
+  tableMenu.value = { ...menuPosition(event), serial: ++menuSerial, type: "column", key };
+}
+function columnKeydown(key: string, event: KeyboardEvent) {
+  if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+    event.preventDefault();
+    openColumnMenu(key, event);
+  }
+}
+function openRowMenu(row: Row, event: MouseEvent) {
+  if (busy.value || review.value || !grid.finish()) return;
+  tableMenu.value = { ...menuPosition(event), serial: ++menuSerial, type: "row", row };
+}
+function menuAction(action: string) {
+  const menu = tableMenu.value;
+  tableMenu.value = null;
+  if (!menu || busy.value || review.value) return;
+  if (menu.type === "row") {
+    if (action === "detail") open(menu.row);
+    else if (action === "copy-row") void copyGrid(menu.row);
+    else if (action === "copy-rows") void copyGrid();
+    else if (action === "forward") openForward(menu.row);
+    else if (action === "process" && discard()) emit("process", menu.row.signal_id);
+    return;
+  }
+  if (action === "columns") { columnSettings.value = true; return; }
+  const next = columns.value.map(c => ({ ...c }));
+  const column = next.find(c => c.key === menu.key)!;
+  if (action === "freeze") column.frozen = !column.frozen;
+  else if (action === "hide" && displayColumns.value.length > 1) column.visible = false;
+  else if (action === "reset") { applyColumns(defaultColumns(def.value!.columns)); return; }
+  else if (action === "left" || action === "right") {
+    const neighbor = columnNeighbor(menu.key, action === "left" ? -1 : 1);
+    if (!neighbor) return;
+    const from = next.indexOf(column), to = next.findIndex(c => c.key === neighbor.key);
+    next.splice(from, 1);
+    next.splice(to, 0, column);
+  } else return;
+  applyColumns(next);
+  if (action === "hide") void nextTick(() => tableHead.value?.querySelector<HTMLElement>("th[data-column-key]")?.focus({ preventScroll: true }));
+}
+watch([data, page, pageSize, query, filter, displayColumns, busy, review], () => { tableMenu.value = null; });
+function cellHint(row: Row, column: string) {
+  const key = grid.field(column);
+  if (["min_value", "max_value"].includes(column) && pointIsString(data.value!, grid.values(row), row)) return "字符串没有数值上下限，长度由字节数管理。";
+  if (!props.canWrite) return "当前项目为只读权限，可选中和复制单元格。";
+  if (!scopeEditable(row)) return "未获此板卡或协议的编辑权限，可以查看和复制；请联系管理员授权。";
+  if (!key) return "关联或计算字段，随来源数据更新。";
+  if (key === "sig_id" && grid.values(row).sig_symbol) return "此 sigID 由公共符号解析；通过记录详情修改身份。";
+  if (!grid.editable(row, column)) return "此字段在当前分组中锁定，可通过记录详情查看。";
+  const scopeHint = permissions.state.value?.edit_scope === "scoped" && props.kind === "process" && ["name", "enum_name", "sig_id", "sig_symbol", "internal_type", "data_item_id", "group_id"].includes(key)
+    ? "；若影响关联协议，保存时也需要该协议的编辑权限" : "";
+  return `${def.value!.fields[key].hint || "双击或按 Enter 编辑"}${def.value!.fields[key].nullable ? "；留空恢复继承" : ""}${scopeHint}`;
+}
+function discardGrid() {
+  if (grid.dirty.value && !window.confirm("放弃这些尚未保存的单元格修改？")) return;
+  grid.reset();
+  actionError.value = "";
+}
+async function previewGrid(mode: "check" | "save") {
+  if (!canEditTable.value || !draftWithinScope.value || busy.value || review.value || !data.value) return;
+  const rows = grid.entries();
+  if (!rows?.length) return;
+  for (const row of rows) {
+    for (const [key, value] of Object.entries(row.values)) {
+      const field = def.value!.fields[key];
+      if ((field.reference && !field.nullable && value == null) || (["name", "enum_name"].includes(key) && !String(value ?? "").trim())) {
+        actionError.value = `第 ${row.row} 行「${field.label}」不能为空，请补全后重新检查。`;
+        return;
+      }
+    }
+  }
+  reviewMode.value = mode;
+  busy.value = true;
+  actionError.value = "";
+  try {
+    review.value = await api(`/projects/${props.pid}/board-models/${props.modelId}/point-tables/${props.kind}/batch/preview`, "POST", {
+      revision: data.value.revision, operation: "update", rows,
+    });
+  } catch (e) {
+    actionError.value = (e as Error).message;
+    emit("error", actionError.value);
+  } finally { busy.value = false; }
+}
+function previewConflict() {
+  if (grid.changedRows.value) {
+    review.value = null;
+    actionError.value = "其他成员修改了相同字段或关联数据，本次修改尚未保存。草稿已保留，可复制修改内容，或重新载入最新数据。";
+  } else conflict();
+}
 watch([query, filter], () => {
   page.value = 1;
 });
@@ -204,16 +408,17 @@ function cancel() {
   dragging.value = null;
   dropId.value = undefined;
   actionError.value = "";
+  grid.reset();
 }
-const orderEnabled = computed(() => props.canWrite && def.value?.ordering.mode !== "disabled");
-const canReorder = computed(() => orderEnabled.value && !query.value.trim() && !busy.value);
+const orderEnabled = computed(() => canEditTable.value && def.value?.ordering.mode !== "disabled");
+const canReorder = computed(() => orderEnabled.value && !query.value.trim() && !busy.value && !gridDirty.value);
 function groupKey(row:Row) { return JSON.stringify(def.value!.ordering.group_by.map(key => row[key] ?? 0)); }
 function groupRows(row:Row) { return data.value!.rows.filter(r => groupKey(r) === groupKey(row)); }
 const filteredIds = computed(() => new Set(filtered.value.map(r => r.id)));
 function canMove(row:Row) {
   const members = groupRows(row);
   return canReorder.value && (!orderDraft.value || orderDraft.value.key === groupKey(row)) &&
-    members.length > 1 && members.every(r => filteredIds.value.has(r.id));
+    members.length > 1 && members.every(r => filteredIds.value.has(r.id) && scopeEditable(r));
 }
 function move(row:Row, position:number) {
   if (!canMove(row) || !Number.isInteger(position)) return;
@@ -250,7 +455,12 @@ function choosePosition(row:Row) {
   movePosition.value = groupRows(row).findIndex(r => r.id === row.id)+1;
 }
 async function previewChange() {
-  if (!data.value || !orderDraft.value || busy.value || review.value) return;
+  if (!canEditTable.value || !data.value || !orderDraft.value || busy.value || review.value) return;
+  if (!orderWithinScope.value) {
+    actionError.value = "排序涉及未授权的板卡或协议，当前不能保存；修改仍保留。";
+    return;
+  }
+  reviewMode.value = "save";
   busy.value = true;
   actionError.value = "";
   try {
@@ -281,8 +491,7 @@ function saved(merged = false) {
   emit("done", merged);
 }
 function text(row: Row, key: string) {
-  if (key === "upp_model" && row.protocol !== "UPP") return "—";
-  return pointText(row[key]);
+  return grid.text(row, key);
 }
 </script>
 <template>
@@ -291,15 +500,13 @@ function text(row: Row, key: string) {
   </div>
   <Loading v-else-if="!data || !def" />
   <template v-else>
-    <div class="sheet-heading">
-      <h2>{{ def.label }}</h2>
-      <span>{{ def.description }}</span>
-    </div>
-    <div class="table-toolbar">
+    <div class="table-toolbar point-toolbar">
+      <h2 class="point-table-title" :title="def.description">{{ def.label }}</h2>
+      <span v-if="permissions.state.value?.edit_scope === 'scoped'" class="point-scope-label" :title="scopeEditable() ? '只可修改已获授权的板卡和协议；共享修改会在保存前检查全部影响范围。' : '未获本表编辑授权，可以查看和复制。'">{{ scopeEditable() ? '按范围授权' : '只读' }}</span>
       <div class="search">
         <Search :size="17" /><input
           v-model="query"
-          :disabled="busy || !!review || !!orderDraft"
+          :disabled="busy || !!review || !!orderDraft || !!grid.editor.value"
           aria-label="搜索当前表格"
           placeholder="搜索名称、sigID、地址或枚举…"
         />
@@ -307,7 +514,7 @@ function text(row: Row, key: string) {
       <select
         v-if="kind !== 'process' && contextOptions.length > 1"
         v-model="filter"
-        :disabled="busy || !!review || !!orderDraft"
+        :disabled="busy || !!review || !!orderDraft || !!grid.editor.value"
         class="point-filter"
         aria-label="筛选逻辑设备"
       >
@@ -323,10 +530,10 @@ function text(row: Row, key: string) {
         </option>
       </select>
       <div class="inline">
-        <button class="button small" :disabled="busy || !!review" @click="columnSettings = true">列设置</button>
-        <span class="muted">{{ filtered.length }} 条</span
-        ><button
-          v-if="canWrite"
+        <button v-if="canEditTable" class="button small" :disabled="!grid.activeRow.value || !grid.active.value || !grid.editable(grid.activeRow.value, grid.active.value.column)" @click="grid.activeRow.value && grid.active.value && grid.start(grid.activeRow.value, grid.active.value.column)"><Pencil :size="14" />编辑单元格</button>
+        <button class="icon-btn" aria-label="表格操作说明" title="表格操作说明" @click="showHelp = true"><CircleHelp :size="17" /></button>
+        <button
+          v-if="canEditTable"
           class="button primary small"
           @click="open(null)"
         >
@@ -334,45 +541,77 @@ function text(row: Row, key: string) {
         </button>
       </div>
     </div>
+    <div v-if="grid.changedRows.value || grid.hasHistory.value" class="point-grid-draft" role="status" aria-live="polite">
+      <span class="point-draft-summary"><i />{{ grid.changedRows.value }} 行 · {{ grid.changedCells.value }} 处修改 <small>{{ draftWithinScope ? '尚未保存' : '缺少编辑授权 · 草稿保留' }}</small></span>
+      <div class="inline">
+        <button class="button small" :disabled="busy || !!review || !grid.undoStack.value.length" @click="grid.undo"><Undo2 :size="14" />撤销</button>
+        <button class="button small" :disabled="busy || !!review || !grid.redoStack.value.length" @click="grid.redo"><Redo2 :size="14" />重做</button>
+        <button class="button small" :disabled="busy || !!review" @click="discardGrid">放弃修改</button>
+        <button class="button small" :disabled="!canEditTable || !draftWithinScope || busy || !!review || !grid.changedRows.value" title="检查当前修改及关联影响，保留草稿继续编辑" @click="previewGrid('check')"><Check :size="14" />{{ busy && reviewMode === 'check' ? '检查中…' : '检查' }}</button>
+        <button class="button primary small" :disabled="!canEditTable || !draftWithinScope || busy || !!review || !grid.changedRows.value" @click="previewGrid('save')">{{ busy && reviewMode === 'save' ? '检查中…' : '检查并保存' }}</button>
+      </div>
+    </div>
     <div v-if="orderDraft" class="point-draft-bar" @keydown.esc="!busy && cancel()">
-      <span>{{ def.ordering.mode === 'protocol' ? '协议布局已调整，提交前检查地址及共享协议影响。' : '显示顺序已调整，保存后项目成员共享此顺序。' }}</span>
+      <span>{{ !orderWithinScope ? '当前缺少排序所需的编辑授权，修改仍保留。' : def.ordering.mode === 'protocol' ? '协议布局已调整，提交前检查地址及共享协议影响。' : '显示顺序已调整，保存后项目成员共享此顺序。' }}</span>
       <button class="button small" :disabled="busy" @click="cancel">取消修改</button>
-      <button class="button primary small" :disabled="busy || !dirty" @click="previewChange">检查关联影响</button>
+      <button class="button primary small" :disabled="!canEditTable || !orderWithinScope || busy || !dirty" @click="previewChange">检查关联影响</button>
     </div>
     <div v-if="actionError" class="notice danger" role="alert">{{ actionError }} <button class="text-button" @click="discard() && reload++">重新载入数据</button></div>
     <div v-if="moving" class="point-draft-bar">
       <label>组内目标位置 <input v-model.number="movePosition" type="number" min="1" :max="groupRows(moving).length" aria-label="组内目标位置" /></label>
       <button class="button small" @click="move(moving,movePosition)">移动</button><button class="text-button" @click="moving = null">关闭</button>
     </div>
-    <p v-if="orderEnabled" class="point-order-hint">拖动第一列手柄调整同组顺序；点击手柄可跨页移动，聚焦后用方向键上下移动。搜索或筛选隐藏了排序组内记录时，需清除筛选或选择全部分组。</p>
-    <div class="table-scroll sheet-scroll point-table">
-      <table :aria-label="def.label">
+    <div ref="gridTable" class="table-scroll sheet-scroll point-table point-grid" @copy="grid.copy" @paste="grid.paste">
+      <table role="grid" :aria-label="def.label" :aria-rowcount="filtered.length + 1" :aria-colcount="displayColumns.length + 1" :aria-readonly="!canEditTable" aria-multiselectable="true">
         <thead ref="tableHead">
           <tr>
-            <th class="row-number">#</th>
-            <th v-for="column in displayColumns" :key="column.key" :data-column-key="column.key"
+            <th class="row-number"><input type="checkbox" aria-label="选择当前页" title="选择当前页，最多 200 行" :checked="pageSelected" :indeterminate="pagePartSelected" :disabled="busy || !!review || !visible.length" @change="selectPage" /></th>
+            <th v-for="column in displayColumns" :key="column.key" :data-column-key="column.key" tabindex="0"
+              aria-haspopup="menu" :aria-expanded="tableMenu?.type === 'column' && tableMenu.key === column.key"
+              :title="`${columnLabel(column.key)} · 右键设置列，或按 Shift+F10`"
+              @contextmenu.prevent.stop="openColumnMenu(column.key, $event)" @keydown="columnKeydown(column.key, $event)"
               :class="{ 'point-frozen': column.frozen }" :style="column.frozen ? { left: `${frozenLeft[column.key] ?? 0}px` } : undefined">
-              {{ def.fields[column.key].column_label || def.fields[column.key].label }}
-            </th>
-            <th class="point-actions">
-              <span class="point-actions-title">操作 <span class="point-fixed-label" title="固定在右侧，横向滚动时保持可见"><Pin :size="12" aria-hidden="true" />固定</span></span>
+              <span class="point-grid-column"><span class="point-field-type" aria-hidden="true">{{ !grid.field(column.key) ? 'ƒ' : def.fields[grid.field(column.key)!].reference ? '↗' : def.fields[grid.field(column.key)!].type === 'number' ? '#' : def.fields[grid.field(column.key)!].type === 'boolean' ? '☑' : 'Aa' }}</span>{{ columnLabel(column.key) }}<button class="icon-btn point-column-menu" :aria-label="`${columnLabel(column.key)}列菜单`" aria-haspopup="menu" :aria-expanded="tableMenu?.type === 'column' && tableMenu.key === column.key" :disabled="busy || !!review" @click.stop="openColumnMenu(column.key, $event)"><ChevronDown :size="13" /></button></span>
             </th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="(row, i) in visible" :key="row.id" :data-row-id="row.id" :class="{'point-drop-target':dropId === row.id}" @dragover="dragOver(row,$event)" @drop="drop(row,$event)" @keydown.esc="!busy && cancel()">
+          <tr v-for="(row, i) in visible" :key="row.id" :data-row-id="row.id" :aria-rowindex="(page - 1) * pageSize + i + 2" :class="{'point-drop-target':dropId === row.id}" @dragover="dragOver(row,$event)" @drop="drop(row,$event)">
             <td class="row-number point-row-order">
+              <div class="point-row-tools">
               <button v-if="orderEnabled" class="icon-btn drag-handle" :draggable="canMove(row)" :disabled="!canMove(row)" :aria-label="`调整 ${row.name || row.signal_name} 的顺序`" title="拖动排序；点击指定位置；方向键上下移动" @dragstart="startDrag(row,$event)" @dragend="dragging = null; dropId = undefined" @click="choosePosition(row)" @keydown.up.prevent="move(row,groupRows(row).findIndex(r => r.id === row.id))" @keydown.down.prevent="move(row,groupRows(row).findIndex(r => r.id === row.id)+2)"><GripVertical :size="16" /></button>
-              {{ (page - 1) * 50 + i + 1 }}
+              <button class="point-row-select" role="checkbox" :aria-checked="grid.isRowSelected(row.id)" :aria-label="`选择第 ${(page - 1) * pageSize + i + 1} 行`" title="选择此行；Shift 连续选择多行" :disabled="busy || !!review" @click="grid.selectRow(row, $event.shiftKey)"><Check v-if="grid.isRowSelected(row.id)" :size="15" /><span v-else>{{ (page - 1) * pageSize + i + 1 }}</span></button>
+              <button class="icon-btn point-row-menu" :aria-label="`记录操作 ${row.name || row.signal_name}`" aria-haspopup="menu" :aria-expanded="tableMenu?.type === 'row' && tableMenu.row.id === row.id" title="记录详情与关联操作" :disabled="busy || !!review" @click="openRowMenu(row, $event)"><Ellipsis :size="15" /></button>
+              </div>
             </td>
-            <td v-for="column in displayColumns" :key="column.key" :data-column-key="column.key"
-              :class="{ 'point-frozen': column.frozen }" :style="column.frozen ? { left: `${frozenLeft[column.key] ?? 0}px` } : undefined">
+            <td v-for="(column, columnIndex) in displayColumns" :key="column.key" :data-column-key="column.key" role="gridcell"
+              :aria-colindex="columnIndex + 2" :aria-selected="grid.selected(row.id, column.key)" :aria-readonly="!grid.editable(row, column.key)"
+              :tabindex="grid.isActive(row.id, column.key) || (!grid.active.value && i === 0 && columnIndex === 0) ? 0 : -1"
+              :title="cellHint(row, column.key)"
+              :class="{ 'point-frozen': column.frozen, 'point-cell-active': grid.isActive(row.id, column.key), 'point-cell-selected': grid.selected(row.id, column.key), 'point-cell-modified': grid.modified(row, column.key), 'point-cell-editing': grid.isEditing(row.id, column.key), 'point-cell-readonly': !grid.field(column.key) }"
+              :style="column.frozen ? { left: `${frozenLeft[column.key] ?? 0}px` } : undefined"
+              @mousedown.prevent="grid.choose(row, column.key, $event.shiftKey)"
+              @focus="!grid.isActive(row.id, column.key) && grid.choose(row, column.key)"
+              @dblclick="grid.start(row, column.key)"
+              @keydown.stop="grid.keydown($event, row, column.key)">
+              <template v-if="grid.isEditing(row.id, column.key) && gridEditorDef">
+                <select v-if="gridEditorDef.reference || gridEditorDef.options || gridEditorDef.type === 'boolean'"
+                  v-model="gridInput" class="point-cell-editor" :aria-label="`编辑 ${gridEditorDef.label}`" :disabled="!canWrite || !scopeEditable(row)"
+                  @mousedown.stop @click.stop @dblclick.stop @keydown.stop="grid.editorKey" @change="grid.finish() && grid.focusActive()" @blur="grid.finish">
+                  <template v-if="gridEditorDef.type === 'boolean'"><option value="true">是</option><option value="false">否</option></template>
+                  <template v-else-if="gridEditorDef.reference"><option value="">请选择</option><option v-for="choice in grid.choices.value" :key="choice.id" :value="String(choice.id)">{{ choiceLabel(choice) }}</option></template>
+                  <template v-else><option v-if="gridEditorDef.nullable" value="">跟随数据定义</option><option v-for="option in gridEditorDef.options" :key="option" :value="option">{{ option }}</option></template>
+                </select>
+                <input v-else v-model="gridInput" class="point-cell-editor" type="text" :inputmode="gridEditorDef.type === 'number' ? 'decimal' : undefined" :disabled="!canWrite || !scopeEditable(row)"
+                  :aria-label="`编辑 ${gridEditorDef.label}`" :placeholder="gridEditorDef.nullable ? '留空恢复继承' : ''"
+                  @mousedown.stop @click.stop @dblclick.stop @keydown.stop="grid.editorKey" @blur="grid.finish" />
+              </template>
               <span
-                :class="{ 'record-name': column.key === def.columns[0] }"
+                v-else class="point-cell-value" :class="{ 'record-name': column.key === def.columns[0], 'point-cell-boolean': typeof row[column.key] === 'boolean' }"
                 :title="
                   kind === 'process' &&
                   ['default_value', 'min_value', 'max_value'].includes(column.key)
-                    ? row.edit_values[column.key] == null
+                    ? grid.values(row)[column.key] == null
                       ? '继承数据定义'
                       : '处理点覆盖值'
                     : undefined
@@ -380,23 +619,19 @@ function text(row: Row, key: string) {
                 >{{ text(row, column.key) }}</span
               >
             </td>
-            <td class="point-actions">
-              <div class="point-action-buttons">
-                <button class="text-button" :disabled="busy || !!review" @click="open(row)">{{ canWrite ? '设置' : '查看' }}</button>
-                <button v-if="kind === 'process' && allowForward" class="text-button" :disabled="busy || !!review" @click="openForward(row)">转发配置</button>
-                <button
-                  v-if="kind !== 'process' && signalId == null"
-                  class="text-button"
-                  :disabled="busy || !!review"
-                  @click="discard() && emit('process', row.signal_id)"
-                >
-                  关联处理点</button
-                >
-              </div>
-            </td>
           </tr>
         </tbody>
       </table>
+    </div>
+    <div class="point-grid-status" :class="{ 'point-grid-selection-bar': !!selectionLabel }" role="status" aria-live="polite">
+      <template v-if="selectionLabel">
+        <strong>{{ selectionLabel }}</strong>
+        <button class="button small" :disabled="busy || !!review" title="Ctrl/Cmd+C · 按当前可见列复制" @click="copyGrid()"><Copy :size="14" />{{ grid.selectedRowIds.value.length ? '复制选中行' : '复制选区' }}</button>
+        <button class="text-button" :disabled="busy || !!review" @click="grid.finish() && grid.clearSelection()">取消选择</button>
+      </template>
+      <span v-if="copyFeedback" class="point-copy-feedback">{{ copyFeedback }}</span>
+      <template v-else-if="grid.active.value && grid.activeRow.value"><strong>{{ def.fields[grid.active.value.column].column_label || def.fields[grid.active.value.column].label }}</strong><span>{{ cellHint(grid.activeRow.value, grid.active.value.column) }}</span></template>
+      <span v-else-if="!selectionLabel">{{ scopeEditable() ? `选择一个单元格开始${canEditTable ? '编辑' : '查看'}。计算列随来源数据更新。` : '本表未获编辑授权，可以查看和复制。请联系管理员分配板卡和协议权限。' }}</span>
     </div>
     <Empty
       v-if="!visible.length"
@@ -404,13 +639,20 @@ function text(row: Row, key: string) {
       detail="调整筛选，或添加当前板卡需要的点表配置。"
     />
     <div class="pagination">
-      <span>共 {{ filtered.length }} 条 · 每页 50 条</span>
+      <div class="inline pagination-summary">
+        <span>共 {{ filtered.length }} 条</span>
+        <label class="page-size-control">每页
+          <select :value="pageSize" aria-label="每页条数" :disabled="busy || !!review" @change="changePageSize">
+            <option v-for="size in pageSizeOptions" :key="size" :value="size">{{ size }}</option>
+          </select>条
+        </label>
+      </div>
       <div class="inline">
         <button
           class="icon-btn"
           aria-label="上一页"
           :disabled="page <= 1 || busy || !!review"
-          @click="page--"
+          @click="grid.finish() && page--"
         >
           <ChevronLeft :size="18" /></button
         ><span>{{ page }} / {{ pages }}</span>
@@ -418,13 +660,28 @@ function text(row: Row, key: string) {
           class="icon-btn"
           aria-label="下一页"
           :disabled="page >= pages || busy || !!review"
-          @click="page++"
+          @click="grid.finish() && page++"
         >
           <ChevronRight :size="18" />
         </button>
       </div>
     </div>
-    <PointChangePreview v-if="review" :pid="pid" :preview="review" title="排序变更预览" @close="review = null" @done="saved" @error="emit('error', $event)" @conflict="conflict" />
+    <Modal v-if="showHelp" title="表格操作说明" @close="showHelp = false">
+      <div class="point-table-help">
+        <p>{{ def.description }}</p>
+        <ul>
+          <li>点击“开始编辑”获得项目编辑权；提交成功后自动释放。</li>
+          <li>双击单元格或按 Enter 编辑，按 Tab 切换；支持从 Excel 粘贴。</li>
+          <li>“检查”只查看草稿的校验结果和关联影响，保留编辑权；“检查并保存”经确认后提交。</li>
+          <li>点击行号选行，按住 Shift 连选；也可选择矩形区域后复制。</li>
+          <li>右键列头设置列；点击行号旁的 ⋯ 查看记录详情和关联操作。</li>
+          <li>只读状态也可以选择并复制数据，计算列会随来源数据更新。</li>
+          <li>修改名称、sigID、类型或共享字段可能影响关联板卡和协议，保存时需要覆盖全部受影响范围的编辑权限。</li>
+        </ul>
+      </div>
+    </Modal>
+    <ContextMenu v-if="tableMenu" :key="tableMenu.serial" :x="tableMenu.x" :y="tableMenu.y" :label="menuLabel" :items="menuItems" @select="menuAction" @close="tableMenu = null" />
+    <PointChangePreview v-if="review" :pid="pid" :preview="review" :check-only="reviewMode === 'check'" :can-write="canEditTable && draftWithinScope && orderWithinScope" :fields="def.fields" :title="reviewMode === 'check' ? '草稿检查结果' : grid.changedRows.value ? '单元格变更预览' : '排序变更预览'" @close="review = null" @done="saved" @error="emit('error', $event)" @conflict="previewConflict" />
     <PointColumns v-if="columnSettings" :definition="def" :columns="columns" @close="columnSettings = false" @apply="applyColumns" />
     <PointEditor
       v-if="editing"
@@ -433,7 +690,7 @@ function text(row: Row, key: string) {
       :model-id="modelId"
       :data="scopedData!"
       :row="selected"
-      :can-write="canWrite"
+      :can-write="canWrite && scopeEditable(selected)"
       :process-enabled="processEnabled"
       :group-id="groupId"
       :signal-id="signalId"

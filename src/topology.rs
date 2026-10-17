@@ -141,6 +141,7 @@ pub async fn read(State(s): State<AppState>, u: User, Path(pid): Path<i64>) -> R
     let mut tx = db::read_snapshot_context(&s.pool, &u, pid).await?;
     let mut g = snapshot(&mut tx, pid, true).await?;
     g["validation"] = crate::topology_validation::validate(&g);
+    g["permissions"] = crate::permissions::load(&mut tx, pid).await?.value(&g);
     // Raw workbook cells can be large; fetch them on demand from source_records.
     g["source_records"]=json!(rows(&g,"source_records").iter().map(|r|json!({"id":r["id"],"sheet":r["sheet"],"row_number":r["row_number"],"classification":r["classification"]})).collect::<Vec<_>>());
     for d in g["data_items"].as_array_mut().unwrap() {
@@ -240,7 +241,15 @@ pub async fn apply(tx: &mut Transaction<'_, Postgres>, pid: i64, c: &Change) -> 
             return Err(AppError::bad("配置标志必须是整数、宏名或按位或表达式"));
         }
     }
-    let cols = values.keys().cloned().collect::<Vec<_>>().join(",");
+    let mut prepared = c.values.clone();
+    crate::value_ranges::prepare(tx, pid, c, &mut prepared).await?;
+    let cols = prepared
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(",");
     let t = &c.entity;
     let sql = if c.operation == "create" {
         format!(
@@ -251,7 +260,7 @@ pub async fn apply(tx: &mut Transaction<'_, Postgres>, pid: i64, c: &Change) -> 
             "UPDATE {t} SET ({cols})=(SELECT {cols} FROM jsonb_populate_record(NULL::{t},$2)) WHERE project_id=$1 AND id=$3 RETURNING to_jsonb({t}.*)"
         )
     };
-    let q = sqlx::query_scalar(&sql).bind(pid).bind(&c.values);
+    let q = sqlx::query_scalar(&sql).bind(pid).bind(&prepared);
     let row = if c.operation == "create" {
         q.fetch_optional(&mut **tx).await?
     } else {
@@ -259,7 +268,9 @@ pub async fn apply(tx: &mut Transaction<'_, Postgres>, pid: i64, c: &Change) -> 
             .fetch_optional(&mut **tx)
             .await?
     };
-    row.ok_or(AppError::not_found())
+    let row = row.ok_or(AppError::not_found())?;
+    crate::value_ranges::after_write(tx, pid, &c.entity, &row).await?;
+    Ok(row)
 }
 fn issue_keys(report: &Value) -> BTreeSet<String> {
     rows(report, "issues")
@@ -425,6 +436,10 @@ pub async fn preview(
         }
         c.revision = revision;
     }
+    let access = crate::permissions::load(&mut tx, pid).await?;
+    if c.entity == "project_config" {
+        access.require_all()?;
+    }
     let before_report = crate::topology_validation::validate(&before);
     // SQLx manages the savepoint and rolls it back on early return/drop.
     let mut proposed = tx.begin().await?;
@@ -442,6 +457,7 @@ pub async fn preview(
         }
     };
     let after = snapshot(&mut proposed, pid, true).await?;
+    crate::permissions::check_change(&access, &before, &after)?;
     let after_report = crate::topology_validation::validate(&after);
     let mut errors = new_errors(&before_report, &after_report);
     if c.entity == "point_batch" {
@@ -477,12 +493,16 @@ pub async fn commit(
     let revision = db::lock_project(&mut tx, pid).await?;
     let pending:Value=sqlx::query_scalar("SELECT to_jsonb(p) FROM change_previews p WHERE project_id=$1 AND id=$2 AND created_by=$3 AND expires_at>now() FOR UPDATE").bind(pid).bind(id).bind(u.id).fetch_optional(&mut *tx).await?.ok_or(AppError::bad("变更预览已过期、已提交或不属于当前用户"))?;
     let c: Change = serde_json::from_value(pending["change"].clone())?;
+    let access = crate::permissions::load(&mut tx, pid).await?;
+    if c.entity == "project_config" {
+        access.require_all()?;
+    }
     let merged = revision != c.revision;
     let before = snapshot(&mut tx, pid, true).await?;
     let has_baseline = crate::change_merge::eligible(&c)
         && !pending["merge_base"].is_null()
         && !pending["merge_patch"].is_null();
-    if c.entity == "point_batch" {
+    if c.entity == "point_batch" && c.operation == "create" {
         crate::point_batch::guard(
             &pending["merge_base"],
             &crate::change_merge::document(&before),
@@ -521,6 +541,7 @@ pub async fn commit(
         }
     })?;
     let after = snapshot(&mut tx, pid, true).await?;
+    crate::permissions::check_change(&access, &before, &after)?;
     if target.is_some_and(|expected| expected != crate::change_merge::document(&after)) {
         return Err(crate::change_merge::conflict(
             &c,
@@ -547,6 +568,8 @@ pub async fn commit(
     let effects = impact(&before, &after);
     let before_record = if c.entity == "point_order" {
         Some(json!({"id":row["id"],"kind":row["kind"],"ids":row["before_ids"]}))
+    } else if c.entity == "point_batch" {
+        crate::point_batch::audit_before(&before, &c)
     } else if c.entity == "project_config" {
         Some(json!({"config":before["project_config"]}))
     } else if crate::point_tables::is_point_entity(&c.entity) {
@@ -565,6 +588,7 @@ pub async fn commit(
         .bind(id)
         .execute(&mut *tx)
         .await?;
+    crate::edit_lock::release_owned(&mut tx, pid, u.id).await?;
     tx.commit().await?;
     Ok(Json(
         json!({"record":row,"revision":revision+1,"impact":effects,"merged":merged}),

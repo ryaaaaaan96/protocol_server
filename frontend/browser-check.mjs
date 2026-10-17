@@ -2,6 +2,10 @@ import fs from "node:fs";
 import { checkPointInteractions } from "./point-interactions-check.mjs";
 import { checkPointGroups } from "./point-groups-check.mjs";
 import { checkPointColumns } from "./point-columns-check.mjs";
+import { checkPointGrid, checkPointGridMappings, checkPointStringRanges, checkReadonlyGrid } from "./point-grid-check.mjs";
+import { openRowAction } from "./point-menus-check.mjs";
+import { checkProjectEditLock, cleanupProjectEditing } from "./project-edit-lock-check.mjs";
+import { checkPointCopy } from "./point-copy-check.mjs";
 import { fileURLToPath } from "node:url";
 import { chromium, expect } from "@playwright/test";
 process.chdir(fileURLToPath(new URL(".", import.meta.url)));
@@ -42,8 +46,9 @@ const close = async () => {
 const record = () => page.locator(".sheet-scroll .record-name");
 const openRecord = async (name = record().first()) => {
   await expect(name).toBeVisible();
-  const details = name.locator("xpath=ancestor::tr").getByRole("button", { name: /^(设置|查看)$/, exact: true });
-  if (await details.count()) await details.click();
+  const row = name.locator("xpath=ancestor::tr");
+  const menu = row.getByRole("button", { name: /^记录操作 / });
+  if (await menu.count()) await openRowAction(page, row);
   else await name.click();
 };
 const tableRows = () => page.locator(".sheet-scroll tbody tr");
@@ -80,6 +85,7 @@ try {
   await page.getByRole("heading", { name: "项目拓扑", exact: true }).waitFor();
   const pid = await page.getByLabel("当前项目").inputValue(),
     g = await (await page.request.get(`/api/projects/${pid}/topology`)).json();
+  await checkProjectEditLock(page, { pid });
   expect(g.project_config.board_types.map((t) => t.code)).toEqual([
     "CSU",
     "UPM",
@@ -114,7 +120,7 @@ try {
   ).toBeVisible();
   await expect(page.locator("main table")).toHaveCount(0);
   await expect(page.getByRole("tablist")).toHaveCount(0);
-  await expect(page.locator("main").getByRole("button")).toHaveCount(5);
+  await expect(page.locator("main .type-node")).toHaveCount(5);
   await expect(
     page.getByRole("button", { name: "项目 JSON 配置", exact: true }),
   ).toHaveCount(0);
@@ -312,10 +318,8 @@ try {
     "",
   );
   await close();
-  await page
-    .getByRole("button", { name: "关联处理点", exact: true })
-    .first()
-    .click();
+  await checkPointGridMappings(page, { pid, modelId: arm.id });
+  await openRowAction(page, tableRows().first(), "关联处理点");
   await expect(tab("处理点表")).toHaveAttribute("aria-selected", "true");
   await expect(page.getByLabel("信号名称", { exact: true })).toHaveValue(
     binding.signal_name,
@@ -362,8 +366,8 @@ try {
   );
   await tab("处理点表").click();
   await expect(tab("范围表")).toHaveCount(0);
-  await expect(page.getByRole("columnheader", { name: "上电恢复默认值", exact: true })).toBeVisible();
-  await expect(page.getByRole("columnheader", { name: "允许手动恢复默认值", exact: true })).toBeVisible();
+  await expect(page.locator('.point-table th[data-column-key="boot_restore"]')).toContainText("上电恢复默认值");
+  await expect(page.locator('.point-table th[data-column-key="manual_restore"]')).toContainText("允许手动恢复默认值");
   const range = g.signal_ranges.find((r) =>
       g.v_signals.some((s) => s.id === r.signal_id && s.model_id === arm.id),
     ),
@@ -400,7 +404,7 @@ try {
   await expect(tab("采集点表")).toHaveCount(0);
   await expect(tab("DSP内部数据")).toHaveAttribute("aria-selected", "true");
   await expect(page.getByRole("heading", { name: "DSP内部数据", exact: true })).toBeVisible();
-  await expect(page.getByRole("columnheader", { name: "上电恢复默认值", exact: true })).toBeVisible();
+  await expect(page.locator('.point-table th[data-column-key="boot_restore"]')).toContainText("上电恢复默认值");
   await expect(tab("范围表")).toHaveCount(0);
   await expect(page.getByLabel("搜索当前表格")).toHaveValue("");
   await tab("DSP内部数据").click();
@@ -415,6 +419,9 @@ try {
   await expect(tab("逻辑设备")).toHaveCount(0);
   await checkPointInteractions(page, { pid, modelId: dsp.id, record, tableRows });
   await checkPointColumns(page, { pid, modelId: dsp.id });
+  await checkPointStringRanges(page, { pid, modelId: dsp.id });
+  await checkPointCopy(page, { pid, modelId: dsp.id });
+  await checkPointGrid(page, { pid, modelId: dsp.id });
   // Override only the response: exercise presentation without editing project data.
   const schemaRoute = `**/api/projects/${pid}/point-tables/schema`;
   const display = await (await page.request.get(`/api/projects/${pid}/point-tables/schema`)).json();
@@ -438,7 +445,7 @@ try {
   await expect(page.getByRole("heading", { name: "DSP 对外点表", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "选择 UPM 板卡", exact: true }).click();
   await page.getByRole("button", { name: "全部分组", exact: true }).click();
-  await page.getByRole("button", { name: "关联处理点", exact: true }).first().click();
+  await openRowAction(page, tableRows().first(), "关联处理点");
   await expect(page.locator("dialog")).toBeVisible();
   await expect(tab("处理点表")).toHaveCount(0);
   await close();
@@ -521,7 +528,7 @@ try {
   await editor.fill(JSON.stringify(modified, null, 2));
   await page.getByRole("button", { name: "检查项目配置", exact: true }).click();
   await page.getByRole("status").filter({ hasText: "配置检查通过" }).waitFor();
-  await expect(page.getByRole("status")).toContainText("DSP × 96");
+  await expect(page.locator("dialog").getByRole("status")).toContainText("DSP × 96");
   const invalid = structuredClone(g.project_config);
   invalid.mounts[0].parent = "DSP";
   await editor.fill(JSON.stringify(invalid));
@@ -621,7 +628,7 @@ try {
     () => document.querySelector(".sidebar").getBoundingClientRect().right <= 0,
   );
   await expect(page.locator("main table")).toHaveCount(0);
-  await expect(page.locator("main").getByRole("button")).toHaveCount(5);
+  await expect(page.locator("main .type-node")).toHaveCount(5);
   await page.screenshot({
     path: "../.runtime/mobile-project-topology.png",
     fullPage: true,
@@ -684,6 +691,8 @@ try {
     page.getByRole("button", { name: "新建处理点表", exact: true }),
   ).toHaveCount(0);
   await expect(page.locator(".drag-handle")).toHaveCount(0);
+  await checkReadonlyGrid(page);
+  await checkPointCopy(page, { pid, modelId: arm.id, readonly: true });
   await openRecord();
   await expect(page.getByLabel("信号名称", { exact: true })).toBeDisabled();
   await expect(
@@ -720,5 +729,9 @@ try {
   console.error(e.message);
   process.exitCode = 1;
 } finally {
-  await browser.close();
+  try {
+    await cleanupProjectEditing(page);
+  } finally {
+    await browser.close();
+  }
 }

@@ -371,9 +371,25 @@ pub async fn read(
     // Definitions may be shared with another board; offer names/types, never source workbook blobs.
     options["data"] = json!(db::all_json(&mut tx,
         "SELECT jsonb_build_object('id',id,'name',name,'data_type',data_type,'byte_length',byte_length,'default_value',default_value,'min_value',min_value,'max_value',max_value) FROM data_items WHERE project_id=$1 ORDER BY id", pid).await?);
+    let mut graph = crate::permissions::catalog(&mut tx, pid).await?;
+    graph["signal_groups"] = options["groups"].clone();
+    let access = crate::permissions::load(&mut tx, pid).await?;
+    for row in &mut data {
+        row["can_edit"] = json!(crate::permissions::can_edit_row(
+            &access,
+            &graph,
+            if kind == "process" {
+                "signals"
+            } else {
+                "signal_bindings"
+            },
+            row
+        ));
+    }
+    let permissions = access.value(&graph);
     Ok(Json(
         json!({"version":1,"revision":revision,"model_id":mid,"kind":kind,
-        "definition":definition,"rows":data,"options":options}),
+        "definition":definition,"rows":data,"options":options,"permissions":permissions}),
     ))
 }
 
@@ -389,7 +405,8 @@ pub(crate) async fn table_rows(
                 'display_order',s.display_order, 'contexts', COALESCE(c.names,''),
                 'collection_count', COALESCE(b.collected,0), 'forward_count', COALESCE(b.forwarded,0),
                 'range_inherited', concat_ws('、', CASE WHEN r.default_value IS NULL THEN '默认值' END,
-                    CASE WHEN r.min_value IS NULL THEN '下限' END, CASE WHEN r.max_value IS NULL THEN '上限' END),
+                    CASE WHEN v.data_type<>'STRING' AND r.min_value IS NULL THEN '下限' END,
+                    CASE WHEN v.data_type<>'STRING' AND r.max_value IS NULL THEN '上限' END),
                 'edit_values', to_jsonb(s) || COALESCE(to_jsonb(r)-'id'-'project_id'-'signal_id','{}'::jsonb))
             FROM v_signals v JOIN signals s ON s.id=v.id
             LEFT JOIN signal_ranges r ON r.signal_id=v.id

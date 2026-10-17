@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount } from "vue";
 import { X } from "@lucide/vue";
-defineProps<{ title: string; wide?: boolean }>();
+import ProjectEditNotice from "./ProjectEditNotice.vue";
+defineProps<{ title: string; wide?: boolean; lockGuard?: boolean }>();
 const emit = defineEmits<{ close: [] }>();
 const dialog = ref<HTMLDialogElement>();
 onMounted(() => dialog.value?.showModal());
@@ -19,6 +20,7 @@ onBeforeUnmount(() => dialog.value?.close());
         <X :size="20" />
       </button>
     </div>
+    <ProjectEditNotice v-if="lockGuard" />
     <slot />
   </dialog>
 </template>

@@ -33,7 +33,7 @@ function canDrop(column: TableColumn) {
 <template>
   <Modal title="列设置" @close="emit('close')">
     <div class="modal-body">
-      <p class="muted">勾选显示或冻结到左侧。拖动手柄或使用上下按钮调整顺序；冻结列集中在左侧，同类列之间可调整顺序。序号和右侧操作列始终保留。</p>
+      <p class="muted">勾选显示或冻结到左侧。拖动手柄或使用上下按钮调整顺序；冻结列集中在左侧，同类列之间可调整顺序。行号始终保留。</p>
       <div class="point-column-list" role="list" aria-label="表格列">
         <div v-for="column in ordered" :key="column.key" class="point-column-item" role="listitem" :data-column-key="column.key"
           @dragover="canDrop(column) && $event.preventDefault()"

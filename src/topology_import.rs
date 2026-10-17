@@ -36,7 +36,14 @@ fn source_type(p: &Point) -> String {
 }
 async fn item(tx: &mut Transaction<'_, Postgres>, pid: i64, p: &Point) -> Result<i64> {
     let source_type = source_type(p);
-    let id=insert(tx,pid,"data_items",json!({"name":p.name,"data_type":source_type,"byte_length":p.byte_length,"unit":p.unit,"default_value":p.default_value,"min_value":p.min_value,"max_value":p.max_value,"notes":p.notes})).await?;
+    // Workbook source cells remain in raw_json/source_records. Numeric bounds on
+    // array/string definitions are not meaningful in the normalized point model.
+    let (minimum, maximum) = if source_type == "STRING" {
+        ("", "")
+    } else {
+        (p.min_value.as_str(), p.max_value.as_str())
+    };
+    let id=insert(tx,pid,"data_items",json!({"name":p.name,"data_type":source_type,"byte_length":p.byte_length,"unit":p.unit,"default_value":p.default_value,"min_value":minimum,"max_value":maximum,"notes":p.notes})).await?;
     sqlx::query("UPDATE data_items SET source_sheet=$3,source_row=$4,raw_json=$5 WHERE project_id=$1 AND id=$2").bind(pid).bind(id).bind(&p.source_sheet).bind(p.source_row).bind(&p.raw_json).execute(&mut **tx).await?;
     Ok(id)
 }

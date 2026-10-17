@@ -91,7 +91,24 @@ node scripts/excel-batch/index.mjs --project 1 --model 2 --kind process --file p
 }
 ```
 
-`row` 是调用方的正整数来源行号，不得重复；`values` 字段与对应点表单条新建相同，只允许新增。业务校验失败返回 HTTP 200、`allowed:false` 和 `errors`；可定位的错误附带 `row`，字段格式错误附带 `field`。成功返回 `allowed:true`、预览 `id`、`impact` 和 `validation`。初次预览版本过旧返回 HTTP 409，需读取最新版本并重新预览。
+`row` 是调用方的正整数来源行号，不得重复；省略 `operation` 或设为 `create` 时，`values` 字段与对应点表单条新建相同。业务校验失败返回 HTTP 200、`allowed:false` 和 `errors`；可定位的错误附带 `row`，字段格式错误附带 `field`。成功返回 `allowed:true`、预览 `id`、`impact` 和 `validation`。新增的初次预览版本过旧返回 HTTP 409，需读取最新版本并重新预览。
+
+网页的单元格批量修改也使用此接口，设置 `operation:"update"`，每行提供已有记录 ID、增量字段和原始编辑值：
+
+```json
+{
+  "revision": 12,
+  "operation": "update",
+  "rows": [{
+    "row": 1,
+    "id": 123,
+    "values": { "name": "更新后的名称", "min_value": null },
+    "expected": { "name": "原名称", "min_value": "0" }
+  }]
+}
+```
+
+更新不能混入新增行，记录 ID 和行号不能重复；`expected` 来自读接口的 `edit_values`，用于检测并发修改，不能使用显示出来的继承值替代。范围记录尚不存在时使用字段定义中的默认值（没有默认值则用 null）。修改字段未被他人改变时可基于最新版本重新预览；提交仍检查全部关系和约束。单批任意行失败则整批回滚，只增加一次 revision 和审计记录。现有 Excel CLI 仍只追加新增，不将重复上传解释为覆盖修改。
 
 预览在事务中保存点及范围后回滚，仅保留预览记录，不增加业务版本。预览内的临时记录 ID 不能用于后续绑定。
 
@@ -103,7 +120,13 @@ node scripts/excel-batch/index.mjs --project 1 --model 2 --kind process --file p
 
 无关并发修改允许合并；引用记录或协议布局变化返回 HTTP 409 `REVISION_CONFLICT`。第一版比较依赖记录的整体内容，引用记录即使只改名称也需重新预览。重复提交已用预览会被拒绝；以新预览重传已有编号、映射也会报重复，不能作为覆盖更新使用。
 
-此接口与原有 `/imports/preview` 不同：UPM 工作簿导入会重建项目拓扑，批量接口只追加当前板卡当前点表。
+此接口与原有 `/imports/preview` 不同：UPM 工作簿导入会重建项目拓扑，批量接口只操作当前板卡当前点表中明确指定的记录。
+
+### 独占编辑接口
+
+调用预览或提交前，先 `POST /api/projects/{pid}/edit-lock/acquire`，请求体 `{}`。通过 `GET /api/projects/{pid}/edit-lock` 查看 `{locked, owned, owner, expires_at, lease_seconds}`；持有者应在 120 秒租约到期前调用 `/renew`。他人占用或未持锁的写入返回 423，并附 `code` 与 `lock` 状态。预览不会释放，成功提交会原子释放；放弃本次操作可调用 `/release`。
+
+Excel CLI 已自动获取和续租。仅预览模式在完成后主动释放，正式提交成功由服务器释放；如果其他人正在网页编辑，CLI 会提示占用并停止写入。
 
 ## 验证
 

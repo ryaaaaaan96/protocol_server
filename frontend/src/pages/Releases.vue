@@ -49,6 +49,7 @@ async function generate() {
   }
 }
 async function publish() {
+  if (!props.canWrite || publishing.value) return;
   publishing.value = true;
   try {
     await api(`/projects/${props.pid}/releases`, "POST", { name: name.value, revision: generated.value!.revision });

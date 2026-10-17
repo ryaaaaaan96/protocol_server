@@ -19,6 +19,7 @@ const help = `点表 Excel 批量追加示例（Node.js 22+）
 
 登录：环境变量 PROTOCOL_USERNAME、PROTOCOL_PASSWORD，或 PROTOCOL_SESSION。
 预览不保存业务数据；--commit 会预览并提交一次，不自动重试、覆盖或拆批。
+脚本会申请项目编辑权；他人正在编辑时会停止，预览结束或提交成功后释放。
 所有引用 ID 必须已存在；单批 1～200 行。详情见 docs/batch-add.md。`;
 
 function positive(value, name) {
@@ -54,6 +55,8 @@ async function main() {
   const tablePath = `/projects/${pid}/board-models/${mid}/point-tables/${args.kind}`;
   const rows = args.file ? await readRows(args.file, args.kind, args.sheet || args.kind) : null;
   let cookie = "", loggedIn = false, reportHandle;
+  let editLease = false, commitAttempted = false, commitResponded = false, heartbeat, leaseError;
+  let renewal = Promise.resolve();
   // Reserve the output before any write request; an existing report must not cause a
   // successful commit to be reported as failed and accidentally retried by the caller.
   if (args.report) {
@@ -78,8 +81,9 @@ async function main() {
         ? "提交返回了无法解析的响应，结果未知。请先核实页面和审计记录，勿直接重跑 --commit。"
         : `服务返回了非 JSON 响应（HTTP ${response.status}）`);
     });
+    if (path.endsWith("/commit")) commitResponded = true;
     if (!response.ok) {
-      if (reportHandle && path !== "/auth/logout") await reportHandle.writeFile(JSON.stringify({ stage: "error", status: response.status, ...data }, null, 2));
+      if (reportHandle && path !== "/auth/logout" && !path.endsWith("/edit-lock/release")) await reportHandle.writeFile(JSON.stringify({ stage: "error", status: response.status, ...data }, null, 2));
       throw new Error([data.error || `HTTP ${response.status}`, issues(data)].filter(Boolean).join("\n"));
     }
     if (path === "/auth/login") cookie = response.headers.getSetCookie().find(c => c.startsWith("protocol_session="))?.split(";")[0] || "";
@@ -101,7 +105,13 @@ async function main() {
       console.log(`引用 ID 已导出：${args.references}（分组、数据定义、处理点、端点、上下文和协议字段）`);
       return;
     }
-    const preview = await api(`${tablePath}/batch/preview`, "POST", { revision: table.revision, rows });
+    await api(`/projects/${pid}/edit-lock/acquire`, "POST", {});
+    editLease = true;
+    heartbeat = setInterval(() => {
+      renewal = renewal.then(() => api(`/projects/${pid}/edit-lock/renew`, "POST", {})).catch(error => { leaseError = error; });
+    }, 30000);
+    const current = await api(tablePath);
+    const preview = await api(`${tablePath}/batch/preview`, "POST", { revision: current.revision, rows });
     if (!preview.allowed) {
       if (reportHandle) await reportHandle.writeFile(JSON.stringify({ stage: "preview", ...preview }, null, 2));
       throw new Error(`批量校验未通过，业务数据未保存：\n${issues(preview)}`);
@@ -110,7 +120,18 @@ async function main() {
     for (const issue of preview.validation?.issues || []) {
       if (issue.level === "warning") console.log(`校验提示（含项目已有问题）：${issue.message}`);
     }
-    const result = args.commit ? await api(`/projects/${pid}/changes/${preview.id}/commit`, "POST", {}) : preview;
+    if (leaseError) throw leaseError;
+    let result = preview;
+    if (args.commit) {
+      clearInterval(heartbeat);
+      await renewal;
+      if (leaseError) throw leaseError;
+      commitAttempted = true;
+      result = await api(`/projects/${pid}/changes/${preview.id}/commit`, "POST", {});
+      // Commit already relinquished this lease atomically. Never release again:
+      // another tab using the same account may have started a new editing session.
+      editLease = false;
+    }
     console.log(args.commit
       ? `添加成功：${result.record.count} 行，项目版本 ${result.revision}${result.merged ? "（已合并无关的并发修改）" : ""}。`
       : "仅完成预览，业务数据未保存；确认后在同一命令后添加 --commit。该命令会重新校验。正式记录 ID 以提交结果为准。");
@@ -119,6 +140,12 @@ async function main() {
       catch { console.error("结果报告写入失败；以上服务端结果仍然有效，请勿因此重复提交。"); }
     }
   } finally {
+    clearInterval(heartbeat);
+    await renewal;
+    if (editLease && (!commitAttempted || commitResponded)) {
+      try { await api(`/projects/${pid}/edit-lock/release`, "POST", {}); }
+      catch { console.error("项目编辑权未能主动释放，将在租约到期后自动释放。"); }
+    }
     if (loggedIn) { try { await api("/auth/logout", "POST", {}); } catch { console.error("临时登录会话未能注销，将按服务端规则过期。"); } }
     await reportHandle?.close();
   }

@@ -34,8 +34,16 @@ export async function api(
   if (!response.ok) {
     if (response.status === 401 && path !== "/auth/login")
       window.dispatchEvent(new Event("session-expired"));
+    const projectId = path.match(/^\/projects\/(\d+)\//)?.[1];
+    if (projectId && response.status === 423)
+      window.dispatchEvent(new CustomEvent("project-edit-lock", { detail: { pid: Number(projectId), lock: data.lock } }));
+    if (projectId && response.status === 403 && data.code === "EDIT_SCOPE_DENIED")
+      window.dispatchEvent(new CustomEvent("project-permissions-changed", { detail: { pid: Number(projectId) } }));
     throw new ApiError(data.error || `请求失败 (${response.status})`, response.status, data);
   }
+  const committed = method === "POST" && path.match(/^\/projects\/(\d+)\/(?:changes\/\d+\/commit|imports\/\d+\/commit|releases)$/);
+  if (committed)
+    window.dispatchEvent(new CustomEvent("project-edit-lock", { detail: { pid: Number(committed[1]) } }));
   return data;
 }
 export const number = (v: unknown) => Number(v ?? 0).toLocaleString("zh-CN");

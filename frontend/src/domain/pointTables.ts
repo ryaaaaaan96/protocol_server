@@ -38,6 +38,59 @@ export type PointTableData = {
   options: Record<string, Row[]>;
 };
 
+function normalizedDataType(value: unknown): string | undefined {
+  return typeof value === "string"
+    ? value.trim().toUpperCase() || undefined
+    : undefined;
+}
+
+export function isStringType(value: unknown): boolean {
+  return normalizedDataType(value) === "STRING";
+}
+
+/** Resolve the draft's effective internal type, respecting inherited definitions. */
+export function pointDataType(
+  data: PointTableData,
+  values: Row,
+  fallbackRow?: Row,
+): string | undefined {
+  const original = { ...fallbackRow, ...fallbackRow?.edit_values };
+  const current = { ...original, ...values };
+  if (data.kind === "process") {
+    const override = normalizedDataType(current.internal_type);
+    if (override) return override;
+    const definition = data.options.data?.find(
+      (item) => item.id === current.data_item_id,
+    );
+    const inherited = normalizedDataType(definition?.data_type);
+    if (inherited) return inherited;
+    // An old snapshot is only safe while neither source of the type changed.
+    if (
+      current.data_item_id === original.data_item_id &&
+      normalizedDataType(current.internal_type) ===
+        normalizedDataType(original.internal_type)
+    )
+      return normalizedDataType(fallbackRow?.data_type);
+  } else {
+    const signal = data.options.signals?.find(
+      (item) => item.id === current.signal_id,
+    );
+    const type = normalizedDataType(signal?.data_type);
+    if (type) return type;
+    if (current.signal_id === original.signal_id)
+      return normalizedDataType(fallbackRow?.data_type);
+  }
+  return undefined;
+}
+
+export function pointIsString(
+  data: PointTableData,
+  values: Row,
+  fallbackRow?: Row,
+): boolean {
+  return isStringType(pointDataType(data, values, fallbackRow));
+}
+
 export function pointGroupLabel(group: Row): string {
   const names: Record<string, string> = {
     ARM_LOCAL: "LOCAL · 本机数据",

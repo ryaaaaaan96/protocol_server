@@ -5,10 +5,13 @@ import {
   choiceLabel,
   pointChoices,
   pointText,
+  pointIsString,
   type PointTableData,
 } from "../domain/pointTables";
 import Modal from "./Modal.vue";
 import Field from "./Field.vue";
+import { usePermissionContext } from "../composables/useProjectPermissions";
+import { allowsPoint, allowsScope } from "../domain/permissions";
 const props = defineProps<{
   pid: number;
   modelId: number;
@@ -22,6 +25,7 @@ const props = defineProps<{
 }>();
 const emit = defineEmits<{ close: []; done: [merged?: boolean]; error: [message: string]; conflict: []; dirty: [value: boolean] }>();
 const def = props.data.definition;
+const permissions = usePermissionContext();
 const values = ref<Row>({});
 for (const key of def.editor) {
   const f = def.fields[key];
@@ -41,13 +45,15 @@ if (!props.row) {
     values.value.process_enabled = props.processEnabled;
   } else {
     values.value.endpoint_id =
-      pointChoices(props.data, "endpoint_id", values.value)[0]?.id ?? null;
+      choices("endpoint_id")[0]?.id ?? null;
     values.value.context_id =
       props.contextId ?? pointChoices(props.data, "context_id", values.value)[0]?.id ?? null;
     if (props.signalId != null) values.value.signal_id = props.signalId;
   }
 }
 const initial: Row = JSON.parse(JSON.stringify(values.value));
+const scopeAllowed = computed(() => allowsPoint(permissions.state.value, props.modelId, props.data.kind, props.data, props.row));
+const canSubmit = computed(() => props.canWrite && scopeAllowed.value && allowsPoint(permissions.state.value, props.modelId, props.data.kind, props.data, { edit_values: values.value }));
 const preview = ref<Row | null>(null),
   busy = ref(false),
   error = ref("");
@@ -66,8 +72,13 @@ function locked(key: string) {
 const inherited = computed(() =>
   props.data.options.data.find((d) => d.id === values.value.data_item_id),
 );
+const stringPoint = computed(() => pointIsString(props.data, values.value, props.row || undefined));
+const editorFields = computed(() => def.editor.filter(key => !stringPoint.value || !["min_value", "max_value"].includes(key)));
 function choices(key: string) {
-  return pointChoices(props.data, key, values.value);
+  const options = pointChoices(props.data, key, values.value);
+  return key === "endpoint_id" && props.canWrite
+    ? options.filter(endpoint => allowsScope(permissions.state.value, { model_id: props.modelId, scope: "protocol", contract_id: endpoint.contract_id }))
+    : options;
 }
 function set(key: string, event: Event) {
   const f = def.fields[key],
@@ -92,8 +103,13 @@ function set(key: string, event: Event) {
         )
           values.value[k] = null;
   }
+  if (["internal_type", "data_item_id"].includes(key) && stringPoint.value) {
+    for (const bound of ["min_value", "max_value"])
+      if (def.editor.includes(bound)) values.value[bound] = null;
+  }
 }
 async function review(op = props.row ? "update" : "create") {
+  if (!canSubmit.value || busy.value) return;
   preview.value = null;
   error.value = "";
   busy.value = true;
@@ -128,6 +144,7 @@ async function review(op = props.row ? "update" : "create") {
   }
 }
 async function commit() {
+  if (!canSubmit.value || busy.value) return;
   busy.value = true;
   error.value = "";
   try {
@@ -164,6 +181,7 @@ function delta(change: Row): string {
 </script>
 <template>
   <Modal
+    lock-guard
     :title="`${row ? (canWrite ? '编辑' : '查看') : '新建'}${def.label}`"
     wide
     @close="close"
@@ -171,6 +189,8 @@ function delta(change: Row): string {
     <form @submit.prevent="review()">
       <div class="modal-body">
         <p class="muted">{{ def.description }}</p>
+        <p v-if="!scopeAllowed" class="notice">此记录不在你的板卡或协议编辑范围内，可以查看和复制。请联系管理员授权。</p>
+        <p v-else-if="permissions.state.value?.edit_scope === 'scoped'" class="notice">修改名称、sigID、类型或共享字段可能影响关联板卡和协议，保存时需要覆盖全部受影响范围的权限。</p>
         <p v-if="data.kind === 'process' && values.group_id != null" class="notice">
           使用此组的设备：{{ data.options.contexts.filter(c => c.group_id === values.group_id).map(c => `${c.name} [${c.dev_id}]`).join('、') || '暂无' }}。
           点定义和范围修改会作用于这些设备。
@@ -179,14 +199,15 @@ function delta(change: Row): string {
           v-if="data.kind === 'process' && inherited"
           class="notice point-inheritance"
         >
-          继承默认值 {{ pointText(inherited.default_value) }}，下限
+          继承默认值 {{ pointText(inherited.default_value) }}<template v-if="!stringPoint">，下限
           {{ pointText(inherited.min_value) }}，上限
-          {{ pointText(inherited.max_value) }}。
-          留空覆盖字段即可恢复继承；范围规则作用于复用此处理点的所有设备上下文。
+          {{ pointText(inherited.max_value) }}</template>。
+          <template v-if="stringPoint">字符串没有数值上下限，长度由字节数管理。</template>
+          留空覆盖字段即可恢复继承；配置作用于复用此处理点的所有设备上下文。
         </div>
         <div class="form-grid">
           <Field
-            v-for="key in def.editor"
+            v-for="key in editorFields"
             :key="key"
             :label="def.fields[key].label"
             :hint="def.fields[key].hint"
@@ -286,7 +307,7 @@ function delta(change: Row): string {
         >
           关闭
         </button>
-        <button v-if="canWrite" class="button" :disabled="busy">
+        <button v-if="canWrite" class="button" :disabled="busy || !canSubmit">
           检查关联影响
         </button>
         <button

@@ -107,6 +107,115 @@ export async function checkPointBatch({ client, engineer, viewer, engineerId, vi
   const foreign = await client.call("/projects", "POST", { name: "Foreign batch target" });
   equal((await client.call(`/projects/${foreign.id}/board-models/${model.id}/point-tables/process/batch/preview`, "POST", { revision: 1, rows: [create(40)] })).allowed, false);
 
+  // Spreadsheet drafts update multiple existing rows with one revision/audit entry.
+  // Values are patches: saving a cell must not resend and overwrite other fields.
+  const read = (kind = "process") => client.call(`${table}/${kind}`);
+  const updates = (snapshot, patches) => patches.map(([id, values], i) => {
+    const original = snapshot.rows.find(row => row.id === id);
+    const expected = { ...original.edit_values };
+    for (const key of Object.keys(values)) {
+      if (!Object.hasOwn(expected, key)) expected[key] = snapshot.definition.fields[key]?.default ?? null;
+    }
+    return { row: i + 1, id, values, expected };
+  });
+  const updateBatch = (snapshot, patches, kind = "process", who = client) => who.call(`${table}/${kind}/batch/preview`, "POST", {
+    revision: snapshot.revision, operation: "update", rows: updates(snapshot, patches),
+  });
+  const originalTable = await read();
+  const updatePatches = [[signals[0].id, { name: "Edited in a cell" }], [signals[1].id, { min_value: "0", max_value: "20", default_value: "4", boot_restore: true }]];
+  const updateRequest = { revision: originalTable.revision, operation: "update", rows: updates(originalTable, updatePatches) };
+  equal((await viewer.raw(`${table}/process/batch/preview`, "POST", updateRequest)).status, 403);
+  for (const rows of [
+    [{ row: 1, values: { name: "Missing ID" } }],
+    [{ row: 1, id: signals[0].id, values: {} }],
+    [{ row: 1, id: signals[0].id, values: { name: "First" } }, { row: 2, id: signals[0].id, values: { name: "Second" } }],
+  ]) equal((await client.call(`${table}/process/batch/preview`, "POST", { ...updateRequest, rows })).allowed, false);
+  const readOnly = await updateBatch(originalTable, [[signals[0].id, { effective_address: 4 }]]);
+  equal(readOnly.allowed, false);
+  ok(readOnly.errors.some(error => error.row === 1 && error.field === "effective_address"));
+  const auditBeforeUpdate = (await client.call(`${url}/audit`)).length;
+  const updatePreview = await updateBatch(originalTable, updatePatches);
+  ok(updatePreview.allowed, JSON.stringify(updatePreview.errors));
+  equal(JSON.stringify((await read()).rows), JSON.stringify(originalTable.rows));
+  equal((await graph()).revision, originalTable.revision);
+  equal((await client.call(`${url}/audit`)).length, auditBeforeUpdate);
+  const savedUpdates = await commit(updatePreview);
+  equal(savedUpdates.record.count, 2);
+  equal(savedUpdates.revision, originalTable.revision + 1);
+  const updatedTable = await read();
+  equal(updatedTable.rows.find(row => row.id === signals[0].id).name, "Edited in a cell");
+  equal(updatedTable.rows.find(row => row.id === signals[1].id).default_value, "4");
+  equal(updatedTable.rows.find(row => row.id === signals[1].id).edit_values.boot_restore, true);
+  const updateAudit = await client.call(`${url}/audit`);
+  equal(updateAudit.length, auditBeforeUpdate + 1);
+  const cellAudit = updateAudit.find(row => row.entity === `point_batch:${model.id}` && row.action === "topology.update");
+  equal(cellAudit.before_data.record.rows.length, 2);
+  equal(cellAudit.before_data.record.rows[0].record.name, originalTable.rows.find(row => row.id === signals[0].id).name);
+  equal(cellAudit.after_data.record.rows[0].record.name, "Edited in a cell");
+
+  const badUpdate = await updateBatch(updatedTable, [[signals[0].id, { name: "Must roll back" }], [signals[1].id, { min_value: "30" }]]);
+  equal(badUpdate.allowed, false);
+  ok(badUpdate.errors.some(error => error.row === 2 && error.code === "range_order"));
+  equal((await read()).rows.find(row => row.id === signals[0].id).name, "Edited in a cell");
+  equal((await graph()).revision, updatedTable.revision);
+  const wrongBoard = await client.call(`${url}/board-models/${otherModel.id}/point-tables/process/batch/preview`, "POST", {
+    revision: updatedTable.revision, operation: "update", rows: updates(updatedTable, [[signals[0].id, { name: "Wrong board" }]]),
+  });
+  equal(wrongBoard.allowed, false);
+  ok(wrongBoard.errors.some(error => error.row === 1));
+  const foreignUpdate = await client.call(`/projects/${foreign.id}/board-models/${model.id}/point-tables/process/batch/preview`, "POST", {
+    revision: 1, operation: "update", rows: updates(updatedTable, [[signals[0].id, { name: "Foreign project" }]]),
+  });
+  equal(foreignUpdate.allowed, false);
+
+  // Another member may change different cells while the draft/preview stays open.
+  const mergeDraft = await read();
+  const independentUpdate = await updateBatch(mergeDraft, [[signals[0].id, { flags: "8" }], [signals[1].id, { name: "Independent second row" }]], "process", engineer);
+  ok(independentUpdate.allowed, JSON.stringify(independentUpdate.errors));
+  await edit("signals", { name: "Concurrent untouched field" }, signals[0].id);
+  equal((await commit(independentUpdate, engineer)).merged, true);
+  equal((await read()).rows.find(row => row.id === signals[0].id).name, "Concurrent untouched field");
+  equal((await read()).rows.find(row => row.id === signals[0].id).flags, "8");
+  const staleDraft = await read();
+  await edit("signals", { name: "A newer second row" }, signals[1].id);
+  const staleUpdate = await updateBatch(staleDraft, [[signals[0].id, { flags: "16" }]], "process", engineer);
+  equal(staleUpdate.merged, true);
+  await commit(staleUpdate, engineer);
+  const staleCollision = await engineer.raw(`${table}/process/batch/preview`, "POST", {
+    revision: staleDraft.revision, operation: "update", rows: updates(staleDraft, [[signals[0].id, { flags: "32" }]]),
+  });
+  equal(staleCollision.status, 409);
+  equal(staleCollision.data.code, "REVISION_CONFLICT");
+
+  const collisionDraft = await read();
+  const collisionUpdate = await updateBatch(collisionDraft, [[signals[0].id, { flags: "32" }], [signals[1].id, { name: "Must remain unsaved" }]], "process", engineer);
+  await edit("signals", { flags: "64" }, signals[0].id);
+  const beforeRejected = await read(), auditBeforeRejected = (await client.call(`${url}/audit`)).length;
+  const updateConflict = await engineer.raw(`${url}/changes/${collisionUpdate.id}/commit`, "POST", {});
+  equal(updateConflict.status, 409);
+  equal(updateConflict.data.code, "REVISION_CONFLICT");
+  equal(JSON.stringify((await read()).rows), JSON.stringify(beforeRejected.rows));
+  equal((await graph()).revision, beforeRejected.revision);
+  equal((await client.call(`${url}/audit`)).length, auditBeforeRejected);
+
+  // Whole-batch validation also runs after merging individually valid range changes.
+  const rangeDraft = await read();
+  const rangeUpdate = await updateBatch(rangeDraft, [[signals[0].id, { name: "Range rollback" }], [signals[1].id, { min_value: "10", default_value: "10" }]], "process", engineer);
+  ok(rangeUpdate.allowed, JSON.stringify(rangeUpdate.errors));
+  const range = (await graph()).signal_ranges.find(row => row.signal_id === signals[1].id);
+  await edit("signal_ranges", { max_value: "5" }, range.id);
+  const rangeConflict = await engineer.raw(`${url}/changes/${rangeUpdate.id}/commit`, "POST", {});
+  equal(rangeConflict.status, 409);
+  equal(rangeConflict.data.code, "REVISION_CONFLICT");
+  equal((await read()).rows.find(row => row.id === signals[0].id).name, beforeRejected.rows.find(row => row.id === signals[0].id).name);
+  equal((await read()).rows.find(row => row.id === signals[1].id).min_value, "0");
+
+  const collectDraft = await read("collect");
+  const collectUpdate = await updateBatch(collectDraft, collectDraft.rows.map((row, i) => [row.id, { poll_interval: 100 + i }]), "collect");
+  ok(collectUpdate.allowed, JSON.stringify(collectUpdate.errors));
+  equal((await commit(collectUpdate)).record.count, 2);
+  equal((await read("collect")).rows.map(row => row.poll_interval).sort().join(","), "100,101");
+
   // The actual CLI reads/writes XLSX; dry runs leave data untouched, a committed batch
   // is atomic, and rerunning the same file cannot duplicate records.
   const { default: ExcelJS } = await import("../scripts/excel-batch/node_modules/exceljs/excel.js");
@@ -144,5 +253,5 @@ export async function checkPointBatch({ client, engineer, viewer, engineerId, vi
     ok(replay.stderr.includes("第 2 行"));
     equal((await graph()).revision, beforeCli.revision + 1);
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }
-  console.log("PASS: point batch preview, atomic ranges/bindings, row errors, permissions/isolation, concurrent append/conflict rollback and real Excel CLI");
+  console.log("PASS: point batch append/update, atomic ranges/bindings, row errors, audit, permissions/isolation, cell merge/conflict rollback and real Excel CLI");
 }

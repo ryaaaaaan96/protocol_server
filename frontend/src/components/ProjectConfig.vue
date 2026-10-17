@@ -52,6 +52,7 @@ function download() {
   }
 }
 async function review() {
+  if (!props.canWrite || busy.value) return;
   busy.value = true;
   error.value = "";
   try {
@@ -75,6 +76,7 @@ async function review() {
   }
 }
 async function commit() {
+  if (!props.canWrite || busy.value) return;
   busy.value = true;
   try {
     await api(
@@ -94,7 +96,7 @@ async function commit() {
 }
 </script>
 <template>
-  <Modal title="项目 JSON 配置" wide @close="emit('close')"
+  <Modal title="项目 JSON 配置" wide lock-guard @close="emit('close')"
     ><form @submit.prevent="review">
       <div class="modal-body project-json">
         <p class="notice">

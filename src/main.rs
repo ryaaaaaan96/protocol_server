@@ -3,9 +3,11 @@ mod auth;
 mod change_merge;
 mod codegen;
 mod db;
+mod edit_lock;
 mod error;
 mod importer;
 mod model;
+mod permissions;
 mod point_batch;
 mod point_order;
 mod point_tables;
@@ -16,6 +18,7 @@ mod topology;
 mod topology_codegen;
 mod topology_import;
 mod topology_validation;
+mod value_ranges;
 mod virtual_service;
 
 use anyhow::Context;
@@ -97,7 +100,7 @@ async fn main() -> anyhow::Result<()> {
         "DATABASE_URL must use a non-superuser role without BYPASSRLS; run migrations using MIGRATION_DATABASE_URL separately"
     );
     let schema_ready: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='projects' AND column_name='config_key')",
+        "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='projects' AND column_name='config_key') AND to_regclass('public.project_edit_locks') IS NOT NULL AND to_regclass('public.project_member_grants') IS NOT NULL",
     ).fetch_one(&pool).await?;
     anyhow::ensure!(
         schema_ready,
@@ -158,8 +161,19 @@ async fn main() -> anyhow::Result<()> {
         .route("/projects/{pid}/configuration", get(project_config::read))
         .route("/projects", get(api::projects).post(api::create_project))
         .route("/projects/{pid}/overview", get(api::overview))
+        .route("/projects/{pid}/edit-lock", get(edit_lock::read))
+        .route(
+            "/projects/{pid}/edit-lock/acquire",
+            post(edit_lock::acquire),
+        )
+        .route("/projects/{pid}/edit-lock/renew", post(edit_lock::renew))
+        .route(
+            "/projects/{pid}/edit-lock/release",
+            post(edit_lock::release),
+        )
         .route("/projects/{pid}/topology", get(topology::read))
         .route("/projects/{pid}/sources/{id}", get(topology::source))
+        .route("/projects/{pid}/permissions", get(permissions::read))
         .route("/projects/{pid}/changes/preview", post(topology::preview))
         .route(
             "/projects/{pid}/changes/{id}/commit",

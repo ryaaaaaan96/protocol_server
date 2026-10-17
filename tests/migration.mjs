@@ -125,6 +125,25 @@ try {
       7,
     );
   }
+  // Reapply the view-only STRING migration over historical numeric bounds: the
+  // logical read changes without rewriting the archived/shared business values.
+  const owner = (await db.query("SELECT id,project_id FROM signal_groups ORDER BY id LIMIT 1")).rows[0];
+  const stringItem = (await db.query(
+    "INSERT INTO data_items(project_id,name,data_type,byte_length,default_value,min_value,max_value) VALUES($1,'Legacy STRING bounds','STRING',2,'A','0','99') RETURNING id",
+    [owner.project_id],
+  )).rows[0];
+  const legacySignal = (await db.query(
+    "INSERT INTO signals(project_id,group_id,data_item_id,name,enum_name,process_enabled) VALUES($1,$2,$3,'Legacy STRING bounds','MIGRATION_STRING_BOUNDS',false) RETURNING id",
+    [owner.project_id, owner.id, stringItem.id],
+  )).rows[0];
+  await db.query("INSERT INTO signal_ranges(project_id,signal_id,default_value,min_value,max_value) VALUES($1,$2,'B','2','80')", [owner.project_id, legacySignal.id]);
+  const historical = await db.query("SELECT to_jsonb(d) AS definition,to_jsonb(r) AS range FROM data_items d JOIN signals s ON s.data_item_id=d.id JOIN signal_ranges r ON r.signal_id=s.id WHERE s.id=$1", [legacySignal.id]);
+  await db.query(fs.readFileSync("migrations/0011_string_value_ranges.sql", "utf8"));
+  assert.deepEqual((await db.query("SELECT to_jsonb(d) AS definition,to_jsonb(r) AS range FROM data_items d JOIN signals s ON s.data_item_id=d.id JOIN signal_ranges r ON r.signal_id=s.id WHERE s.id=$1", [legacySignal.id])).rows, historical.rows);
+  assert.deepEqual((await db.query("SELECT default_value,min_value,max_value,byte_length FROM v_signals WHERE id=$1", [legacySignal.id])).rows[0], { default_value: "B", min_value: "", max_value: "", byte_length: 2 });
+  await db.query("UPDATE signals SET internal_type='U16' WHERE id=$1", [legacySignal.id]);
+  assert.deepEqual((await db.query("SELECT min_value,max_value FROM v_signals WHERE id=$1", [legacySignal.id])).rows[0], { min_value: "2", max_value: "80" });
+
   const counts = (await db.query("SELECT count(*)::int AS n FROM signals"))
     .rows[0].n;
   execFileSync("target/debug/protocol-server", ["migrate"], {

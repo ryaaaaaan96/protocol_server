@@ -26,6 +26,9 @@ import Loading from "../components/Loading.vue";
 import Empty from "../components/Empty.vue";
 import PointTable from "../components/PointTable.vue";
 import { pointGroupLabel, type PointSchema } from "../domain/pointTables";
+import { pageSizeOptions, usePageSize } from "../composables/usePageSize";
+import { usePermissionContext } from "../composables/useProjectPermissions";
+import { allowsEntity, allowsScope } from "../domain/permissions";
 const props = defineProps<{
   pid: number;
   graph: Row | null;
@@ -45,6 +48,7 @@ const emit = defineEmits<{
   dirty: [value: boolean];
 }>();
 const pointDirty = ref(false);
+const permissions = usePermissionContext();
 watch(pointDirty, value => emit("dirty", value), {flush:"sync"});
 onBeforeUnmount(() => emit("dirty", false));
 function selectSheet(key:string) {
@@ -256,19 +260,42 @@ const filtered = computed(() =>
         .includes(query.value.trim().toLowerCase()),
   ),
 );
+const { pageSize, setPageSize } = usePageSize(computed(() => `table-page-size:${props.pid}:${props.mode}:${props.boardId}:${sheet.value.key}`));
 const pages = computed(() =>
-  Math.max(1, Math.ceil(filtered.value.length / 50)),
+  Math.max(1, Math.ceil(filtered.value.length / pageSize.value)),
 );
 const visible = computed(() =>
-  filtered.value.slice((page.value - 1) * 50, page.value * 50),
+  filtered.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value),
 );
 watch(pages, (n) => (page.value = Math.min(page.value, n)));
+function changePageSize(event: Event) {
+  const select = event.target as HTMLSelectElement;
+  const firstRow = (page.value - 1) * pageSize.value;
+  const size = Number(select.value);
+  if (setPageSize(size)) page.value = Math.min(pages.value, Math.floor(firstRow / size) + 1);
+  select.value = String(pageSize.value);
+}
 const canCreate = computed(
   () =>
     props.canWrite &&
     !!spec.value &&
-    !(props.mode === "board" && sheet.value.entity === "data_items"),
+    !(props.mode === "board" && sheet.value.entity === "data_items") && canCreateScope(),
 );
+function canCreateScope() {
+  if (permissions.state.value?.can_manage_project) return true;
+  const modelId = board.value?.model_id;
+  if (!modelId || !props.graph) return false;
+  const entity = sheet.value.entity;
+  if (["signal_groups", "device_contexts", "signals", "signal_ranges"].includes(entity))
+    return allowsScope(permissions.state.value, { model_id: modelId, scope: "internal" });
+  if (entity === "endpoints") return allowsScope(permissions.state.value, { model_id: modelId, scope: "board" }) || props.graph.endpoints.some((endpoint: Row) => endpoint.model_id === modelId && allowsEntity(permissions.state.value, props.graph!, entity, endpoint));
+  if (entity === "protocol_fields") return props.graph.endpoints.some((endpoint: Row) => endpoint.model_id === modelId && allowsEntity(permissions.state.value, props.graph!, entity, { contract_id: endpoint.contract_id }));
+  if (entity === "passthrough_routes") return ["client", "server"].every(role => props.graph!.endpoints.some((endpoint: Row) => endpoint.model_id === modelId && endpoint.role === role && allowsEntity(permissions.state.value, props.graph!, "endpoints", endpoint)));
+  return false;
+}
+function canEditEntity(entity: string, row?: Row | null) {
+  return props.canWrite && !!props.graph && allowsEntity(permissions.state.value, props.graph, entity, row);
+}
 function open(row: Row) {
   if (!spec.value) return;
   edit.value = {
@@ -278,6 +305,7 @@ function open(row: Row) {
   };
 }
 function create(entity = sheet.value.entity) {
+  if (!canCreate.value) return;
   const defaults: Row = {};
   const g = props.graph!,
     b = board.value;
@@ -296,7 +324,7 @@ function create(entity = sheet.value.entity) {
       )?.id;
     if (entity === "protocol_fields")
       defaults.contract_id = g.endpoints.find(
-        (e: Row) => e.model_id === b.model_id,
+        (e: Row) => e.model_id === b.model_id && allowsEntity(permissions.state.value, g, "protocol_fields", { contract_id: e.contract_id }),
       )?.contract_id;
     if (entity === "board_links") {
       const ep = g.endpoints.find(
@@ -370,6 +398,7 @@ function sourceOf(row: Row) {
         :key="type.code"
         :class="['board-type-choice', { selected: type.id === boardId }]"
         :aria-label="`选择 ${type.code} 板卡`"
+        :title="`${type.name} · ${typeSignals(type)} 个信号`"
         :aria-pressed="type.id === boardId"
         @click="emit('board', type.id)"
       >
@@ -398,11 +427,11 @@ function sourceOf(row: Row) {
           :class="{ primary: groupId === g.id }" :aria-pressed="groupId === g.id"
           @click="selectGroup(g.id)">{{ pointGroupLabel(g) }}</button>
         <button class="button small" :aria-pressed="groupId == null" @click="selectGroup()">全部分组</button>
+        <span v-if="sheet.pointKind && groupContexts.length" class="point-group-contexts"
+          :title="`使用此组的设备：${groupContexts.map(c => `${c.name} [${c.dev_id}]`).join('、')}。点定义和范围共用；采集、转发按设备分别配置。`">
+          使用此组的设备：{{ groupContexts.map(c => `${c.name} [${c.dev_id}]`).join('、') }}
+        </span>
       </div>
-      <p v-if="sheet.pointKind && groupContexts.length" class="point-group-contexts">
-        使用此组的设备：{{ groupContexts.map(c => `${c.name} [${c.dev_id}]`).join('、') }}。
-        点定义和范围共用；采集、转发按设备分别配置。
-      </p>
       <div
         class="entity-tabs"
         role="tablist"
@@ -505,7 +534,7 @@ function sourceOf(row: Row) {
                 v-for="(r, index) in visible"
                 :key="r.id || `${r.route_id}:${r.field_id}`"
               >
-                <td class="row-number">{{ (page - 1) * 50 + index + 1 }}</td>
+                <td class="row-number">{{ (page - 1) * pageSize + index + 1 }}</td>
                 <td v-for="(key, i) in columns" :key="key">
                   <button
                     v-if="i === 0 && spec"
@@ -566,7 +595,14 @@ function sourceOf(row: Row) {
           "
         />
         <div class="pagination">
-          <span>共 {{ filtered.length }} 条 · 每页 50 条</span>
+          <div class="inline pagination-summary">
+            <span>共 {{ filtered.length }} 条</span>
+            <label class="page-size-control">每页
+              <select :value="pageSize" aria-label="每页条数" @change="changePageSize">
+                <option v-for="size in pageSizeOptions" :key="size" :value="size">{{ size }}</option>
+              </select>条
+            </label>
+          </div>
           <div class="inline">
             <button
               class="icon-btn"
@@ -599,7 +635,7 @@ function sourceOf(row: Row) {
     :defaults="edit.defaults"
     :board="board"
     :binding-role="edit.role"
-    :can-write="canWrite"
+    :can-write="edit.row ? canEditEntity(edit.entity, edit.row) : canCreate"
     @close="edit = null"
     @done="done"
     @error="emit('error', $event)"

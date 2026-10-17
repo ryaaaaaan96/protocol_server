@@ -39,6 +39,20 @@ fn shape(out: &mut Vec<Value>, entity: &str, v: &Value, typ: &str, len: i64) {
 fn range(out: &mut Vec<Value>, entity: &str, v: &Value, typ: &str, len: i64) {
     let n = |k: &str| strv(v, k).parse::<f64>().ok();
     if typ == "STRING" {
+        if ["min_value", "max_value"]
+            .iter()
+            .any(|key| !strv(v, key).trim().is_empty())
+        {
+            add(
+                out,
+                "error",
+                entity,
+                v,
+                "string_bounds",
+                "STRING 字符串类型不支持数值上下限",
+                0,
+            );
+        }
         if strv(v, "default_value").len() > len as usize {
             add(
                 out,

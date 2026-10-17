@@ -3,8 +3,11 @@ import { ref, watch, computed } from "vue";
 import { api, revisionConflict, type Row } from "../api";
 import { referenceOptions } from "../domain/board";
 import { specs, labelFor, labels, type FieldSpec } from "../domain/schema";
+import { isStringType } from "../domain/pointTables";
 import Modal from "./Modal.vue";
 import Field from "./Field.vue";
+import { usePermissionContext } from "../composables/useProjectPermissions";
+import { allowsEntity } from "../domain/permissions";
 import { LoaderCircle, ArrowRight, GitBranch, Trash2 } from "@lucide/vue";
 const props = defineProps<{
   pid: number;
@@ -36,6 +39,16 @@ for (const f of spec.value.fields)
           ? null
           : "");
 const initial: Row = JSON.parse(JSON.stringify(values.value));
+const permissions = usePermissionContext();
+const scopeAllowed = computed(() => !props.row || allowsEntity(permissions.state.value, props.graph, props.entity, props.row));
+const stringRange = computed(() => {
+  if (props.entity === "data_items") return isStringType(values.value.data_type);
+  if (props.entity !== "signal_ranges") return false;
+  const signal = props.graph.signals.find((s: Row) => s.id === values.value.signal_id);
+  const source = props.graph.data_items.find((d: Row) => d.id === signal?.data_item_id);
+  return isStringType(signal?.internal_type ?? source?.data_type);
+});
+const editorFields = computed(() => spec.value.fields.filter(f => !stringRange.value || !["min_value", "max_value"].includes(f.key)));
 watch(
   values,
   () => {
@@ -82,8 +95,17 @@ function set(f: FieldSpec, event: Event) {
         )
           values.value[field.key] = null;
       }
+  if (["data_type", "signal_id"].includes(f.key) && stringRange.value) {
+    values.value.min_value = props.entity === "data_items" ? "" : null;
+    values.value.max_value = props.entity === "data_items" ? "" : null;
+  }
 }
 async function review(op = props.row ? "update" : "create") {
+  if (!props.canWrite || busy.value) return;
+  if (!allowsEntity(permissions.state.value, props.graph, props.entity, op === "delete" ? props.row : { ...props.row, ...values.value })) {
+    error.value = "当前记录或修改后的目标不在你的编辑范围内；共享配置需要全部受影响板卡和协议的权限。";
+    return;
+  }
   busy.value = true;
   error.value = "";
   operation.value = op;
@@ -117,6 +139,7 @@ async function review(op = props.row ? "update" : "create") {
   }
 }
 async function commit() {
+  if (!props.canWrite || busy.value) return;
   busy.value = true;
   error.value = "";
   try {
@@ -162,12 +185,14 @@ const related = computed(() =>
 </script>
 <template>
   <Modal
+    lock-guard
     :title="`${row ? '编辑' : '新建'}${spec.label}`"
     wide
     @close="emit('close')"
   >
     <form @submit.prevent="review()">
       <div class="modal-body">
+        <p v-if="!scopeAllowed" class="notice">此配置不在你的编辑范围内，可以查看。请联系管理员分配对应板卡或协议权限。</p>
         <div v-if="board" class="editor-scope">
           <strong>{{ board.name }}</strong
           ><span
@@ -191,7 +216,7 @@ const related = computed(() =>
         </div>
         <div class="form-grid">
           <Field
-            v-for="f in spec.fields"
+            v-for="f in editorFields"
             :key="f.key"
             :label="f.label"
             :hint="f.hint"

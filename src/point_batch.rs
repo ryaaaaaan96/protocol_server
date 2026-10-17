@@ -1,4 +1,4 @@
-//! Atomic, append-only batches using the same point rules and change previews as the UI.
+//! Atomic point batches using the same point rules and change previews as the UI.
 use crate::{
     AppState,
     auth::User,
@@ -22,13 +22,22 @@ const MAX_ROWS: usize = 200;
 #[serde(deny_unknown_fields)]
 struct BatchRow {
     row: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    expected: Value,
     values: serde_json::Map<String, Value>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BatchRequest {
     revision: i32,
+    #[serde(default = "create_operation")]
+    operation: String,
     rows: Vec<BatchRow>,
+}
+fn create_operation() -> String {
+    "create".into()
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -52,7 +61,7 @@ pub async fn preview(
         Json(Change {
             revision: request.revision,
             entity: "point_batch".into(),
-            operation: "create".into(),
+            operation: request.operation,
             id: None,
             expected: Value::Null,
             values: json!({"model_id":mid,"kind":kind,"rows":request.rows}),
@@ -62,28 +71,52 @@ pub async fn preview(
 }
 
 fn decode(c: &Change) -> Result<Batch> {
-    if c.operation != "create" || c.id.is_some() {
-        return Err(AppError::bad("批量添加只支持新增"));
+    if !matches!(c.operation.as_str(), "create" | "update") || c.id.is_some() {
+        return Err(AppError::bad("点表批量操作只支持新增或修改"));
     }
     let batch: Batch = serde_json::from_value(c.values.clone())?;
     point_tables::entity(&batch.kind)?;
     if batch.model_id <= 0 || batch.rows.is_empty() || batch.rows.len() > MAX_ROWS {
-        return Err(AppError::bad("请选择板卡，每批添加 1～200 行"));
+        return Err(AppError::bad("请选择板卡，每批操作 1～200 行"));
     }
     let mut seen = BTreeSet::new();
     if batch.rows.iter().any(|r| r.row == 0 || !seen.insert(r.row)) {
         return Err(AppError::bad("来源行号必须为不重复的正整数"));
     }
+    let mut ids = BTreeSet::new();
+    for row in &batch.rows {
+        if c.operation == "update" {
+            if row.id.is_none_or(|id| id <= 0 || !ids.insert(id)) {
+                return Err(failure(vec![
+                    json!({"row":row.row,"field":"id","message":"修改行必须指定不重复的有效记录 ID"}),
+                ]));
+            }
+            if row.values.is_empty() {
+                return Err(failure(vec![
+                    json!({"row":row.row,"message":"修改行至少需要一个字段"}),
+                ]));
+            }
+            if !row.expected.is_null() && !row.expected.is_object() {
+                return Err(failure(vec![
+                    json!({"row":row.row,"message":"expected 必须为原始编辑字段对象"}),
+                ]));
+            }
+        } else if row.id.is_some() || !row.expected.is_null() {
+            return Err(failure(vec![
+                json!({"row":row.row,"message":"新增行不能包含已有记录 ID 或 expected"}),
+            ]));
+        }
+    }
     Ok(batch)
 }
 
 fn failure(errors: Vec<Value>) -> AppError {
-    let mut error = AppError::bad("批量添加校验失败，整批未保存");
+    let mut error = AppError::bad("批量点表校验失败，整批未保存");
     error.2 = Some(json!({"errors":errors}));
     error
 }
 
-fn check_fields(batch: &Batch) -> Result<()> {
+fn check_fields(batch: &Batch, operation: &str) -> Result<()> {
     let allowed = point_tables::writable(&batch.kind);
     let required: &[&str] = if batch.kind == "process" {
         &["group_id", "data_item_id", "name", "enum_name"]
@@ -96,6 +129,9 @@ fn check_fields(batch: &Batch) -> Result<()> {
             errors.push(json!({"row":row.row,"field":key,"message":message}))
         };
         for key in required {
+            if operation == "update" && !row.values.contains_key(*key) {
+                continue;
+            }
             if row
                 .values
                 .get(*key)
@@ -145,7 +181,7 @@ fn check_fields(batch: &Batch) -> Result<()> {
 
 pub async fn apply(tx: &mut Transaction<'_, Postgres>, pid: i64, c: &Change) -> Result<Value> {
     let batch = decode(c)?;
-    check_fields(&batch)?;
+    check_fields(&batch, &c.operation)?;
     let mut records = Vec::new();
     let mut errors = Vec::new();
     for row in batch.rows {
@@ -158,9 +194,9 @@ pub async fn apply(tx: &mut Transaction<'_, Postgres>, pid: i64, c: &Change) -> 
             &Change {
                 revision: c.revision,
                 entity: point_tables::entity(&batch.kind)?.into(),
-                operation: "create".into(),
-                id: None,
-                expected: Value::Null,
+                operation: c.operation.clone(),
+                id: row.id,
+                expected: row.expected,
                 values: json!({"model_id":batch.model_id,"fields":row.values}),
             },
         )
@@ -175,7 +211,14 @@ pub async fn apply(tx: &mut Transaction<'_, Postgres>, pid: i64, c: &Change) -> 
                 if error.0.is_server_error() {
                     return Err(error);
                 }
-                errors.push(json!({"row":row.row,"message":error.1}));
+                if let Some(details) = error.2.as_ref().and_then(|v| v["errors"].as_array()) {
+                    errors.extend(details.iter().cloned().map(|mut detail| {
+                        detail["row"] = json!(row.row);
+                        detail
+                    }));
+                } else {
+                    errors.push(json!({"row":row.row,"message":error.1}));
+                }
             }
         }
     }
@@ -183,6 +226,50 @@ pub async fn apply(tx: &mut Transaction<'_, Postgres>, pid: i64, c: &Change) -> 
         return Err(failure(errors));
     }
     Ok(json!({"id":batch.model_id,"kind":batch.kind,"count":records.len(),"rows":records}))
+}
+
+/// Rebase a stale draft only when every edited cell still has its original value.
+/// Read once for the batch so all comparisons use the same locked project snapshot.
+pub async fn can_preview(
+    s: &AppState,
+    tx: &mut Transaction<'_, Postgres>,
+    pid: i64,
+    c: &Change,
+) -> Result<bool> {
+    let batch = decode(c)?;
+    let definition =
+        point_tables::board_definition(tx, pid, batch.model_id, &batch.kind, &s.project_files)
+            .await?;
+    let current = point_tables::table_rows(tx, pid, batch.model_id, &batch.kind).await?;
+    Ok(batch.rows.iter().all(|change| {
+        current
+            .iter()
+            .find(|row| row["id"].as_i64() == change.id)
+            .is_some_and(|row| {
+                change.values.keys().all(|key| {
+                    let value = row["edit_values"]
+                        .get(key)
+                        .unwrap_or(&definition["fields"][key]["default"]);
+                    change.expected.get(key).is_some_and(|old| old == value)
+                })
+            })
+    }))
+}
+
+pub fn audit_before(graph: &Value, c: &Change) -> Option<Value> {
+    if c.operation != "update" {
+        return None;
+    }
+    let batch = decode(c).ok()?;
+    let entity = point_tables::entity(&batch.kind).ok()?;
+    let rows: Vec<_> = batch
+        .rows
+        .iter()
+        .map(|row| {
+            json!({"row":row.row,"record":point_tables::audit_before(graph,entity,row.id.unwrap())})
+        })
+        .collect();
+    Some(json!({"id":batch.model_id,"kind":batch.kind,"count":rows.len(),"rows":rows}))
 }
 
 /// Attach source row numbers to domain errors (including conflicts with older records).
