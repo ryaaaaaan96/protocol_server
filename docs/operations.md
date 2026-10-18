@@ -2,7 +2,7 @@
 
 ## 迁移环境检查
 
-在旧机器和目标机器分别运行 `./scripts/check-env.sh`，需要时将输出保存为报告比较。它列出 Node/npm、Rust、Python、C 编译器版本，检查配置文件、本地 PostgreSQL 工具、前端依赖、Playwright Chromium 及其缺失动态库，并提供补齐命令。它不执行安装、不启动服务、不连接数据库、不打印 `.env` 内容；缺项返回退出码 1。
+在旧机器和目标机器分别运行 `./scripts/check-env.sh`，需要时将输出保存为报告比较。它检查工具、配置引用、前端依赖、浏览器及动态库，并分别检查 `pg_dump` / `pg_restore`；捆绑的 `pg_ctl` 可用不代表包含这两个客户端。它不安装、不启动服务、不连接数据库、不打印密码；缺项返回退出码 1。
 
 浏览器库缺失时可按提示执行 `cd frontend && npx playwright install-deps chromium`；浏览器也缺失时执行 `npx playwright install --with-deps chromium`。系统库安装需要相应权限。检查通过后仍需验证实际构建、数据库恢复和浏览器测试；数据库内容不会随 Git 或 `config/` 自动迁移。
 
@@ -11,25 +11,66 @@
 | 参数 | 用途 |
 | --- | --- |
 | DATABASE_URL | HTTP 服务使用的 protocol_app 非超级用户连接 |
-| MIGRATION_DATABASE_URL | 仅 migrate 命令使用的迁移管理员连接 |
+| MIGRATION_DATABASE_URL | 迁移及项目导出使用的管理员连接；导出需创建并清理临时数据库 |
 | ADMIN_USERNAME / ADMIN_PASSWORD | 数据库为空时创建首个管理员，后续不会重置现有账号 |
 | BIND_ADDR | Rust 监听地址，默认 127.0.0.1:8080 |
 | COOKIE_SECURE | HTTPS 环境设为 true |
 | STATIC_DIR | 生产前端目录，默认 frontend/dist |
-| POINT_TABLE_CONFIG | 点表展示配置路径，默认 config/point-tables.json；修改后重启后端生效 |
-| PROJECT_CONFIG_DIR | 项目配置的父目录，默认 config/projects；每个子目录提供 project.json 和可选 point-tables.json |
+| PROJECT_CONFIG_DIR | 项目配置的父目录，默认 config；每个项目自带 project.json、清单指定的板卡目录及可选来源文件 |
+| PG_DUMP_BIN / PG_RESTORE_BIN | 可选的 PostgreSQL 客户端绝对路径，未设置时从 PATH 查找 |
 
 不要把迁移管理员连接作为运行连接。本版迁移给名称为 `protocol_app` 的角色授权；如采用其他角色名，需在部署时单独授予等价权限并测试 RLS。
 
 ## 本地数据库与项目分开创建
 
-首次运行 `./scripts/init-db.sh` 明确创建本地数据库、应用角色和表结构，不创建业务项目。随后由管理员运行 `./scripts/create-project.sh upm`，从 `config/projects/upm/project.json` 创建项目，最后运行 `./scripts/dev.sh` 启动应用。已经初始化的数据库可用 `node scripts/local-db.mjs start` / `stop` 单独控制；启动应用和数据库不会自动初始化新库。
+首次运行 `./scripts/init-db.sh` 明确创建本地数据库、应用角色和表结构，不创建业务项目。随后由管理员在服务器终端或 SSH 会话中运行 `./scripts/create-project.sh upm`，从 `config/upm/project.json` 创建项目，最后运行 `./scripts/dev.sh` 启动应用。已经初始化的数据库可用 `node scripts/local-db.mjs start` / `stop` 单独控制；启动应用和数据库不会自动初始化新库。
 
-外部 PostgreSQL 使用已有的数据库管理流程创建空库和运行角色，执行 `cargo run -- migrate` 安装表结构后，同样可以运行项目创建脚本。项目创建只需要运行数据库连接，仍通过管理员上下文、RLS 和事务写入。运行角色不得拥有表或绕过 RLS。创建脚本重复运行会保留已有项目，导入失败则整体回滚；它不是同步或恢复已有项目的工具。
+外部 PostgreSQL 创建空库和运行角色后，执行 `cargo run -- migrate` 安装表结构，再运行项目创建脚本或在网页导入项目文件夹。运行角色不得拥有表或绕过 RLS。CLI 创建优先导入项目 Dump；没有 Dump 时使用可选 workbook，均未提供则创建空点表。创建脚本重复运行会保留已有项目；已有项目的覆盖更新通过文件夹预览和导入完成。
 
-本地模式的 `.runtime/pgdata/` 保存完整业务数据库；`.runtime/` 被 Git 忽略，不能整体当缓存删除。`config/projects/` 可随代码迁移，提供创建时的拓扑和可选 Excel 来源，以及运行时的展示定义；网页中修改的点表、用户和权限仍以数据库为准。恢复旧电脑的数据时，使用下面的数据库备份流程，勿先初始化表结构或创建同名新项目到恢复目标。
+本地模式的 `.runtime/pgdata/` 保存完整业务数据库，不能当缓存删除。`config/<项目名>/` 中的 JSON 保存项目定义，点表行、用户和权限保存在 PostgreSQL。单项目可通过下面的项目 Dump 迁移；完整工作空间恢复使用全库备份，恢复目标须为空库。
 
-## 备份
+## 板卡点表配置部署
+
+每个项目都使用独立的 `config/<项目名>/` 目录。`project.json` 的 `topology.board_types[].directory` 指向该项目内的板卡目录；当前 UPM 项目直接包含 CSU、UPM、DSP、IDU_T、IDU_R 五个目录，每个目录有完整的 `process.json`、`collect.json`、`transmit.json`。目录名可与板卡类型代码不同，由清单明确关联；同类型板卡实例共用配置。
+
+各表必须包含 `version: 1`、`enabled`、`label`、`description`、`columns`、`editor`、`ordering`、`inline` 和 `fields`。字段元数据直接保存在本表中，不读取公共默认或项目覆盖文件。空 `inline` 使单元格只读，`enabled: false` 隐藏入口；DSP 采集表当前隐藏。`project.json.workspace.boards` 为所有类型指定页签顺序和辅助表标题，转发表使用 `transmit` 标识。
+
+迁移时复制完整项目目录，包括清单引用的来源文件；路径必须位于项目内。`PROJECT_CONFIG_DIR` 为这些项目目录的父目录，默认 `config`；更改这个环境变量需重启服务。目录内的项目、板卡及点表定义实时读取，刷新页面即可读取更新。配置缺失或格式错误会报告对应文件路径。
+
+此次文件夹导入与实时读取调整不新增数据库迁移；隐藏表格不删除记录或改变成员权限。
+
+## 更新项目拓扑
+
+拓扑在服务器的 `config/<项目名>/project.json` 中维护，网页只读显示其 `topology` 内容。修改并保存文件后，在网页打开项目配置窗口，重新读取服务器文件，检查差异并导入；导入沿用项目全部编辑权限、编辑权、版本检查和审计。仅读取文件不会写入数据库。
+
+挂载数量、协议、板卡类型、目录和显示定义都会实时读取。新增类型先准备完整板卡目录，再检查导入；`workspace` 和单表显示定义刷新页面即可更新。数据库保留项目标识、板卡模板及 `projects.topology_config` 生效快照，文件内容经校验导入后才更新该快照。处理、采集、转发点表继续在网页编辑。
+
+## 导出与导入项目文件夹
+
+在来源服务器执行：
+
+```bash
+node scripts/export-project.mjs upm
+# 或指定导出父目录，结果为 /tmp/project-export/upm/
+node scripts/export-project.mjs upm /tmp/project-export
+```
+
+默认输出 `.runtime/exports/<时间>/upm/`，已有输出目录不会被覆盖。脚本读取 `.env`，需要 Node `pg` 驱动、`pg_dump`、`MIGRATION_DATABASE_URL` 及创建临时数据库的权限；源业务库只读。缺少驱动时执行 `npm install --prefix .runtime/db-tools pg`。客户端版本须兼容源数据库和归档版本，本地数据库默认 PostgreSQL 18。
+
+导出目录包含原配置和 `project.dump`，清单增加 `"dump": "project.dump"`。这是 `pg_dump -Fc` 生成的专用单项目归档，内部承载白名单业务表数据；它不包含账号、会话、成员授权、历史审计和发布包。普通全库 Dump 不能用于网页项目导入。归档记录的迁移版本必须与目标程序支持的版本一致；版本不同时先统一程序与数据库版本，再重新导出。未设置 `dump` 时也可识别项目根目录唯一的 `.dump` 文件；多个归档会被拒绝。
+
+目标服务器初始化数据库并启动应用后，管理员在「项目设置 → 导入项目文件夹」选择完整目录；无项目时可从空页面导入。预览会检查配置、关联和数据，确认后同 `key` 覆盖配置、新 `key` 建立项目：
+
+- **带 Dump**：替换该项目的点表、协议和映射；保留其他项目与已有账号、审计及发布历史。
+- **不带 Dump**：保留现有点表，新项目为空点表。即使文件夹包含 XLSX，也不会触发工作簿导入。需要仅导入配置时，移除 Dump 文件及清单中的 `dump` 引用。
+
+每次最多 512 个文件、64 MiB，预览 30 分钟有效。其他成员持有编辑权、项目版本或服务器文件已变化时，需要处理提示并重新预览。导入只调用 `pg_restore` 输出归档内容，由程序解析白名单数据并在项目事务内写入，不执行上传归档中的 SQL。服务账号需要项目根目录写权限；网页无需迁移管理员凭据。
+
+每个 `PROJECT_CONFIG_DIR` 由单个服务实例管理。隐藏 `.imports/` 保存私有预览和导入恢复日志，过期预览在启动时清理。若进程中断或数据库提交结果不明确，服务会返回 503；重启会核对提交记录并恢复目录状态。不要手动删除尚未恢复的导入日志。
+
+项目 Dump 是导出时的快照；后续网页编辑不会自动更新该文件。再次迁移前重新导出。需要完整账号、权限和历史时，使用下面的全库备份流程。
+
+## 全库备份
 
 使用具备备份权限的管理员连接，不能使用被 RLS 限制的项目身份进行全库备份。使用 `.pgpass` 或受控的 `PGPASSWORD` 提供密码，不提交密码到源码。
 
@@ -53,7 +94,7 @@ pg_dump -h DB_HOST -U postgres -d protocol_studio -Fc -f protocol_studio.dump
 5. 检查平台登录、工程师编辑、只读禁写与跨项目隔离后切换服务。
 6. 若希望所有人重新登录，可由管理员执行 `DELETE FROM sessions`。
 
-版本发布包可以跨环境交付到固件工程，但不是数据库全量备份。JSON 导出包含项目源数据，当前版本尚无通用 JSON 导入界面；跨实例完整迁移使用 pg_dump / pg_restore。
+版本发布包用于固件交付，不是数据库备份。项目文件夹用于迁移指定项目的配置和点表；跨实例完整工作空间迁移使用全库 pg_dump / pg_restore，并另行复制项目配置目录。
 
 ## 升级与回退
 
@@ -61,7 +102,7 @@ pg_dump -h DB_HOST -U postgres -d protocol_studio -Fc -f protocol_studio.dump
 
 点表编辑与排序需要迁移 `0009_point_display_order.sql` 和 `0010_change_merge.sql`，分别增加独立显示顺序和预览合并基线，不重编已有 sigID 或协议地址。升级后同时部署前后端；旧预览没有合并基线时仍严格检查版本。发布接口现在要求携带生成预览返回的 `revision`。
 
-迁移到其他电脑时运行 `cargo fetch --locked` 准备锁定的 Rust 依赖（包括 `json-patch`），再构建。可先用 `scripts/check-env.sh` 查看缺少的工具、库与配置。点表排序和编辑保存在 PostgreSQL，跨机器保留这些修改仍需数据库备份。
+迁移到其他电脑时运行 `cargo fetch --locked` 准备锁定的 Rust 依赖（包括 `json-patch`），再构建。可先用 `scripts/check-env.sh` 查看缺少的工具、库与配置。点表排序和编辑通过重新导出的项目 Dump 或全库备份迁移。
 
 代码生成遵循参考工程接口，目标固件的宏、回调实现和 ABI 由目标工程提供。平台不会自动改写参考工程，也不会将生成文件直接覆盖进固件目录。
 

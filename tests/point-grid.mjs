@@ -35,12 +35,11 @@ const {
 } = await import(
   toModuleUrl(gridSource.replace('"./pointTables"', JSON.stringify(choices)))
 );
-const schema = JSON.parse(
-  await readFile(
-    new URL("../config/point-tables.json", import.meta.url),
-    "utf8",
-  ),
-);
+const definitions = Object.fromEntries(await Promise.all(
+  [["process", "process"], ["collect", "collect"], ["forward", "transmit"]].map(async ([kind, filename]) => [
+    kind, JSON.parse(await readFile(new URL(`../config/upm/UPM/${filename}.json`, import.meta.url), "utf8")),
+  ]),
+));
 
 assert.deepEqual(parseClipboard("a\tb\t\r\nc\td\t\r\n"), [
   ["a", "b", ""],
@@ -66,7 +65,7 @@ function fixture(kind) {
   return {
     revision: 1,
     kind,
-    definition: { ...schema.tables[kind], fields: schema.fields },
+    definition: definitions[kind],
     rows: [],
     options: {
       groups: [

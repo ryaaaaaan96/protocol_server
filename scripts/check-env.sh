@@ -28,6 +28,42 @@ check_tool() {
 check_file() {
   if [[ -f "$1" ]]; then ready "$1"; else need "$1" "$2"; fi
 }
+config_path() {
+  local key=$1
+  if [[ -n "${!key:-}" ]]; then printf '%s' "${!key}"; return; fi
+  if [[ ! -f .env ]] || ! command -v node >/dev/null 2>&1; then return; fi
+  # Read only the requested path; never execute .env as shell code or print credentials.
+  node --input-type=module - "$key" <<'NODE'
+import fs from 'node:fs';
+const key = process.argv[2];
+if (!['PROJECT_CONFIG_DIR', 'PG_DUMP_BIN', 'PG_RESTORE_BIN'].includes(key)) process.exit(2);
+let value = '';
+for (const line of fs.readFileSync('.env', 'utf8').split(/\r?\n/)) {
+  const match = line.match(/^\s*(?:export\s+)?([A-Z_]+)\s*=\s*(.*?)\s*$/);
+  if (match?.[1] === key) value = match[2].replace(/^(["'])(.*)\1$/, '$2');
+}
+process.stdout.write(value);
+NODE
+}
+check_pg_client() {
+  local command=$1 variable=$2 purpose=$3 executable version
+  executable=$(config_path "$variable")
+  if [[ -n "$executable" ]]; then
+    if [[ "$executable" != /* || ! -x "$executable" ]]; then
+      need "$command（$purpose）：$variable 未指向可执行的绝对路径" "安装 PostgreSQL 客户端并修正 $variable。"
+      return
+    fi
+  else
+    executable=$(command -v "$command" 2>/dev/null) || executable=''
+  fi
+  if [[ -z "$executable" ]]; then
+    need "$command（$purpose）" "安装与数据库及 Dump 版本兼容的 PostgreSQL 客户端，加入 PATH 或设置 $variable 的绝对路径；本地数据库默认 PostgreSQL 18。"
+  elif version=$("$executable" --version 2>/dev/null); then
+    ready "$command：${version%%$'\n'*}"
+  else
+    need "$command 无法运行" "检查客户端动态库与 $variable 设置。"
+  fi
+}
 
 printf 'Protocol Studio 迁移环境检查\n\n'
 info "操作系统：$(uname -s) / $(uname -m)；本地数据库脚本支持 Linux x64。"
@@ -46,17 +82,74 @@ if [[ ! -f .env && -n "${DATABASE_URL:-}" ]]; then
 else
   check_file .env '按 .env.example 配置新机器；现有部署环境变量也可提供配置。'
 fi
-check_file "${POINT_TABLE_CONFIG:-config/point-tables.json}" '随仓库迁移公共展示配置。'
-check_file config/project.example.json '随仓库迁移项目拓扑示例。'
-project_directory=${PROJECT_CONFIG_DIR:-config/projects}
-if [[ -d "$project_directory" ]]; then ready "$project_directory 项目配置目录";
-else need "$project_directory" '迁移项目目录，或配置 PROJECT_CONFIG_DIR。'; fi
+project_directory=$(config_path PROJECT_CONFIG_DIR)
+project_directory=${project_directory:-config}
+if [[ -d "$project_directory" ]]; then
+  ready "$project_directory 项目配置目录"
+  if command -v node >/dev/null 2>&1; then
+    if node --input-type=module - "$project_directory" <<'NODE'
+import fs from 'node:fs';
+import path from 'node:path';
+const root = path.resolve(process.argv[2]);
+let failed = false, count = 0;
+function requireFile(file, project) {
+  const resolved = fs.realpathSync(file);
+  if (!resolved.startsWith(project + path.sep) || !fs.statSync(resolved).isFile()) {
+    throw new Error(`文件必须位于项目内：${file}`);
+  }
+}
+for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+  if (entry.name.startsWith('.') || !entry.isDirectory()) continue;
+  count++;
+  const directory = path.join(root, entry.name), manifestFile = path.join(directory, 'project.json');
+  try {
+    const project = fs.realpathSync(directory);
+    requireFile(manifestFile, project);
+    const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
+    if (!Array.isArray(manifest.topology?.board_types)) throw new Error('缺少 topology.board_types');
+    for (const board of manifest.topology.board_types) {
+      if (typeof board.directory !== 'string' || !board.directory) throw new Error(`板卡 ${board.code} 缺少 directory`);
+      for (const table of ['process', 'collect', 'transmit']) {
+        requireFile(path.resolve(directory, board.directory, `${table}.json`), project);
+      }
+    }
+    if (manifest.workbook != null) {
+      if (typeof manifest.workbook !== 'string') throw new Error('workbook 必须为项目内的相对路径');
+      requireFile(path.resolve(directory, manifest.workbook), project);
+    }
+    const archives = fs.readdirSync(directory).filter(name => /\.dump$/i.test(name));
+    if (manifest.dump != null) {
+      if (typeof manifest.dump !== 'string' || path.isAbsolute(manifest.dump)) throw new Error('dump 必须为项目内的相对路径');
+      const selected = path.resolve(directory, manifest.dump);
+      requireFile(selected, project);
+      if (archives.some(name => fs.realpathSync(path.join(directory, name)) !== fs.realpathSync(selected))) throw new Error('存在多个 Dump，请只保留要导入的归档');
+    } else {
+      if (archives.length > 1) throw new Error('存在多个 Dump，无法确定要导入的归档');
+      if (archives.length) requireFile(path.join(directory, archives[0]), project);
+    }
+    console.log(`[就绪] ${manifestFile}：板卡表格文件及可选来源齐全`);
+  } catch (error) {
+    failed = true;
+    console.log(`[缺少] ${manifestFile}：${error.message}`);
+  }
+}
+if (!count) console.log('[说明] 项目配置目录为空；创建项目前需放入完整的项目文件夹。');
+process.exitCode = failed ? 1 : 0;
+NODE
+    then :
+    else need '项目配置文件不完整' '按 project.json 指定的目录补齐板卡表格和来源文件，再重跑检查。'; fi
+  else
+    info 'Node.js 不可用，暂不能检查项目清单引用的板卡表格和来源文件。'
+  fi
+else
+  need "$project_directory" '迁移完整的项目目录，或配置 PROJECT_CONFIG_DIR。'
+fi
 if [[ -f .runtime/pgdata/PG_VERSION ]]; then
   ready "本地 PostgreSQL 数据目录，版本 $(cat .runtime/pgdata/PG_VERSION)"
 else
   info '未发现本地数据库；使用外部 PostgreSQL 时无需本地数据目录。'
 fi
-info '数据库连接、账号权限和已恢复的数据未验证；已有项目需另行 pg_dump/pg_restore，不能仅复制 config/。'
+info '数据库连接、账号权限和 Dump 内容未验证；项目迁移可导出带 project.dump 的文件夹，完整账号与历史迁移使用全库备份。'
 info '迁移 .env 时单独安全传递；完整流程见 docs/operations.md。'
 pg_native=''
 for candidate in .runtime/pg-package/package/native .runtime/db-tools/node_modules/@embedded-postgres/linux-x64/native; do
@@ -64,13 +157,13 @@ for candidate in .runtime/pg-package/package/native .runtime/db-tools/node_modul
 done
 if [[ -n "$pg_native" ]]; then
   ready "本地 PostgreSQL 工具：$pg_native/bin"
-elif command -v pg_dump >/dev/null 2>&1 && command -v pg_restore >/dev/null 2>&1; then
-  ready 'PATH 中有 pg_dump / pg_restore'
 else
-  need '本地 PostgreSQL 工具 / 备份恢复客户端' '使用外部数据库可安装对应版本客户端；首次创建新本地数据库用 ./scripts/init-db.sh，恢复旧数据按 docs/operations.md。'
+  info '未发现本地 PostgreSQL 服务工具；外部数据库无需安装，首次创建本地数据库用 ./scripts/init-db.sh。'
 fi
-if [[ -f .runtime/db-tools/node_modules/pg/lib/index.js ]]; then ready '集成测试所需 Node PostgreSQL 客户端';
-else need '集成测试所需 pg 客户端' 'npm install --prefix .runtime/db-tools pg'; fi
+check_pg_client pg_dump PG_DUMP_BIN '导出项目及全库备份'
+check_pg_client pg_restore PG_RESTORE_BIN '读取项目 Dump 及恢复全库备份'
+if [[ -f .runtime/db-tools/node_modules/pg/lib/index.js ]]; then ready '项目导出与集成测试所需 Node PostgreSQL 客户端';
+else need '项目导出与集成测试所需 pg 客户端' 'npm install --prefix .runtime/db-tools pg'; fi
 
 printf '\n前端与浏览器测试\n'
 if [[ -f scripts/excel-batch/node_modules/exceljs/excel.js ]]; then

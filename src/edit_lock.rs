@@ -55,6 +55,20 @@ pub async fn require(tx: &mut Transaction<'_, Postgres>, pid: i64, uid: i64) -> 
     }
     Ok(())
 }
+/// Folder imports hold the project row lock for their entire transaction, so an
+/// idle project needs no lasting lease. An existing editor still takes priority.
+pub async fn require_available(
+    tx: &mut Transaction<'_, Postgres>,
+    pid: i64,
+    uid: i64,
+) -> Result<()> {
+    db::lock_project(tx, pid).await?;
+    let state = status(tx, pid, uid).await?;
+    if state["locked"] == true && state["owned"] != true {
+        return Err(denied(state));
+    }
+    Ok(())
+}
 pub async fn release_owned(tx: &mut Transaction<'_, Postgres>, pid: i64, uid: i64) -> Result<()> {
     sqlx::query("DELETE FROM project_edit_locks WHERE project_id=$1 AND user_id=$2")
         .bind(pid)

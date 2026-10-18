@@ -13,7 +13,7 @@ export async function checkStringRanges({ client, engineer, viewer, engineerId, 
     ok(p.allowed, JSON.stringify(p.errors));
     return (await commit(p)).record;
   };
-  const model = await edit("board_models", { code: "STRING_TEST", name: "String board" });
+  const model = (await graph()).board_models.find(model => model.code === "STRING_TEST");
   const group = await edit("signal_groups", { model_id: model.id, code: "LOCAL", name: "Local" });
   const number = await edit("data_items", { name: "Numeric source", data_type: "U16", byte_length: 2, default_value: "3", min_value: "0", max_value: "99" });
   const text = await edit("data_items", { name: "Text source", data_type: "STRING", byte_length: 2, default_value: "OK" });

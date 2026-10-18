@@ -468,7 +468,8 @@ mod source_tests {
     use super::*;
     #[test]
     fn reconstructs_source_changes_without_cached_projection() {
-        let mut data = parse(std::fs::read("UPM项目测点数据表.xlsx").unwrap()).unwrap();
+        let mut data =
+            parse(std::fs::read("config/upm/sources/UPM项目测点数据表.xlsx").unwrap()).unwrap();
         let row = data
             .source_rows
             .iter_mut()

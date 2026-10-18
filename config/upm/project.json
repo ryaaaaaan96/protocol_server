@@ -1,0 +1,166 @@
+{
+  "version": 1,
+  "key": "upm",
+  "name": "UPM 协议配置",
+  "description": "AIDC · 本地控制器与 DSP 点表的统一数据空间",
+  "workbook": "sources/UPM项目测点数据表.xlsx",
+  "topology": {
+    "version": 2,
+    "board_types": [
+      {
+        "code": "CSU",
+        "name": "CSU 主控板",
+        "model_code": "CSU",
+        "directory": "CSU"
+      },
+      {
+        "code": "UPM",
+        "name": "UPM 控制板",
+        "model_code": "UPM_ARM",
+        "directory": "UPM"
+      },
+      {
+        "code": "DSP",
+        "name": "DSP 功率板",
+        "model_code": "DSP",
+        "directory": "DSP"
+      },
+      {
+        "code": "IDU_T",
+        "name": "变压器 IDU",
+        "model_code": "IDU_TRANSFORMER",
+        "directory": "IDU_T"
+      },
+      {
+        "code": "IDU_R",
+        "name": "整流模块 IDU",
+        "model_code": "IDU_RECTIFIER",
+        "directory": "IDU_R"
+      }
+    ],
+    "root": {
+      "type": "CSU",
+      "quantity": 1
+    },
+    "mounts": [
+      {
+        "parent": "CSU",
+        "child": "UPM",
+        "quantity": 24,
+        "connections": [
+          {
+            "protocol": "MODBUS",
+            "transport": "CANFD"
+          },
+          {
+            "protocol": "UPP",
+            "transport": "CANFD"
+          }
+        ]
+      },
+      {
+        "parent": "UPM",
+        "child": "DSP",
+        "quantity": 8,
+        "connections": [
+          {
+            "protocol": "UPP",
+            "transport": "CAN"
+          }
+        ]
+      },
+      {
+        "parent": "CSU",
+        "child": "IDU_T",
+        "quantity": 1,
+        "connections": [
+          {
+            "protocol": "MODBUS",
+            "transport": "RS485"
+          }
+        ]
+      },
+      {
+        "parent": "CSU",
+        "child": "IDU_R",
+        "quantity": 4,
+        "connections": [
+          {
+            "protocol": "MODBUS",
+            "transport": "RS485"
+          }
+        ]
+      }
+    ]
+  },
+  "workspace": {
+    "boards": {
+      "CSU": {
+        "tables": [
+          "process",
+          "collect",
+          "transmit",
+          "fields",
+          "data",
+          "routes",
+          "expansion",
+          "links",
+          "endpoints",
+          "contexts",
+          "groups"
+        ]
+      },
+      "UPM": {
+        "tables": [
+          "process",
+          "collect",
+          "transmit",
+          "fields",
+          "data",
+          "routes",
+          "expansion",
+          "links",
+          "endpoints",
+          "contexts",
+          "groups"
+        ]
+      },
+      "DSP": {
+        "tables": [
+          "process",
+          "transmit"
+        ]
+      },
+      "IDU_T": {
+        "tables": [
+          "process",
+          "collect",
+          "transmit",
+          "fields",
+          "data",
+          "routes",
+          "expansion",
+          "links",
+          "endpoints",
+          "contexts",
+          "groups"
+        ]
+      },
+      "IDU_R": {
+        "tables": [
+          "process",
+          "collect",
+          "transmit",
+          "fields",
+          "data",
+          "routes",
+          "expansion",
+          "links",
+          "endpoints",
+          "contexts",
+          "groups"
+        ]
+      }
+    }
+  }
+}

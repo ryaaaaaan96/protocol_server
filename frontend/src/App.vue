@@ -17,7 +17,6 @@ import {
   Menu,
   ChevronRight,
   RefreshCw,
-  FolderPlus,
   Upload,
   Plus,
   AlertTriangle,
@@ -26,6 +25,7 @@ import {
   LoaderCircle,
   LockKeyhole,
   Pencil,
+  FolderUp,
 } from "@lucide/vue";
 import { api, roles, type Row } from "./api";
 import { belongsToBoard } from "./domain/board";
@@ -43,7 +43,7 @@ import Members from "./pages/Members.vue";
 import Audit from "./pages/Audit.vue";
 import UsersPanel from "./pages/UsersPanel.vue";
 import ImportModal from "./components/ImportModal.vue";
-import CreateProject from "./components/CreateProject.vue";
+import ProjectFolderImport from "./components/ProjectFolderImport.vue";
 import CreateUser from "./components/CreateUser.vue";
 import { useProjectEditLock } from "./composables/useProjectEditLock";
 import { permissionKey, useProjectPermissions } from "./composables/useProjectPermissions";
@@ -308,13 +308,32 @@ function importDone() {
   navigate("validation");
   notify("点表已导入，查看校验结果以继续完善配置");
 }
-async function projectCreated(p: Row) {
-  await editLock.release();
+function openProjectFolder() {
+  if (leaveWorkspace()) modal.value = "project-folder";
+}
+async function projectFolderDone(result: Row) {
   modal.value = null;
-  pid.value = p.id;
-  navigate("overview");
-  refresh();
-  notify("项目已创建");
+  workspaceDirty.value = false;
+  focus.value = null;
+  const message = result.replace_data
+    ? "项目配置和 Dump 点表数据已导入"
+    : result.created ? "项目配置已导入，可开始添加点表数据" : "项目配置已导入，现有点表数据已保留";
+  if (result.project_id !== pid.value && !await editLock.release()) {
+    tick.value++;
+    fail(`${message}；当前项目的编辑权未能释放，请稍后切换项目。`);
+    return;
+  }
+  try {
+    projects.value = await api("/projects");
+    pid.value = result.project_id;
+    navigate("overview");
+    tick.value++;
+    void editLock.sync();
+    notify(message);
+  } catch (cause) {
+    tick.value++;
+    fail(`${message}；刷新项目列表失败：${(cause as Error).message}`);
+  }
 }
 function userCreated() {
   modal.value = null;
@@ -460,19 +479,20 @@ function userCreated() {
             </div>
             <div class="heading-actions">
               <button
+                v-if="tab === 'devices' && project && user.is_admin"
+                class="button"
+                @click="openProjectFolder"
+              >
+                <FolderUp :size="16" />导入项目文件夹
+              </button>
+              <button
                 v-if="tab === 'devices' && project"
                 class="button"
                 @click="modal = 'config'"
               >
-                项目 JSON 配置
+                项目拓扑配置
               </button>
               <button
-                v-if="tab === 'devices' && user.is_admin"
-                class="button"
-                @click="modal = 'project'"
-              >
-                <FolderPlus :size="16" />新建项目</button
-              ><button
                 v-if="['board', 'devices'].includes(tab) && canManageWrite"
                 class="button"
                 @click="modal = 'import'"
@@ -493,17 +513,14 @@ function userCreated() {
           title="从一个项目开始"
           :detail="
             user.is_admin
-              ? '创建项目后，即可导入点表并分配成员。'
+              ? '导入准备好的项目文件夹，或通过 SSH 在服务器创建项目后刷新列表。'
               : '请联系管理员，将你的账号加入项目。'
           "
-          ><button
-            v-if="user.is_admin"
-            class="button primary"
-            @click="modal = 'project'"
-          >
-            创建第一个项目
-          </button></Empty
         >
+          <button v-if="user.is_admin" class="button primary" @click="openProjectFolder">
+            <FolderUp :size="16" />导入项目文件夹
+          </button>
+        </Empty>
         <template v-else>
           <div
             v-if="
@@ -612,10 +629,11 @@ function userCreated() {
       @close="modal = null"
       @done="importDone"
     />
-    <CreateProject
-      v-if="modal === 'project'"
+    <ProjectFolderImport
+      v-if="modal === 'project-folder' && user.is_admin"
       @close="modal = null"
-      @done="projectCreated"
+      @done="projectFolderDone"
+      @error="fail"
     />
     <CreateUser
       v-if="modal === 'user'"

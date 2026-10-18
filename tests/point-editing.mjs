@@ -15,8 +15,9 @@ export async function checkPointEditing({ client, engineer, viewer, engineerId, 
     ok(p.allowed, JSON.stringify(p.errors));
     return (await commit(p)).record;
   };
-  const model = await edit("board_models", { name: "Sort test", code: "ORDER_PROTOCOL" });
-  const disabled = await edit("board_models", { name: "Disabled sort", code: "ORDER_DISABLED" });
+  const models = (await graph()).board_models;
+  const model = models.find(model => model.code === "ORDER_PROTOCOL");
+  const disabled = models.find(model => model.code === "ORDER_DISABLED");
   const group = await edit("signal_groups", { model_id: model.id, name: "Signals", code: "MAIN" });
   const secondGroup = await edit("signal_groups", { model_id: model.id, name: "Other signals", code: "OTHER" });
   const item = await edit("data_items", { name: "Test U16", data_type: "U16", byte_length: 2 });

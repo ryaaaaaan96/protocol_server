@@ -1,28 +1,31 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-Protocol Studio manages industrial protocol configuration with Rust, Vue 3, TypeScript, and PostgreSQL. Backend modules in `src/` cover authentication, APIs, workbook import, validation, and code generation. `migrations/` contains numbered SQL migrations, views, grants, and row-level security policies. Frontend pages, reusable components, and domain helpers live in `frontend/src/pages/`, `components/`, and `domain/`. Integration and generated-C contract checks live in `tests/`; browser checks use `frontend/browser-check.mjs`. See `config/` for project JSON examples, `scripts/` for local tooling, and `docs/` for architecture and operations.
+Protocol Studio uses Rust, Vue 3, TypeScript, and PostgreSQL. Backend modules live in `src/`; SQL migrations and security policies in `migrations/`. Frontend pages, components, and domain helpers live under `frontend/src/`. Tests are in `tests/` and `frontend/*-check.mjs`. Each `config/<project>/` contains a manifest, board table definitions, and optional sources or project Dump. Tooling and documentation live in `scripts/` and `docs/`.
 
 ## Build, Test, and Development Commands
-- `./scripts/init-db.sh`: explicitly initialize local PostgreSQL 18 and apply migrations (Linux x64); creates no business projects.
-- `./scripts/create-project.sh upm`: explicitly create a project from `config/projects/upm/project.json`; repeated execution preserves saved data.
-- `./scripts/dev.sh`: build and start the application on `127.0.0.1:8080`; requires an initialized, running database and does not run migrations.
-- `node scripts/local-db.mjs start` / `stop`: control the existing local database without creating a new one.
-- `npm ci --prefix frontend`: install locked frontend dependencies.
-- `npm run dev --prefix frontend`: start Vite with `/api` proxied to the backend.
-- `npm run build --prefix frontend`: type-check Vue/TypeScript and build frontend assets.
-- `cargo run -- migrate`: apply database migrations using the configured migration account.
-- `cargo run` / `cargo build`: run or compile the backend.
-- `cargo test`: run Rust tests.
+- `./scripts/init-db.sh`: initialize local PostgreSQL 18 and apply migrations; creates no projects.
+- `./scripts/create-project.sh upm`: create from `config/upm/`; repeated execution preserves data.
+- `./scripts/dev.sh`: build and serve on `127.0.0.1:8080`; requires a running, migrated database.
+- `node scripts/local-db.mjs start` / `stop`: control the existing local database.
+- `npm ci --prefix frontend`: install locked dependencies.
+- `npm run dev --prefix frontend`: start Vite with backend proxy.
+- `npm run build --prefix frontend`: type-check and build assets.
+- `cargo run -- migrate`: apply database migrations.
+- `cargo build` / `cargo test`: compile or run Rust tests.
+- `node scripts/export-project.mjs upm`: export a portable project folder with `project.dump`.
 
 ## Coding Style & Naming Conventions
-Use Rust 2024 conventions: four-space indentation, `snake_case` functions/modules, and `PascalCase` types. Format Rust with `cargo fmt`. Follow existing frontend formatting: two-space indentation, double-quoted imports, `camelCase` identifiers, and `PascalCase.vue` components. Use Vue Composition API with `<script setup lang="ts">`. Name migrations sequentially, such as `0007_description.sql`. No dedicated frontend formatter or lint script is configured.
+Use Rust 2024, four-space indentation, `snake_case` functions, and `PascalCase` types; run `cargo fmt`. Frontend code uses two spaces, double-quoted imports, `camelCase`, and `PascalCase.vue` components with `<script setup lang="ts">`. Number migrations sequentially. No dedicated frontend lint or formatter script exists.
 
 ## Testing Guidelines
-Run relevant checks before submitting: `node tests/local-db.mjs`, `node tests/integration.mjs`, `node tests/migration.mjs`, and `python3 tests/compile-generated.py`. Database integration checks require the local PostgreSQL tooling and `.env`; they create temporary databases. Keep Rust unit tests in module test blocks and standalone checks in descriptively named test scripts. No numerical coverage threshold is configured. For UI changes, run `node browser-check.mjs` from `frontend/` with the documented application/data prerequisites. Generated-C checks do not replace target firmware validation.
+Run relevant checks: `node tests/local-db.mjs`, `node tests/integration.mjs`, `node tests/migration.mjs`, and `python3 tests/compile-generated.py`. Database checks require local tools and `.env`, using temporary databases. Run `node browser-check.mjs` from `frontend/` for UI changes. Keep unit tests near Rust modules. No numerical coverage threshold exists; generated-C checks do not replace firmware validation.
 
 ## Commit & Pull Request Guidelines
-Existing commits use short Chinese descriptions, such as `优化结构`; no formal prefix convention is established. Use concise, action-oriented subjects. PRs should explain behavior changes, link relevant issues, report checks performed, and include screenshots for UI changes. Describe migration and configuration impacts explicitly.
+Use concise, action-oriented subjects; history uses short Chinese descriptions such as `优化结构`. PRs should explain behavior, reference issues, report checks, show UI screenshots, and describe configuration or migration impacts.
 
 ## Security & Configuration
-Keep credentials in ignored `.env` files. Separate `MIGRATION_DATABASE_URL` from the runtime `DATABASE_URL`; runtime roles must lack superuser and `BYPASSRLS` privileges. Preserve project isolation, preview/revision checks, audit records, and immutable releases when changing write paths.
+Keep credentials in ignored `.env`. Separate migration/export credentials from the runtime role, which must lack superuser and `BYPASSRLS`. Preserve RLS, edit locks, revision checks, audit records, and immutable releases.
+
+## Project Configuration Workflow
+Edit topology through server files or validated folder imports; point rows remain web-editable. Definitions reload live, while database topology changes require import. Folder imports preserve points without Dump and replace project data with Dump. Keep project identity and applied topology snapshots in PostgreSQL. Maintain import recovery and project isolation; use one server per configuration directory.

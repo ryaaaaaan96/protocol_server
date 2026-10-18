@@ -6,6 +6,8 @@ import { checkPointGrid, checkPointGridMappings, checkPointStringRanges, checkRe
 import { openRowAction } from "./point-menus-check.mjs";
 import { checkProjectEditLock, cleanupProjectEditing } from "./project-edit-lock-check.mjs";
 import { checkPointCopy } from "./point-copy-check.mjs";
+import { checkProjectTopologyImport } from "./project-topology-import-check.mjs";
+import { checkProjectFolderImport } from "./project-folder-import-check.mjs";
 import { fileURLToPath } from "node:url";
 import { chromium, expect } from "@playwright/test";
 process.chdir(fileURLToPath(new URL(".", import.meta.url)));
@@ -27,6 +29,10 @@ page.on("pageerror", (e) => errors.push(e.message));
 await page.route("**/api/projects/*/changes/*/commit", route => {
   errors.push("Unexpected commit: " + route.request().url());
   return route.fulfill({ status: 500, json: { error: "浏览器测试禁止未拦截的提交" } });
+});
+await page.route("**/api/project-folders/commit", route => {
+  errors.push("Unexpected folder import: " + route.request().url());
+  return route.fulfill({ status: 500, json: { error: "浏览器测试禁止未拦截的项目文件夹导入" } });
 });
 const nav = page.getByRole("navigation", { name: "项目与板卡导航" });
 const tab = (name) => page.getByRole("tab", { name: new RegExp(`^${name}`) });
@@ -122,7 +128,7 @@ try {
   await expect(page.getByRole("tablist")).toHaveCount(0);
   await expect(page.locator("main .type-node")).toHaveCount(5);
   await expect(
-    page.getByRole("button", { name: "项目 JSON 配置", exact: true }),
+    page.getByRole("button", { name: "项目拓扑配置", exact: true }),
   ).toHaveCount(0);
   await expect(nav.locator(".board-nav-item")).toHaveCount(0);
   await expect(page.locator(".type-edge-count")).toHaveText([
@@ -504,57 +510,8 @@ try {
     fullPage: true,
   });
   await close();
-  await auxiliary("板间协议");
-  await page
-    .getByRole("button", { name: "项目 JSON 配置", exact: true })
-    .click();
-  const editor = page.getByLabel("项目 JSON 内容");
-  await expect(editor).toHaveValue(/board_types/);
-  const downloadPromise = page.waitForEvent("download");
-  await page.getByRole("button", { name: "导出 JSON", exact: true }).click();
-  const download = await downloadPromise;
-  expect(
-    JSON.parse(fs.readFileSync(await download.path(), "utf8")).mounts[0]
-      .quantity,
-  ).toBe(24);
-  await page
-    .getByLabel("导入项目 JSON")
-    .setInputFiles("../config/project.example.json");
-  await expect(editor).toHaveValue(
-    fs.readFileSync("../config/project.example.json", "utf8"),
-  );
-  const modified = structuredClone(g.project_config);
-  modified.mounts[0].quantity = 12;
-  await editor.fill(JSON.stringify(modified, null, 2));
-  await page.getByRole("button", { name: "检查项目配置", exact: true }).click();
-  await page.getByRole("status").filter({ hasText: "配置检查通过" }).waitFor();
-  await expect(page.locator("dialog").getByRole("status")).toContainText("DSP × 96");
-  const invalid = structuredClone(g.project_config);
-  invalid.mounts[0].parent = "DSP";
-  await editor.fill(JSON.stringify(invalid));
-  await expect(
-    page.getByRole("button", { name: "应用项目配置", exact: true }),
-  ).toHaveCount(0);
-  await page.getByRole("button", { name: "检查项目配置", exact: true }).click();
-  await page.getByRole("status").filter({ hasText: "配置不能提交" }).waitFor();
-  await editor.fill(JSON.stringify(g.project_config));
-  await page.route("**/api/projects/*/changes/preview", (route) =>
-    route.fulfill({
-      status: 409,
-      contentType: "application/json",
-      body: JSON.stringify({ error: "项目已被修改，请刷新后重新预览" }),
-    }),
-  );
-  await page.getByRole("button", { name: "检查项目配置", exact: true }).click();
-  await page
-    .locator('dialog .notice[role="alert"]')
-    .filter({ hasText: "项目已被修改" })
-    .waitFor();
-  await page.unroute("**/api/projects/*/changes/preview");
-  await close();
-  console.log(
-    "PASS: shared type impact, JSON import/export, count preview, cyclic hierarchy rejection and stale revision feedback",
-  );
+  await checkProjectTopologyImport(page, { pid });
+  await checkProjectFolderImport(page, { pid });
 
   await nav.getByRole("button", { name: "数据校验", exact: false }).click();
   await page.locator(".issue").first().click();
@@ -581,13 +538,10 @@ try {
   await page.getByText(/个错误阻止了配置生成/).waitFor();
   await nav.getByRole("button", { name: "项目设置", exact: true }).click();
   await page
-    .getByRole("button", { name: "项目 JSON 配置", exact: true })
+    .getByRole("button", { name: "项目拓扑配置", exact: true })
     .click();
-  await expect(page.getByLabel("项目 JSON 内容")).toHaveValue(/board_types/);
+  await expect(page.getByLabel("项目拓扑内容")).toHaveValue(/board_types/);
   await close();
-  await page.getByRole("button", { name: "新建项目", exact: true }).click();
-  await expect(page.getByLabel("新项目 JSON 配置")).toHaveValue(/CSU/);
-  await page.getByRole("button", { name: "取消", exact: true }).click();
   await nav.getByRole("button", { name: "项目拓扑", exact: true }).click();
   await page.setViewportSize({ width: 390, height: 844 });
   await page.waitForFunction(
@@ -701,9 +655,9 @@ try {
   await close();
   await auxiliary("板间协议");
   await page
-    .getByRole("button", { name: "项目 JSON 配置", exact: true })
+    .getByRole("button", { name: "项目拓扑配置", exact: true })
     .click();
-  await expect(page.getByLabel("项目 JSON 内容")).toHaveAttribute(
+  await expect(page.getByLabel("项目拓扑内容")).toHaveAttribute(
     "readonly",
     "",
   );
@@ -711,7 +665,7 @@ try {
     page.getByRole("button", { name: "检查项目配置", exact: true }),
   ).toHaveCount(0);
   await expect(
-    page.getByRole("button", { name: "导出 JSON", exact: true }),
+    page.getByRole("button", { name: "下载拓扑 JSON", exact: true }),
   ).toBeVisible();
   await close();
   const after = await (

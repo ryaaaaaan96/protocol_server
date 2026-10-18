@@ -22,11 +22,12 @@ pub async fn projects(State(s): State<AppState>, u: User) -> Result<Json<Value>>
 }
 #[derive(Deserialize)]
 pub struct ProjectInput {
-    name: String,
+    config_key: Option<String>,
+    name: Option<String>,
     #[serde(default)]
     config: Option<Value>,
     #[serde(default)]
-    description: String,
+    description: Option<String>,
 }
 pub async fn create_project(
     State(s): State<AppState>,
@@ -34,22 +35,62 @@ pub async fn create_project(
     Json(input): Json<ProjectInput>,
 ) -> Result<Json<Value>> {
     u.admin()?;
-    if input.name.trim().is_empty() || input.name.len() > 120 {
+    let key = input
+        .config_key
+        .as_deref()
+        .ok_or(AppError::bad("请选择项目配置目录 config_key"))?;
+    let manifest = s
+        .project_files
+        .manifest(key)
+        .map_err(|e| AppError::bad(format!("{e:#}")))?
+        .ok_or(AppError::bad(
+            "项目配置目录不存在，请检查 config 下的项目文件夹",
+        ))?;
+    let name = input
+        .name
+        .as_deref()
+        .unwrap_or(manifest["name"].as_str().unwrap())
+        .trim();
+    if name.is_empty() || name.chars().count() > 120 {
         return Err(AppError::bad("请输入 1～120 字符的项目名称"));
     }
+    let description = input
+        .description
+        .as_deref()
+        .unwrap_or(manifest["description"].as_str().unwrap_or(""));
+    let config = input.config.as_ref().unwrap_or(&manifest["topology"]);
+    crate::project_config::validate_directory(&s.project_files, Some(key), config)?;
     let mut tx = db::context(&s.pool, &u, None, true).await?;
+    // The CLI and HTTP API share this lock and the unique config_key constraint.
+    sqlx::query("SELECT pg_advisory_xact_lock(192837465, 1)")
+        .execute(&mut *tx)
+        .await?;
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM projects WHERE config_key=$1)")
+            .bind(key)
+            .fetch_one(&mut *tx)
+            .await?;
+    if exists {
+        return Err(AppError::conflict("该配置目录已关联项目，请打开现有项目"));
+    }
     let mut project: Value = sqlx::query_scalar(
-        "INSERT INTO projects(name,description) VALUES($1,$2) RETURNING to_jsonb(projects.*)",
+        "INSERT INTO projects(name,description,config_key) VALUES($1,$2,$3) RETURNING to_jsonb(projects.*)",
     )
-    .bind(input.name.trim())
-    .bind(input.description)
+    .bind(name)
+    .bind(description)
+    .bind(key)
     .fetch_one(&mut *tx)
     .await?;
     let pid = project["id"].as_i64().unwrap();
-    if let Some(config) = input.config {
-        let applied = crate::project_config::apply(&mut tx, pid, &config).await?;
-        project["topology_config"] = applied["config"].clone();
-    }
+    let applied = crate::project_config::apply(&mut tx, pid, config).await?;
+    project["topology_config"] = applied["config"].clone();
+    let imported = s.project_files.import_source(&mut tx, pid, key, &u).await?;
+    project = sqlx::query_scalar("SELECT to_jsonb(p) FROM projects p WHERE id=$1")
+        .bind(pid)
+        .fetch_one(&mut *tx)
+        .await?;
+    let mut audit = project.clone();
+    audit["import"] = imported;
     db::audit(
         &mut tx,
         u.id,
@@ -57,7 +98,7 @@ pub async fn create_project(
         "project.create",
         "project",
         None,
-        Some(project.clone()),
+        Some(audit),
     )
     .await?;
     tx.commit().await?;

@@ -65,115 +65,148 @@ pub fn validate_definition(v: &Value) -> Result<()> {
     if v["version"] != 1 {
         return Err(AppError::bad("点表展示配置 version 必须为 1"));
     }
-    if let Some(workspace) = v.get("workspace") {
-        let object = workspace
+    let boards = v["boards"]
+        .as_object()
+        .filter(|boards| !boards.is_empty())
+        .ok_or(AppError::bad("项目缺少板卡点表定义 boards"))?;
+    let workspace = v["workspace"]
+        .as_object()
+        .ok_or(AppError::bad("项目缺少 workspace"))?;
+    if workspace.keys().any(|key| key != "boards") {
+        return Err(AppError::bad("workspace 只支持 boards，不支持公共默认配置"));
+    }
+    let views = workspace["boards"]
+        .as_object()
+        .ok_or(AppError::bad("workspace.boards 必须为对象"))?;
+    if boards.keys().ne(views.keys()) {
+        return Err(AppError::bad(
+            "板卡点表定义与 workspace.boards 必须一一对应",
+        ));
+    }
+    for (code, definitions) in boards {
+        let definitions = definitions
             .as_object()
-            .ok_or(AppError::bad("workspace 必须为对象"))?;
-        if object
-            .keys()
-            .any(|key| !matches!(key.as_str(), "default_tables" | "boards"))
-        {
-            return Err(AppError::bad("workspace 只支持 default_tables 和 boards"));
+            .ok_or(AppError::bad(format!("{code} 的点表定义必须为对象")))?;
+        if code.trim().is_empty() || code.trim() != code || definitions.len() != 3 {
+            return Err(AppError::bad(format!("{code} 必须完整配置三类点表")));
         }
-        validate_workspace_tables(&workspace["default_tables"], "workspace.default_tables")?;
-        if let Some(boards) = workspace.get("boards") {
-            let boards = boards
+        for kind in ["process", "collect", "forward"] {
+            validate_table_file(kind, &definitions.get(kind).cloned().unwrap_or(Value::Null))
+                .map_err(|e| AppError::bad(format!("{code}.{kind}: {}", e.1)))?;
+        }
+        let path = format!("workspace.boards.{code}");
+        let board = views[code]
+            .as_object()
+            .ok_or(AppError::bad(format!("{path} 必须为对象")))?;
+        if board
+            .keys()
+            .any(|key| !matches!(key.as_str(), "tables" | "labels"))
+        {
+            return Err(AppError::bad(format!("{path} 只支持 tables 和 labels")));
+        }
+        validate_workspace_tables(
+            &board.get("tables").cloned().unwrap_or(Value::Null),
+            &format!("{path}.tables"),
+        )?;
+        if let Some(labels) = board.get("labels") {
+            let labels = labels
                 .as_object()
-                .ok_or(AppError::bad("workspace.boards 必须为对象"))?;
-            for (code, board) in boards {
-                if code.trim().is_empty() || code.trim() != code {
-                    return Err(AppError::bad(
-                        "workspace.boards 的板卡类型代码不能为空或包含首尾空格",
-                    ));
-                }
-                let path = format!("workspace.boards.{code}");
-                let object = board
-                    .as_object()
-                    .ok_or(AppError::bad(format!("{path} 必须为对象")))?;
-                if object
-                    .keys()
-                    .any(|key| !matches!(key.as_str(), "tables" | "labels" | "rules"))
-                {
-                    return Err(AppError::bad(format!(
-                        "{path} 只支持 tables、labels 和 rules"
-                    )));
-                }
-                validate_workspace_tables(&board["tables"], &format!("{path}.tables"))?;
-                if let Some(labels) = board.get("labels") {
-                    let labels = labels
-                        .as_object()
-                        .ok_or(AppError::bad(format!("{path}.labels 必须为对象")))?;
-                    validate_workspace_tables(
-                        &json!(labels.keys().collect::<Vec<_>>()),
-                        &format!("{path}.labels"),
-                    )?;
-                    if labels
-                        .values()
-                        .any(|label| label.as_str().is_none_or(|s| s.trim().is_empty()))
-                    {
-                        return Err(AppError::bad(format!(
-                            "{path}.labels 的标题必须为非空字符串"
-                        )));
-                    }
-                }
-                if let Some(rules) = board.get("rules") {
-                    let rules = rules
-                        .as_object()
-                        .ok_or(AppError::bad("板卡 rules 必须为对象"))?;
-                    for (kind, patch) in rules {
-                        entity(kind)?;
-                        let patch = patch
-                            .as_object()
-                            .ok_or(AppError::bad("单表规则必须为对象"))?;
-                        if patch
-                            .keys()
-                            .any(|k| !matches!(k.as_str(), "ordering" | "inline"))
-                        {
-                            return Err(AppError::bad("单表规则只支持 ordering 和 inline"));
-                        }
-                        let mut table = v["tables"][kind].clone();
-                        crate::project_files::merge(&mut table, &json!(patch));
-                        validate_interaction(kind, &table)?;
-                    }
-                }
+                .ok_or(AppError::bad(format!("{path}.labels 必须为对象")))?;
+            validate_workspace_tables(
+                &json!(labels.keys().collect::<Vec<_>>()),
+                &format!("{path}.labels"),
+            )?;
+            if labels
+                .values()
+                .any(|label| label.as_str().is_none_or(|s| s.trim().is_empty()))
+            {
+                return Err(AppError::bad(format!(
+                    "{path}.labels 的标题必须为非空字符串"
+                )));
             }
         }
     }
-    let fields = v["fields"]
+    Ok(())
+}
+
+/// Each project owns complete table definitions; no inherited field metadata.
+pub(crate) fn validate_table_file(kind: &str, table: &Value) -> Result<()> {
+    entity(kind)?;
+    let object = table
         .as_object()
-        .ok_or(AppError::bad("点表配置缺少字段目录 fields"))?;
+        .ok_or(AppError::bad("单表配置必须为对象"))?;
+    let required = [
+        "label",
+        "description",
+        "columns",
+        "editor",
+        "ordering",
+        "inline",
+        "fields",
+    ];
+    if object.len() != required.len() || required.iter().any(|key| !object.contains_key(*key)) {
+        return Err(AppError::bad(
+            "单表配置须完整包含 label、description、columns、editor、ordering、inline、fields",
+        ));
+    }
+    let fields = table["fields"]
+        .as_object()
+        .ok_or(AppError::bad("单表配置缺少 fields"))?;
+    validate_fields(fields, Some(kind))?;
+    validate_table(kind, table, fields)
+}
+
+fn validate_fields(fields: &serde_json::Map<String, Value>, kind: Option<&str>) -> Result<()> {
     for (key, field) in fields {
-        if !["process", "collect", "forward"]
-            .iter()
-            .any(|kind| readable(kind).contains(key.as_str()))
-            || field["label"].as_str().is_none_or(|s| s.is_empty())
+        let allowed = kind.map_or_else(
+            || {
+                ["process", "collect", "forward"]
+                    .iter()
+                    .any(|kind| readable(kind).contains(key.as_str()))
+            },
+            |kind| readable(kind).contains(key.as_str()),
+        );
+        if !allowed
+            || !field.is_object()
+            || field["label"].as_str().is_none_or(|s| s.trim().is_empty())
         {
             return Err(AppError::bad(format!("未知字段或无标题字段：{key}")));
         }
     }
-    for kind in ["process", "collect", "forward"] {
-        let table = &v["tables"][kind];
-        validate_interaction(kind, table)?;
-        if table["label"].as_str().is_none_or(|s| s.is_empty()) {
-            return Err(AppError::bad(format!("{kind} 缺少标题")));
-        }
-        for section in ["columns", "editor"] {
-            let items = table[section]
-                .as_array()
-                .filter(|a| !a.is_empty())
-                .ok_or(AppError::bad("点表 columns/editor 不能为空"))?;
-            let mut seen = BTreeSet::new();
-            for item in items {
-                let key = item.as_str().ok_or(AppError::bad("点表列必须为字段标识"))?;
-                if !fields.contains_key(key)
-                    || !seen.insert(key)
-                    || !readable(kind).contains(key)
-                    || (section == "editor" && !writable(kind).contains(key))
-                {
-                    return Err(AppError::bad(format!(
-                        "{kind}.{section} 的字段不存在、重复或不可编辑：{key}"
-                    )));
-                }
+    Ok(())
+}
+
+fn validate_table(
+    kind: &str,
+    table: &Value,
+    fields: &serde_json::Map<String, Value>,
+) -> Result<()> {
+    validate_interaction(kind, table)?;
+    if table["label"].as_str().is_none_or(|s| s.trim().is_empty()) {
+        return Err(AppError::bad(format!("{kind} 缺少标题")));
+    }
+    if table
+        .get("description")
+        .is_some_and(|value| !value.is_string())
+    {
+        return Err(AppError::bad(format!("{kind}.description 必须为字符串")));
+    }
+    for section in ["columns", "editor"] {
+        let items = table[section]
+            .as_array()
+            .filter(|a| !a.is_empty())
+            .ok_or(AppError::bad("点表 columns/editor 不能为空"))?;
+        let mut seen = BTreeSet::new();
+        for item in items {
+            let key = item.as_str().ok_or(AppError::bad("点表列必须为字段标识"))?;
+            if !fields.contains_key(key)
+                || !seen.insert(key)
+                || !readable(kind).contains(key)
+                || (section == "editor" && !writable(kind).contains(key))
+            {
+                return Err(AppError::bad(format!(
+                    "{kind}.{section} 的字段不存在、重复或不可编辑：{key}"
+                )));
             }
         }
     }
@@ -239,31 +272,12 @@ fn validate_workspace_tables(value: &Value, path: &str) -> Result<()> {
     }
     Ok(())
 }
-fn definition(config: &Value, kind: &str, code: &str) -> Value {
-    let mut result = config["tables"][kind].clone();
-    if let Some(patch) = config["workspace"]["boards"][code]["rules"].get(kind) {
-        crate::project_files::merge(&mut result, patch);
-    }
-    if let Some(label) = config["workspace"]["boards"][code]["labels"].get(kind) {
-        result["label"] = label.clone();
-    }
-    if result.get("ordering").is_none() {
-        result["ordering"] = json!({"mode":"disabled","group_by":[]});
-    }
-    if result.get("inline").is_none() {
-        result["inline"] = json!({});
-    }
-    let allowed = readable(kind);
-    result["fields"] = Value::Object(
-        config["fields"]
-            .as_object()
-            .unwrap()
-            .iter()
-            .filter(|(key, _)| allowed.contains(key.as_str()))
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect(),
-    );
-    result
+fn definition(config: &Value, kind: &str, code: &str) -> Result<Value> {
+    config["boards"][code].get(kind).cloned().ok_or_else(|| {
+        AppError::bad(format!(
+            "项目未配置板卡 {code} 的 {kind} 点表，请检查项目目录"
+        ))
+    })
 }
 pub(crate) async fn board_definition(
     tx: &mut Transaction<'_, Postgres>,
@@ -285,20 +299,10 @@ pub(crate) async fn board_definition(
         .and_then(|types| types.iter().find(|t| t["model_code"] == model["code"]))
         .and_then(|t| t["code"].as_str())
         .unwrap_or(model["code"].as_str().unwrap_or(""));
-    Ok(definition(files.definition(key.as_deref()), kind, code))
-}
-pub fn load_definition() -> anyhow::Result<Value> {
-    let path =
-        std::env::var("POINT_TABLE_CONFIG").unwrap_or_else(|_| "config/point-tables.json".into());
-    let config: Value = serde_json::from_str(
-        &std::fs::read_to_string(&path)
-            .map_err(|e| anyhow::anyhow!("读取点表展示配置 {path} 失败：{e}"))?,
-    )?;
-    validate_definition(&config).map_err(|e| anyhow::anyhow!("{}: {}", path, e.1))?;
-    Ok(config)
-}
-pub async fn schema(State(s): State<AppState>, _u: User) -> Json<Value> {
-    Json(s.project_files.definition(None).clone())
+    let config = files
+        .definition(key.as_deref())
+        .map_err(|e| AppError::bad(e.to_string()))?;
+    definition(&config, kind, code)
 }
 pub async fn project_schema(
     State(s): State<AppState>,
@@ -310,7 +314,12 @@ pub async fn project_schema(
         .bind(pid)
         .fetch_one(&mut *tx)
         .await?;
-    Ok(Json(s.project_files.definition(key.as_deref()).clone()))
+    Ok(Json(
+        s.project_files
+            .definition(key.as_deref())
+            .map_err(|e| AppError::bad(e.to_string()))?
+            .clone(),
+    ))
 }
 async fn board(tx: &mut Transaction<'_, Postgres>, pid: i64, mid: i64) -> Result<Value> {
     Ok(
@@ -691,59 +700,72 @@ pub fn audit_before(g: &Value, entity: &str, id: i64) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn configuration() -> Value {
+        crate::project_files::ProjectFiles::load_from(std::path::Path::new("config"))
+            .unwrap()
+            .definition(Some("upm"))
+            .unwrap()
+            .clone()
+    }
+
     #[test]
     fn validates_workspace_visibility() {
-        let mut base: Value =
-            serde_json::from_str(include_str!("../config/point-tables.json")).unwrap();
-        for workspace in [
-            json!({"default_tables": ["forward", "process"], "boards": {"DSP": {"tables": ["process", "fields"], "labels": {"process": "DSP内部数据"}}, "CSU": {"tables": []}}}),
-            json!({"default_tables": []}),
-        ] {
-            base["workspace"] = workspace;
-            validate_definition(&base).unwrap();
-        }
-        for workspace in [
-            json!(null),
-            json!({"default_tables": ["process", "process"]}),
-            json!({"default_tables": ["unknown"]}),
-            json!({"default_tables": ["ranges"]}),
-            json!({"default_tables": [1]}),
-            json!({"default_tables": "process"}),
-            json!({"default_tables": [], "boards": []}),
-            json!({"default_tables": [], "boards": {"DSP": {"tables": ["forward", "forward"]}}}),
-            json!({"default_tables": [], "boards": {"DSP": {"tables": ["unknown"]}}}),
-            json!({"default_tables": [], "boards": {"DSP": {"tables": [], "labels": {"process": " "}}}}),
-            json!({"default_tables": [], "boards": {"DSP": {"tables": [], "labels": {"process": 1}}}}),
-            json!({"default_tables": [], "boards": {"DSP": {"tables": [], "labels": {"unknown": "标题"}}}}),
-            json!({"default_tables": [], "boards": {"DSP": {"tables": [], "labels": []}}}),
-            json!({"default_tables": [], "boards": {"DSP": {"table": []}}}),
-            json!({"default_tables": [], "boards": {"DSP": []}}),
-            json!({"default_tables": [], "boards": {" DSP ": {"tables": []}}}),
-            json!({"default_tables": [], "board": {"DSP": {"tables": []}}}),
-            json!({"boards": {"DSP": {"tables": []}}}),
-        ] {
-            base["workspace"] = workspace;
-            assert!(validate_definition(&base).is_err(), "{}", base["workspace"]);
-        }
-        base.as_object_mut().unwrap().remove("workspace");
+        let base = configuration();
         validate_definition(&base).unwrap();
+        for board in [
+            json!({"tables": ["forward", "process"], "labels": {"process": "DSP内部数据"}}),
+            json!({"tables": []}),
+        ] {
+            let mut v = base.clone();
+            v["workspace"]["boards"]["DSP"] = board;
+            validate_definition(&v).unwrap();
+        }
+        for board in [
+            json!(null),
+            json!({"tables": ["process", "process"]}),
+            json!({"tables": ["unknown"]}),
+            json!({"tables": ["ranges"]}),
+            json!({"tables": [1]}),
+            json!({"tables": "process"}),
+            json!({"tables": [], "labels": {"process": " "}}),
+            json!({"tables": [], "labels": {"process": 1}}),
+            json!({"tables": [], "labels": {"unknown": "标题"}}),
+            json!({"tables": [], "labels": []}),
+            json!({"table": []}),
+            json!({"tables": [], "rules": {}}),
+        ] {
+            let mut v = base.clone();
+            v["workspace"]["boards"]["DSP"] = board;
+            assert!(validate_definition(&v).is_err(), "{}", v["workspace"]);
+        }
+        let mut v = base.clone();
+        v["workspace"]["default_tables"] = json!(["process"]);
+        assert!(validate_definition(&v).is_err());
+        v.as_object_mut().unwrap().remove("workspace");
+        assert!(validate_definition(&v).is_err());
+        assert!(definition(&base, "process", "UNKNOWN").is_err());
     }
 
     #[test]
     fn validates_business_configuration() {
-        let base: Value =
-            serde_json::from_str(include_str!("../config/point-tables.json")).unwrap();
-        validate_definition(&base).unwrap();
-        for key in ["project_id", "raw_json", "not_a_field"] {
+        let base = configuration();
+        for key in ["project_id", "raw_json", "not_a_field", "endpoint_id"] {
             let mut v = base.clone();
-            v["fields"][key] = json!({"label":"bad"});
+            v["boards"]["DSP"]["process"]["fields"][key] = json!({"label":"bad"});
             assert!(validate_definition(&v).is_err());
         }
         let mut v = base.clone();
-        v["tables"]["process"]["editor"]
+        v["boards"]["DSP"]["process"]["editor"]
             .as_array_mut()
             .unwrap()
             .push(json!("collection_count"));
+        assert!(validate_definition(&v).is_err());
+        let mut v = base.clone();
+        v["boards"]["DSP"]["process"]
+            .as_object_mut()
+            .unwrap()
+            .remove("inline");
         assert!(validate_definition(&v).is_err());
         assert!(entity("unknown").is_err());
     }

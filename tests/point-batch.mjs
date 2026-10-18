@@ -14,8 +14,9 @@ export async function checkPointBatch({ client, engineer, viewer, engineerId, vi
     ok(p.allowed, JSON.stringify(p.errors));
     return (await commit(p)).record;
   };
-  const model = await edit("board_models", { name: "Batch board", code: "BATCH" });
-  const otherModel = await edit("board_models", { name: "Other board", code: "OTHER" });
+  const models = (await graph()).board_models;
+  const model = models.find(model => model.code === "BATCH");
+  const otherModel = models.find(model => model.code === "OTHER");
   const group = await edit("signal_groups", { model_id: model.id, name: "DSP", code: "DSP" });
   const otherGroup = await edit("signal_groups", { model_id: otherModel.id, name: "Other", code: "OTHER" });
   const item = await edit("data_items", { name: "Batch U16", data_type: "U16", byte_length: 2 });

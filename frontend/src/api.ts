@@ -59,6 +59,7 @@ export const actions: Record<string, string> = {
   "point.update": "修改测点",
   "point.delete": "删除测点",
   "project.create": "创建项目",
+  "project.folder_import": "导入项目文件夹",
   "import.commit": "导入点表",
   "release.create": "发布版本",
   "member.update": "调整成员权限",

@@ -110,7 +110,7 @@ export async function checkEditLocks({ client, engineer, viewer, engineerId, vie
 
   // Publishing is a successful configuration action and hands editing to the next user.
   await change(client, "acquire");
-  equal((await client.rawUnlocked(`${url}/releases`, "POST", { revision: 2, name: "Missing board" })).status, 400);
+  equal((await client.rawUnlocked(`${url}/releases`, "POST", { revision: 1, name: "Stale release" })).status, 409);
   equal((await status(client)).owned, true);
   const create = async (entity, values) => {
     await change(client, "acquire");
@@ -118,7 +118,7 @@ export async function checkEditLocks({ client, engineer, viewer, engineerId, vie
     ok(p.allowed, JSON.stringify(p.errors));
     return (await call(client, `${url}/changes/${p.id}/commit`, "POST", {})).record;
   };
-  const model = await create("board_models", { code: "LEASE_BOARD", name: "Lease board" });
+  const model = (await graph()).board_models.find(model => model.code === "LEASE_BOARD");
   await create("boards", { model_id: model.id, code: "LEASE_1", name: "Lease board 1" });
   await change(client, "acquire");
   await call(client, `${url}/releases`, "POST", { revision: (await graph()).revision, name: "Lease release" });
@@ -127,13 +127,13 @@ export async function checkEditLocks({ client, engineer, viewer, engineerId, vie
   const imported = await call(client, "/projects", "POST", { name: "Exclusive import" });
   const importUrl = `/projects/${imported.id}`;
   const form = new FormData();
-  form.append("file", new Blob([fs.readFileSync("UPM项目测点数据表.xlsx")]), "UPM.xlsx");
+  form.append("file", new Blob([fs.readFileSync("config/upm/sources/UPM项目测点数据表.xlsx")]), "UPM.xlsx");
   equal((await client.rawUnlocked(`${importUrl}/imports/preview`, "POST", form)).status, 423);
   await call(client, `${importUrl}/edit-lock/acquire`, "POST", {});
   await change(engineer, "acquire"); // Different projects can be edited concurrently.
   const importPreview = await call(client, `${importUrl}/imports/preview`, "POST", form);
   equal((await call(client, `${importUrl}/edit-lock`)).owned, true);
-  await call(client, `${importUrl}/imports/${importPreview.id}/commit`, "POST", { replace: false });
+  await call(client, `${importUrl}/imports/${importPreview.id}/commit`, "POST", { replace: true });
   equal((await call(client, `${importUrl}/edit-lock`)).locked, false);
   equal((await status(engineer)).owned, true);
   await change(engineer, "release");

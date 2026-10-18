@@ -106,6 +106,15 @@ const pointFocus = ref<number>();
 const displaySchema = ref<PointSchema | null>(null),
   schemaError = ref(""),
   schemaReload = ref(0);
+const displayError = computed(() => {
+  if (schemaError.value) return schemaError.value;
+  const code = board.value?.code;
+  if (props.mode === "board" && displaySchema.value && code &&
+      (!displaySchema.value.boards[code] || !displaySchema.value.workspace.boards[code])) {
+    return `项目目录缺少板卡 ${code} 的表格定义，请检查 project.json 中的目录配置。`;
+  }
+  return "";
+});
 watch(
   () => [props.pid, props.mode, schemaReload.value],
   async (_, __, cleanup) => {
@@ -381,9 +390,9 @@ function sourceOf(row: Row) {
   <Empty
     v-else-if="mode === 'board' && !board"
     title="先配置板卡类型"
-    detail="通过项目 JSON 定义板卡类型后，即可维护各自的点表和协议。"
+    detail="在服务器项目文件中定义板卡类型，检查并导入后维护点表。"
     ><button class="button" @click="emit('configuration')">
-      项目 JSON 配置
+      项目拓扑配置
     </button></Empty
   >
   <template v-else>
@@ -410,8 +419,8 @@ function sourceOf(row: Row) {
         <small>{{ typeSignals(type) }} 个信号</small>
       </button>
     </div>
-    <div v-if="schemaError" class="notice danger" role="alert">
-      {{ schemaError }}
+    <div v-if="displayError" class="notice danger" role="alert">
+      {{ displayError }}
       <button class="text-button" @click="schemaReload++">重试</button>
     </div>
     <Loading v-else-if="mode === 'board' && !displaySchema" />
@@ -487,10 +496,10 @@ function sourceOf(row: Row) {
           class="notice type-link-notice"
         >
           <span
-            >挂载关系及协议在项目 JSON
+            >挂载关系及协议通过 SSH 在服务器 project.json
             中维护；同一关系可有多种协议，挂载数量不叠加。</span
           ><button class="text-button" @click="emit('configuration')">
-            项目 JSON 配置 <ArrowRight :size="15" />
+            项目拓扑配置 <ArrowRight :size="15" />
           </button>
         </div>
         <div class="table-toolbar">

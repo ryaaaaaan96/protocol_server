@@ -6,6 +6,7 @@
 /frontend/playwright-report/
 /.env
 /.runtime/
+.imports/
 *.log
 *.xlsx:Zone.Identifier
 

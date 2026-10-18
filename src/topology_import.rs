@@ -350,7 +350,8 @@ pub async fn migrate_legacy(pool: &PgPool) -> anyhow::Result<()> {
                 pid,
             )
             .await?;
-            let mut source_rows = if let Ok(bytes) = std::fs::read("UPM项目测点数据表.xlsx")
+            let mut source_rows = if let Ok(bytes) =
+                std::fs::read("config/upm/sources/UPM项目测点数据表.xlsx")
             {
                 crate::importer::parse(bytes)
                     .ok()

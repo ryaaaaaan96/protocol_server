@@ -10,13 +10,13 @@
 
 ```bash
 ./scripts/init-db.sh                 # 初始化本地 PostgreSQL 和表结构，不创建项目
-./scripts/create-project.sh upm      # 手动从 config/projects/upm/ 创建 UPM 项目
+./scripts/create-project.sh upm      # 手动从 config/upm/ 创建 UPM 项目
 ./scripts/dev.sh
 ```
 
 打开 http://127.0.0.1:8080 。登录账号和密码对应根目录 `.env` 的 `ADMIN_USERNAME`、`ADMIN_PASSWORD`；首次初始化使用随机密码，没有固定默认口令。`.env` 权限为 `600`，已加入忽略规则。
 
-`init-db.sh` 在 `.runtime/` 内安装、初始化并启动真正的 PostgreSQL 18，使用端口 `55432`，无需 Docker 或系统服务；首次运行生成 `.env`，重复运行保留已有数据库并应用新增迁移。`create-project.sh` 不需要 HTTP 服务已启动，只有明确执行它才会创建项目。`dev.sh` 只构建并启动应用，不启动数据库、不建库、不迁移、不创建项目。
+`init-db.sh` 在 `.runtime/` 内安装、初始化并启动真正的 PostgreSQL 18，使用端口 `55432`，无需 Docker 或系统服务；首次运行生成 `.env`，重复运行保留已有数据库并应用新增迁移。`create-project.sh` 不需要 HTTP 服务已启动，项目由管理员在服务器终端或 SSH 会话中显式创建。`dev.sh` 只构建并启动应用，不启动数据库、不建库、不迁移、不创建项目。
 
 更新代码后若新增数据库迁移，先用 `Ctrl+C` 停止旧 HTTP 服务，再执行以下命令。无需重新创建项目：
 
@@ -42,34 +42,58 @@ node scripts/local-db.mjs stop
 
 数据库启动通过 `pg_ctl status` 检查实际进程状态，并等待连接就绪；异常停止后遗留的 `postmaster.pid` 由 PostgreSQL 处理。启动失败时查看 `.runtime/postgres.log`，不需要删除现有数据库目录。未初始化时，启动命令只提示执行初始化脚本，不会隐式创建空库。
 
-**`.runtime/pgdata/` 是真实的持久数据库，不是缓存**：网页保存的项目拓扑、点表、映射、用户、权限都在这里（使用外部 PostgreSQL 时由外部服务存储）。`.runtime/` 还包含数据库工具、日志和测试截图，整个目录被 Git 忽略。`config/` 是可迁移的初始配置和展示定义，不是数据库备份。
+**`.runtime/pgdata/` 是真实的持久数据库，不是缓存**：生效拓扑、点表、映射、用户、权限都在这里（使用外部 PostgreSQL 时由外部服务存储）。`.runtime/` 还包含数据库工具、日志和测试截图，整个目录被 Git 忽略。`config/` 保存项目定义；其中的 JSON 描述配置，导出的可选 `project.dump` 携带点表数据。
 
-新电脑执行上面的 UPM 创建命令，会导入仓库中的 `UPM项目测点数据表.xlsx`，并显示五类板卡。它不会恢复旧电脑网页上保存的后续修改。迁移旧项目请按 [数据库备份与恢复](docs/operations.md) 操作，恢复到空数据库后再执行迁移和启动，勿先创建同名新项目。
+新电脑执行上面的 UPM 创建命令，会导入项目目录中的 `sources/UPM项目测点数据表.xlsx`，并显示五类板卡。它不会恢复旧电脑网页上保存的后续修改。迁移单个项目可使用下面的文件夹导出与导入；迁移账号、权限和历史版本等整个工作空间时，按 [数据库备份与恢复](docs/operations.md) 操作。
 
 ## 按目录创建多个项目
 
+每个项目的配置集中在 `config/<项目名>/`，板卡目录由项目清单指定：
+
 ```text
 config/
-  point-tables.json               公共展示定义
-  projects/
-    upm/
-      project.json               名称、拓扑、可选 Excel 导入来源
-      point-tables.json          本项目展示覆盖（可省略）
-    project-b/
-      project.json
+  upm/
+    project.json                 项目标识、名称、拓扑、板卡目录和页签顺序
+    project.dump                 可选，由项目导出脚本生成的点表数据归档
+    CSU/
+      process.json               处理点表的完整定义
+      collect.json               采集点表的完整定义
+      transmit.json              转发点表的完整定义
+    UPM/                         同样包含三个表格 JSON
+    DSP/
+    IDU_T/
+    IDU_R/
+    sources/
+      UPM项目测点数据表.xlsx       可选的创建时导入来源
+  project-b/
+    project.json
+    ...
 ```
 
-[config/projects/upm/project.json](config/projects/upm/project.json) 的 `key` 必须与目录名一致；`name` 是界面显示名，`topology` 保存板卡和协议挂载配置。可选 `workbook` 路径相对于该 JSON 文件，省略或设为 `null` 就只创建拓扑和空板卡模板。当前 Excel 解析器支持本仓库 UPM 工作簿的结构，不能把任意 Excel 当作通用模板。
+[config/upm/project.json](config/upm/project.json) 的 `key` 必须与项目目录名一致；`name` 是界面显示名，`topology` 保存板卡和协议挂载配置。每个 `topology.board_types` 项的 `directory` 指向项目内的板卡目录，可以与类型 `code` 不同。例如 `code: "DSP"`、`directory: "DSP"` 对应 `config/upm/DSP/`。板卡、表格和来源路径都限制在所属项目内。
 
-复制 `upm` 目录到 `project-b`，修改 `key`、`name` 和拓扑；不需要原始点表时删除 `workbook`。然后执行：
+CLI 创建优先读取项目 Dump，没有 Dump 时才使用可选 `workbook`；两者都省略时创建空板卡模板。`workbook` 使用项目内相对路径，如 `sources/UPM项目测点数据表.xlsx`。当前 Excel 解析器支持本仓库 UPM 工作簿的结构，不能把任意 Excel 当作通用模板。
+
+复制完整 `upm` 目录到 `project-b`，修改 `key`、`name` 和拓扑，并为各类型配置对应目录；不需要原始点表时删除 `workbook`。然后执行：
 
 ```bash
 ./scripts/create-project.sh project-b
 ```
 
-创建过程在同一事务中完成，包含拓扑、可选点表导入和审计；失败会整体回滚。已绑定同一 `key` 的项目再次执行会跳过，保留已有数据和 revision；另有同名项目时会报错，避免误覆盖或创建重复项目。脚本使用 `ADMIN_USERNAME` 对应的启用管理员身份，成员权限在网页「成员与权限」分配。创建时有工作簿校验问题会显示数量，进入校验中心处理后才能发布。若服务已运行，创建后刷新页面即可看到新项目；新增目录或修改展示配置需重启后端加载。
+创建过程在同一事务中完成，包含拓扑、可选点表导入和审计；失败会整体回滚。已绑定同一 `key` 的项目再次执行会跳过，保留已有数据和 revision；另有同名项目时会报错，避免误覆盖或创建重复项目。脚本使用 `ADMIN_USERNAME` 对应的启用管理员身份，成员权限在网页「成员与权限」分配。创建时有工作簿校验问题会显示数量，进入校验中心处理后才能发布。
 
-数据库保存的 `config_key` 关联项目展示配置，改显示名不会断开关系。`project.json` 仅在创建时写入数据库，后续修改磁盘拓扑不会覆盖现有项目；已有拓扑修改仍通过网页 JSON 编辑、预览、提交。网页手动创建的项目和升级前的项目继续使用公共展示定义。
+网页不提供手工创建拓扑的表单；管理员可以在「项目设置 → 导入项目文件夹」或空项目页选择完整目录。相同 `key` 覆盖已有项目配置，新 `key` 导入为新项目。文件夹包含项目 Dump 时同步替换该项目点表；没有 Dump 时保留已有点表，新项目为空点表，文件夹中的 XLSX 不会自动导入。先查看覆盖范围，再确认提交；最多 512 个文件、总计 64 MiB，预览 30 分钟有效，其他成员正在编辑或预览后版本变化会阻止导入。
+
+导出一个可以直接迁移的项目文件夹：
+
+```bash
+node scripts/export-project.mjs upm                  # 默认 .runtime/exports/<时间>/upm/
+node scripts/export-project.mjs upm /tmp/project-export
+```
+
+导出需要 Node `pg` 驱动、`pg_dump` 和具有创建临时数据库权限的 `MIGRATION_DATABASE_URL`；导入 Dump 需要 `pg_restore`。可在 `.env` 设置 `PG_DUMP_BIN` / `PG_RESTORE_BIN` 的绝对路径。脚本生成真正的 PostgreSQL custom 归档 `project.dump`，并在清单中写入 `"dump": "project.dump"`；网页导入接受这种单项目归档，不接受普通全库备份。未配置 `dump` 时也可识别根目录唯一的 `.dump` 文件。账号、其他项目、历史审计和发布包不随项目归档迁移。
+
+拓扑仍可通过 SSH 修改服务器 `project.json`，网页重新读取、检查并导入。项目、板卡目录和表格定义实时读取，无需重启；表格展示调整刷新页面生效，拓扑修改须校验导入。数据库仍保存 `config_key`、项目记录、板卡模板和 `projects.topology_config` 生效快照，用于关系、权限及版本校验；文件是配置编辑来源，读取文件不会直接替换生效拓扑。
 
 ## 功能
 
@@ -88,48 +112,59 @@ config/
 
 「项目设置」维护共享模板、协议、数据目录和工作簿来源。修改共享数据时，预览列出受影响板卡类型及挂载数量。编辑关联项随类型、端点和逻辑设备联动；校验问题直接跳转到所属板卡的内部信息页。
 
-板卡内部信息按配置直接显示表格，不再区分需要展开的辅助配置。DSP 功率板当前仅展示 **DSP内部数据、转发点表**，其中“DSP内部数据”对应处理点表；其他板卡使用公共默认列表。范围配置统一放在处理点表中，默认展示默认值、上下限、上电恢复默认值和允许手动恢复默认值，不再提供独立范围页签。信号与范围在同一事务中检查并保存，留空覆盖字段可恢复继承。采集、转发表按信号名称展示完整协议映射，支持按逻辑设备筛选及跳转到关联处理点。
+板卡内部信息按配置直接显示表格，不再区分需要展开的辅助配置。DSP 功率板当前仅展示 **DSP内部数据、转发点表**，其中“DSP内部数据”对应处理点表；其他板卡使用各自项目清单中的页签列表。范围配置统一放在处理点表中，默认展示默认值、上下限、上电恢复默认值和允许手动恢复默认值，不再提供独立范围页签。信号与范围在同一事务中检查并保存，留空覆盖字段可恢复继承。采集、转发表按信号名称展示完整协议映射，支持按逻辑设备筛选及跳转到关联处理点。
 
 ## 点表展示配置与接口
 
-[config/point-tables.json](config/point-tables.json) 独立维护字段标题、提示、显示列及编辑顺序：`fields` 是共享字段目录，`tables.process/collect/forward.columns` 是展示列，`editor` 是可编辑字段。调整这些配置后重启后端即可生效，不需要重新编译前端。通过 `POINT_TABLE_CONFIG` 可指定文件路径；默认路径相对于进程工作目录。启动时检查版本、字段标识和重复列，计算字段不能配置成可写字段。
+点表定义全部位于所属项目的板卡目录，没有公共配置或覆盖层。`PROJECT_CONFIG_DIR` 指定项目目录的父目录，默认 `config`。后端启动及后续读取时检查项目和表格定义；缺少清单、板卡目录、必需表文件或字段元数据会报告具体路径，修正后重新读取。
 
-`config/projects/<项目>/point-tables.json` 按字段覆盖公共配置：对象递归合并，数组整体替换；可以仅写需要修改的标题或列列表。合并后仍执行完整字段校验。`PROJECT_CONFIG_DIR` 可指定项目目录的父目录，默认 `config/projects`；从空目录加载时不提供项目配置。点表读取接口自动采用当前项目的有效展示定义。
+每个板卡目录必须提供 `process.json`、`collect.json`、`transmit.json`，即使某个表暂时隐藏也保留完整文件。每个文件直接包含以下属性：
 
-`workspace.default_tables` 定义板卡内显示的表格及顺序；`workspace.boards` 按项目拓扑的板卡类型 `code` 覆盖（例如 `DSP`，不是数据库 ID）。每个板卡的 `tables` 替换整个列表，`labels` 单独覆盖页签和表格标题；处理、采集、转发点表的编辑弹窗同步使用该名称。公共文件中的 DSP 配置如下，项目文件也可以只覆盖其中一个板卡：
+| 属性 | 用途 |
+| --- | --- |
+| `version` | 文件格式版本，填写 `1` |
+| `enabled` | 是否显示本板卡的这个表，`false` 隐藏入口 |
+| `label` / `description` | 表格名称与说明 |
+| `columns` / `editor` | 展示列与完整编辑窗口中的字段顺序 |
+| `ordering` | 本表的行排序方式与分组规则 |
+| `inline` | 展示列到可写字段的映射，空对象使本表单元格只读 |
+| `fields` | 本表完整的字段目录，包括标题、类型、选项、提示及默认值 |
+
+例如，[DSP/process.json](config/upm/DSP/process.json) 将处理点表命名为 `DSP内部数据`；[DSP/collect.json](config/upm/DSP/collect.json) 设置 `enabled: false`，DSP 仍只显示内部数据和转发点表。调整 DSP 的列或字段名称只影响 DSP 的对应表。修改后刷新页面，不需要重启后端或重新编译前端；隐藏表格不删除数据或改变权限。
+
+`project.json` 的 `workspace.boards` 为每个拓扑类型明确指定页签顺序，键对应类型 `code`；`labels` 可设置辅助表标题，业务点表名称由各自文件的 `label` 设置。例如：
 
 ```json
 {
   "workspace": {
     "boards": {
       "DSP": {
-        "tables": ["process", "forward"],
-        "labels": { "process": "DSP内部数据" }
+        "tables": ["process", "transmit"]
       }
     }
   }
 }
 ```
 
+此片段只展示 DSP；完整清单须为 `topology.board_types` 中的每个类型提供配置。可用的表格标识如下：
+
 | 表格标识 | 显示内容 |
 | --- | --- |
-| `process` / `collect` / `forward` | 处理 / 采集 / 转发点表 |
+| `process` / `collect` / `transmit` | 处理 / 采集 / 转发点表 |
 | `fields` / `data` | 协议字段 / 数据定义 |
 | `routes` / `expansion` | 透传路由 / 透传地址 |
 | `links` / `endpoints` | 板间协议 / 协议端点 |
 | `contexts` / `groups` | 逻辑设备 / 点表分组 |
 
-例如 DSP 需要协议字段时，在 `workspace.boards.DSP.tables` 中加入 `"fields"`；删除标识即隐藏入口，调整顺序即调整页签顺序，`[]` 表示不展示任何表格。未单独配置的板卡使用 `default_tables`；旧配置完全省略 `workspace` 时保留三个业务点表。后端启动时拒绝未知或重复的表格标识及空标题，修改后重启后端并刷新页面生效。隐藏入口只影响展示，不删除数据或改变权限；校验定位仍可打开关联记录。`project.example.json` 负责项目拓扑，表格显示在 `point-tables.json` 中维护。
+例如 DSP 需要协议字段时，在 `workspace.boards.DSP.tables` 中加入 `"fields"`。列表控制顺序，单表 `enabled` 控制业务表是否显示：启用且未列出的业务表会按处理、采集、转发的顺序补入；隐藏某个业务表应修改它的 `enabled`。项目文件统一使用 `transmit`，现有 API 的转发标识仍为 `forward`。
 
-例如，在 `tables.process.columns` 中加入已有的 `contexts`，即可显示处理点被哪些逻辑设备复用；添加 `range_inherited` 可显示哪些范围值继承数据定义。`label` 控制编辑标题，`column_label` 可单独设置显示列标题。新增存储属性或协议行为仍需扩展后端字段契约和校验，JSON 配置不会自动修改数据库结构。
-
-旧展示配置中的 `ranges` 入口应移除，使用 `process` 统一维护范围；范围列和编辑项分别由 `tables.process.columns`、`tables.process.editor` 控制。数据库中的范围覆盖记录和固件生成使用的 range 配置继续保留，无需迁移业务数据。
+要显示处理点被哪些逻辑设备复用，在本表 `columns` 中加入 `contexts`，并保留对应 `fields.contexts` 定义；`range_inherited` 显示范围继承情况。字段的 `label` 控制编辑标题，`column_label` 单独设置显示列标题。上下限、默认值与恢复策略统一在 `process.json` 配置。新增存储属性或协议行为仍需扩展后端字段契约和校验，JSON 配置不会修改数据库结构。这些文件保存显示和编辑规则，业务行与关联仍由 PostgreSQL 保存。
 
 ### 按点表分组维护与转发配置
 
 板卡内部信息按 `LOCAL`、`DSP` 等点表分组进入，采集、处理、转发页签保留当前分组；“全部分组”用于汇总查看和跨分组协议排序。分组来自数据库 `signal_groups`，自定义分组显示自己的代码和名称。新增点默认归属当前分组，编辑、切换分组和关闭窗口时检查未保存修改。共用 DSP 点定义与范围的设备在界面及变更预览中列出。
 
-处理点行上的“转发配置”及转发绑定数可以打开该点的全部映射。可以为不同设备上下文、协议字段添加多条映射，与转发点表共用 `signal_bindings`，不复制内部点；来源处理点固定，设备选项仅限使用该组的上下文。新建处理点保存后即可配置转发。表格入口仍受 `workspace` 展示配置控制。
+处理点行上的“转发配置”及转发绑定数可以打开该点的全部映射。可以为不同设备上下文、协议字段添加多条映射，与转发点表共用 `signal_bindings`，不复制内部点；来源处理点固定，设备选项仅限使用该组的上下文。新建处理点保存后即可配置转发。表格入口由项目清单的 `workspace` 与单表 `enabled` 控制。
 
 `VIR` 是虚拟转发服务，不是计算点分组。AIDC 板卡存在启用的服务端接口且未配置虚拟上下文时，生成器自动加入 `CFG_DEV_VIR / dev_id=1`，并注册生成的转发表和透传表；自动上下文只出现在生成结果，不写入数据库。已有虚拟上下文保留原编号；默认编号或代码被占用、存在多个虚拟上下文时阻止提交或生成，需调整冲突或显式配置服务。关闭全部服务端接口后不再派生 VIR。`contract` 板卡不生成 AIDC 虚拟设备；计算公式不在此功能范围内。
 
@@ -147,18 +182,20 @@ config/
 
 `STRING` 类型没有数值上下限：网格显示 `—` 并禁止编辑，记录详情不显示上下限输入；默认字符串和字节长度仍可配置。切换为字符串时，同一次预览会清空该信号的上下限覆盖；共享定义切换会保留显式使用数值内部类型的其他信号范围。后端同样拒绝字符串的非空上下限，SQL 有效视图不再继承这类数值范围。升级迁移不删除历史来源数据。
 
-`tables.<kind>.inline` 定义展示列与可写字段的对应关系，未配置映射的列保持只读。计算地址、数据长度等继续由关系和 SQL 决定；逻辑设备、处理点、端点和协议字段使用关联下拉选项，更换上游关系会清空不再有效的引用。范围字段留空恢复继承；由公共符号解析的 sigID 通过「记录详情」修改，不直接替换成数字。行号旁的 `⋯` 菜单提供「记录详情」「转发配置」或「关联处理点」入口，完整字段编辑与删除操作保留在详情窗口。只读成员可查看详情、选择和复制表格内容。
+各表 JSON 的 `inline` 定义展示列与可写字段的对应关系，未配置映射的列保持只读。计算地址、数据长度等继续由关系和 SQL 决定；逻辑设备、处理点、端点和协议字段使用关联下拉选项，更换上游关系会清空不再有效的引用。范围字段留空恢复继承；由公共符号解析的 sigID 通过「记录详情」修改，不直接替换成数字。行号旁的 `⋯` 菜单提供「记录详情」「转发配置」或「关联处理点」入口，完整字段编辑与删除操作保留在详情窗口。只读成员可查看详情、选择和复制表格内容。
 
-表格不再保留右侧操作列，行号与记录菜单固定在左侧，横向滚动时仍可使用。显示列和编辑项仍由 `tables.<kind>.columns`、`tables.<kind>.editor` 控制。分组统一在上方「点表分组」选择，处理点表不再显示重复的分组下拉框；采集、转发有多个逻辑设备时保留设备筛选。
+表格不再保留右侧操作列，行号与记录菜单固定在左侧，横向滚动时仍可使用。显示列和编辑项由各表 JSON 中的 `columns`、`editor` 控制。分组统一在上方「点表分组」选择，处理点表不再显示重复的分组下拉框；采集、转发有多个逻辑设备时保留设备筛选。
 
 右键列头打开列菜单，可直接隐藏、冻结、左右移动当前列或恢复默认列；「列设置…」打开全部列设置，用于恢复隐藏列以及批量调整显示和顺序。也可聚焦列头后按 Shift+F10，手机端点击列头箭头。冻结列集中在左侧，同类列内可调整顺序；行号始终保留，至少显示一个数据列。菜单操作立即生效，完整列设置窗口点击「应用」后生效。视图设置按项目、板卡和点表保存在当前浏览器，刷新后保留，不改变数据、协议地址、单元格草稿或其他成员的界面；配置新增的列自动加入，已删除的列从视图移除。
 
-拖动第一列手柄调整同组顺序；手柄也支持方向键，点击后可填写组内目标位置跨页移动。排序先暂存，预览确认后保存；取消恢复原顺序。搜索期间禁用排序；按分组或设备筛选后，仅在完整排序组仍可见时允许排序，避免改动隐藏记录。`ordering` 可在 `tables.<kind>` 配置，或通过 `workspace.boards.<code>.rules.<kind>` 覆盖：
+拖动第一列手柄调整同组顺序；手柄也支持方向键，点击后可填写组内目标位置跨页移动。排序先暂存，预览确认后保存；取消恢复原顺序。搜索期间禁用排序；按分组或设备筛选后，仅在完整排序组仍可见时允许排序，避免改动隐藏记录。`ordering` 在对应板卡的表格 JSON 中配置，例如转发表的协议排序片段：
 
 ```json
-"rules": {
-  "process": { "ordering": { "mode": "display", "group_by": ["group_id"] } },
-  "forward": { "ordering": { "mode": "protocol", "group_by": ["endpoint_id", "upp_model", "bank"] } }
+{
+  "ordering": {
+    "mode": "protocol",
+    "group_by": ["endpoint_id", "upp_model", "bank"]
+  }
 }
 ```
 
@@ -166,7 +203,7 @@ config/
 | --- | --- |
 | `display` | 保存项目成员共享的显示顺序，保持 sigID、协议地址和固件业务排序；当前三个点表默认使用此模式 |
 | `protocol` | 仅转发点表可用，调整共享协议字段的排列并重新计算地址，预览包含所有受影响端点 |
-| `disabled` | 禁止手动排序；未配置 `ordering` 时采用此模式 |
+| `disabled` | 禁止手动排序；仍需在完整表定义中显式配置 |
 
 处理点默认按点表分组，采集点按端点与上下文，转发点按端点、UPP 模型和寄存器区分组。`group_by: []` 可将整个表视为一组；`protocol` 必须使用示例中的三个分组字段。协议排序要求组内所有字段各绑定一次，并禁止跨越手动地址锚点；缺失或重复绑定需先整理。
 
@@ -199,8 +236,9 @@ config/
 | `POST /api/projects/{pid}/edit-lock/acquire` | 获取项目独占编辑权；请求体 `{}` |
 | `POST /api/projects/{pid}/edit-lock/renew` | 为本人编辑权续租；请求体 `{}` |
 | `POST /api/projects/{pid}/edit-lock/release` | 主动结束本人编辑；请求体 `{}` |
-| `GET /api/point-tables/schema` | 获取字段目录和三个点表的展示定义 |
-| `GET /api/projects/{pid}/point-tables/schema` | 获取项目覆盖后的展示定义，遵循项目权限 |
+| `GET /api/project-templates` | 管理自动化使用的项目目录列表，返回 `key`、`name`、`description` 和 `topology` |
+| `GET /api/projects/{pid}/configuration/source` | 实时读取当前项目的服务器文件，返回 `key`、`config` 和 `sha256` |
+| `GET /api/projects/{pid}/point-tables/schema` | 获取当前项目各板卡的独立展示定义，遵循项目权限 |
 | `GET /api/projects/{pid}/board-models/{mid}/point-tables/{kind}` | 获取指定板卡的点表、有效值、原始编辑值和关联选项 |
 | `POST /api/projects/{pid}/board-models/{mid}/point-tables/{kind}/preview` | 校验业务修改，预览所有关联影响 |
 | `POST /api/projects/{pid}/board-models/{mid}/point-tables/{kind}/batch/preview` | 整批新增或修改，最多 200 行；多行修改以 operation:update 和每行 id/values/expected 提交 |
@@ -211,11 +249,11 @@ config/
 
 ## 项目 JSON 配置
 
-[config/project.example.json](config/project.example.json) 定义五种板卡及四条挂载关系：每个 CSU 挂载 24 个 UPM、1 个变压器 IDU、4 个整流模块 IDU；每个 UPM 挂载 8 个 DSP。拓扑按父子关系自动分支，每类只显示一个节点，数量不复制点表或展开成数百个节点。CSU ↔ UPM 同时配置 Modbus / CAN FD 与 UPP / CAN FD；UPM ↔ DSP 为 UPP / CAN；CSU 与两类 IDU 均为 Modbus RTU / RS485。变压器 IDU（`IDU_T`，模板 `IDU_TRANSFORMER`）和整流模块 IDU（`IDU_R`，模板 `IDU_RECTIFIER`）分别维护独立点表；新增模板为空，具体寄存器、地址与内部信号需按实际点表配置。
+[config/upm/project.json](config/upm/project.json) 的 `topology` 定义五种板卡及四条挂载关系：每个 CSU 挂载 24 个 UPM、1 个变压器 IDU、4 个整流模块 IDU；每个 UPM 挂载 8 个 DSP。拓扑按父子关系自动分支，每类只显示一个节点，数量不复制点表或展开成数百个节点。CSU ↔ UPM 同时配置 Modbus / CAN FD 与 UPP / CAN FD；UPM ↔ DSP 为 UPP / CAN；CSU 与两类 IDU 均为 Modbus RTU / RS485。变压器 IDU（`IDU_T`，模板 `IDU_TRANSFORMER`）和整流模块 IDU（`IDU_R`，模板 `IDU_RECTIFIER`）分别维护独立点表；新增模板为空，具体寄存器、地址与内部信号需按实际点表配置。
 
-在「项目设置」或「板卡内部信息 → 板间协议」点击「项目 JSON 配置」可导入、编辑、导出文件；检查后应用，更新遵循项目权限、revision 锁和审计。`board_types[].model_code` 按项目内模板代码关联现有点表；首次出现的类型建立空模板。`root` 指定根类型及数量，`mounts[].quantity` 是**每个上级**的挂载数。JSON `version: 2` 使用 `mounts[].connections` 数组保存多组 `{protocol, transport}`，`CANFD` 与 `CAN` 分别表示 CAN FD 和经典 CAN，空数组表示协议待配置；添加协议不会重复计算板卡数量。兼容导入旧版 `version: 1` 的单组 `protocol/transport`（同时为 `null` 表示待配置），应用时转为新版。循环、重复上级、非法数量、与已有端点冲突的协议会被拒绝。
+在服务器编辑 `config/<项目名>/project.json` 的 `topology`，保存后打开网页中的项目配置窗口。窗口只读展示服务器文件，可重新读取最新内容、检查差异并导入数据库；点表内容继续通过网页单元格和记录详情编辑。拓扑导入需要项目全部编辑权限和编辑权，沿用 revision 检查、事务和审计。`board_types[].model_code` 按项目内模板代码关联现有点表，`directory` 指定项目内的板卡配置目录；新增类型时先准备完整板卡目录，再检查导入并建立缺少的空模板。`root` 指定根类型及数量，`mounts[].quantity` 是**每个上级**的挂载数。JSON `version: 2` 使用 `mounts[].connections` 数组保存多组 `{protocol, transport}`，`CANFD` 与 `CAN` 分别表示 CAN FD 和经典 CAN，空数组表示协议待配置；添加协议不会重复计算板卡数量。兼容导入旧版 `version: 1` 的单组 `protocol/transport`（同时为 `null` 表示待配置），应用时转为新版。循环、重复上级、非法数量、与已有端点冲突的协议会被拒绝。
 
-新建项目使用此 JSON 作为可编辑模板；修改磁盘示例文件影响新建项目的默认值，已有项目通过导入和预览应用修改。项目配置保存到 PostgreSQL 的 `projects.topology_config`，点表和权限仍使用关系表。工作簿替换导入保留项目组成，JSON 导出及版本快照包含该配置。
+创建项目可使用 `./scripts/create-project.sh <项目目录名>`，或由管理员导入完整项目文件夹。项目配置窗口同步服务器文件中的 `topology`，文件夹导入则覆盖完整配置并按是否包含 Dump 决定是否替换点表。项目、板卡和展示定义实时读取；拓扑经导入后保存到 PostgreSQL 的 `projects.topology_config` 生效快照，点表和权限继续使用关系表。工作簿替换导入保留项目组成，JSON 导出及版本快照包含该配置。
 
 ## 工作簿导入范围
 
@@ -292,7 +330,7 @@ python3 tests/compile-generated.py
 
 `tests/local-db.mjs` 使用临时目录和 PostgreSQL 集群，验证首次启动不隐式创建环境/数据库、残留 PID 文件后的恢复、重复启动/停止、连接等待及原数据保留，不操作已有业务数据库。
 
-集成测试读取 `.env` 连接开发 PostgreSQL，创建独立临时数据库和临时 HTTP 服务，测试结束删除临时数据库，不覆盖已有业务项目。它依赖初始化脚本安装的本地 `pg` 客户端及上述 Excel 示例依赖。覆盖显式项目创建、重复/并发创建、导入失败回滚、项目展示覆盖及隔离、数据库行级权限、API 权限、SQL 隔离、多人并发合并与冲突回滚、分组排序及共享协议地址、批量追加及 Excel 脚本、导入事务、生成和版本不可变性。`tests/point-editing.mjs` 和 `tests/point-batch.mjs` 由集成入口调用。
+集成测试读取 `.env` 连接开发 PostgreSQL，创建独立临时数据库和临时 HTTP 服务，测试结束删除临时数据库，不覆盖已有业务项目。它依赖初始化脚本安装的本地 `pg` 客户端及上述 Excel 示例依赖。覆盖显式项目创建、重复/并发创建、导入失败回滚、独立项目及板卡表定义、数据库行级权限、API 权限、SQL 隔离、多人并发合并与冲突回滚、分组排序及共享协议地址、批量追加及 Excel 脚本、导入事务、生成和版本不可变性。`tests/point-editing.mjs` 和 `tests/point-batch.mjs` 由集成入口调用。
 
 C 合约测试编译生成文件并验证设备注册、独立 sigID、别名、地址移动、浮点类型、范围查询及独立恢复策略；使用与参考接口一致的最小类型声明。**这不等于完整固件编译或硬件联调**。参考工程当前缺少独立编译所需的部分驱动头文件，生成代码上线前仍需目标工程验证。
 
@@ -304,7 +342,7 @@ npx playwright install chromium
 node browser-check.mjs
 ```
 
-需要应用已经启动，已导入上述 UPM 项目并应用示例 JSON，以及 Chromium 所需系统库和中文字体。检查覆盖拓扑与板卡信息的页面拆分、跳转及板卡切换、五个类型节点、分支布局、同一关系的双 CAN FD 协议及旧版 JSON 兼容、24/8/1/4 挂载数量及两类 IDU 的独立配置、单元格键盘编辑、区域粘贴、撤销重做、保存失败保留草稿、关联下拉、range 继承值、共享修改影响、JSON 导入导出与预览、只读界面及手机布局；也检查来源单元格、SQL 和发布阻断。仅预览配置，提交由测试拦截，不提交业务修改。通过 BASE_URL 可指定服务地址，截图保存在 `.runtime/`。
+需要应用已经启动，已导入上述 UPM 项目并配置其拓扑，以及 Chromium 所需系统库和中文字体。检查覆盖拓扑与板卡信息的页面拆分、跳转及板卡切换、五个类型节点、分支布局、同一关系的双 CAN FD 协议及旧版 JSON 兼容、24/8/1/4 挂载数量及两类 IDU 的独立配置、单元格键盘编辑、区域粘贴、撤销重做、保存失败保留草稿、关联下拉、range 继承值、共享修改影响、服务器拓扑读取与差异预览、只读界面及手机布局；也检查来源单元格、SQL 和发布阻断。仅预览配置，提交由测试拦截，不提交业务修改。通过 BASE_URL 可指定服务地址，截图保存在 `.runtime/`。
 
 ## 目录
 
@@ -314,7 +352,7 @@ migrations/                PostgreSQL 表结构、RLS 策略、SQL 视图和授�
 frontend/src/App.vue       Vue 应用和工作空间状态
 frontend/src/pages/        各业务页面
 frontend/src/components/   通用组件与编辑/导入弹窗
-config/                    公共展示定义、项目目录和 JSON 示例
+config/                    每项目独立目录、板卡表定义和创建来源
 scripts/                   独立的数据库初始化、项目创建和应用启动脚本
 tests/                    隔离数据库集成测试与 C 合约测试
 docs/                     数据模型与规则说明

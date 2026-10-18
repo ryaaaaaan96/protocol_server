@@ -20,6 +20,8 @@ pub struct BoardType {
     pub code: String,
     pub name: String,
     pub model_code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory: Option<String>,
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -169,12 +171,41 @@ impl Config {
         Ok(counts)
     }
 }
-pub async fn template(_u: User) -> Result<Json<Value>> {
-    let source = std::fs::read_to_string("config/project.example.json")
-        .unwrap_or_else(|_| include_str!("../config/project.example.json").to_string());
-    Ok(Json(serde_json::to_value(Config::parse(
-        serde_json::from_str(&source)?,
-    )?)?))
+pub async fn templates(State(s): State<AppState>, u: User) -> Result<Json<Value>> {
+    u.admin()?;
+    Ok(Json(
+        s.project_files
+            .catalog()
+            .map_err(|e| AppError::bad(format!("{e:#}")))?,
+    ))
+}
+
+pub(crate) fn validate_directory(
+    files: &crate::project_files::ProjectFiles,
+    key: Option<&str>,
+    value: &Value,
+) -> Result<()> {
+    let key = key.ok_or(AppError::bad("项目没有关联配置目录"))?;
+    let manifest = files
+        .manifest(key)
+        .map_err(|e| AppError::bad(format!("{e:#}")))?
+        .ok_or(AppError::bad("项目配置目录不存在"))?;
+    let configured = Config::parse(manifest["topology"].clone())?;
+    for board in Config::parse(value.clone())?.board_types {
+        let source = configured.board_types.iter().find(|source|
+            source.code == board.code && source.model_code == board.model_code
+        ).ok_or_else(|| AppError::bad(format!(
+            "板卡 {} / {} 未在项目 {key} 的 project.json 中配置，请先补齐项目清单和板卡目录后重新读取",
+            board.code, board.model_code
+        )))?;
+        if board.directory.is_some() && board.directory != source.directory {
+            return Err(AppError::bad(format!(
+                "板卡 {} 的 directory 与项目文件不一致，请修改磁盘配置后重新读取",
+                board.code
+            )));
+        }
+    }
+    Ok(())
 }
 pub async fn read(State(s): State<AppState>, u: User, Path(pid): Path<i64>) -> Result<Json<Value>> {
     let mut tx = db::context(&s.pool, &u, Some(pid), false).await?;
@@ -184,6 +215,23 @@ pub async fn read(State(s): State<AppState>, u: User, Path(pid): Path<i64>) -> R
             .fetch_one(&mut *tx)
             .await?;
     Ok(Json(config.unwrap_or(Value::Null)))
+}
+pub async fn source(
+    State(s): State<AppState>,
+    u: User,
+    Path(pid): Path<i64>,
+) -> Result<Json<Value>> {
+    let mut tx = db::context(&s.pool, &u, Some(pid), false).await?;
+    let key: Option<String> = sqlx::query_scalar("SELECT config_key FROM projects WHERE id=$1")
+        .bind(pid)
+        .fetch_one(&mut *tx)
+        .await?;
+    let key = key.ok_or(AppError::bad("项目没有关联配置目录"))?;
+    Ok(Json(
+        s.project_files
+            .topology_source(&key)
+            .map_err(|e| AppError::bad(format!("{e:#}")))?,
+    ))
 }
 pub async fn apply(tx: &mut Transaction<'_, Postgres>, pid: i64, value: &Value) -> Result<Value> {
     let config = Config::parse(value.clone())?;
@@ -284,7 +332,7 @@ pub fn relationship_issues(g: &Value) -> Vec<Value> {
 mod tests {
     use super::*;
     fn example() -> Value {
-        serde_json::from_str(include_str!("../config/project.example.json")).unwrap()
+        serde_json::from_str::<Value>(include_str!("../config/upm/project.json")).unwrap()["topology"].clone()
     }
     #[test]
     fn type_counts_do_not_expand_instances() {

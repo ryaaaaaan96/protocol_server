@@ -5,7 +5,7 @@ root=pathlib.Path(__file__).resolve().parent.parent
 with tempfile.TemporaryDirectory(prefix='protocol-topology-c-') as directory:
     out=pathlib.Path(directory)
     with zipfile.ZipFile(root/'.runtime/test-release.zip') as z:z.extractall(out)
-    board=out/'boards/ARM_1'
+    board=out/'board_types/UPM'
     contract=r'''
 #ifndef CONTRACT_H
 #define CONTRACT_H
@@ -72,7 +72,7 @@ int main(void){
 ''')
     subprocess.run(['gcc','-std=c11','-Wall','-Wextra','-Werror','-I'+str(board),str(board/'test.c'),'-o',str(board/'test')],check=True)
     subprocess.run([str(board/'test')],check=True)
-    xml=E.parse(out/'boards/DSP_1/SERVE.xml').getroot()
-    assert xml.find('protocol').get('DevCode')=='1'
+    xml=E.parse(out/'board_types/DSP/SERVE.xml').getroot()
+    assert xml.find('protocol').get('DevCode')=='0'
     points=xml.findall('./protocol/model/point');assert len(points)==3 and points[1].get('OffsetAddr')=='10'
 print('PASS: generated board C compiles with -Werror; registration, independent IDs, aliases, shifted layouts, precision, padded strings and distinct restore policies verified.')

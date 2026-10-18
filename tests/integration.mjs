@@ -5,6 +5,7 @@ import { checkPointBatch } from "./point-batch.mjs";
 import { checkStringRanges } from "./string-ranges.mjs";
 import { checkEditLocks } from "./edit-locks.mjs";
 import { checkEditScopes } from "./edit-scopes.mjs";
+import { checkProjectFolders } from "./project-folders.mjs";
 import path from "node:path";
 import crypto from "node:crypto";
 import assert from "node:assert/strict";
@@ -39,50 +40,118 @@ const password = crypto.randomBytes(20).toString("hex");
 const projectConfigs = fs.mkdtempSync(
   path.join(root, ".runtime/test-project-configs-"),
 );
-fs.cpSync("config/projects", projectConfigs, { recursive: true });
-const manifest = JSON.parse(
-  fs.readFileSync(path.join(projectConfigs, "upm/project.json"), "utf8"),
-);
-manifest.workbook = path.join(root, "UPM项目测点数据表.xlsx");
-fs.writeFileSync(
-  path.join(projectConfigs, "upm/project.json"),
-  JSON.stringify(manifest),
-);
-fs.writeFileSync(
-  path.join(projectConfigs, "upm/point-tables.json"),
-  JSON.stringify({
-    fields: { name: { label: "UPM 自定义名称" } },
-    tables: { process: { columns: ["name", "sig_id"] } },
-    workspace: {
-      boards: { DSP: { tables: ["forward", "process", "fields"], labels: { forward: "自定义转发表" } } },
-    },
-  }),
-);
-for (const [key, workbook] of [
-  ["second", null],
-  ["broken", "missing.xlsx"],
-]) {
-  fs.mkdirSync(path.join(projectConfigs, key));
-  fs.writeFileSync(
-    path.join(projectConfigs, key, "project.json"),
-    JSON.stringify({
-      ...manifest,
-      key,
-      name: `Script ${key}`,
-      workbook,
-    }),
-  );
+const fixtureSource = path.join(root, "config/upm");
+const workbookPath = path.join(fixtureSource, "sources/UPM项目测点数据表.xlsx");
+const readJson = (filename) => JSON.parse(fs.readFileSync(filename, "utf8"));
+const writeJson = (filename, value) => fs.writeFileSync(filename, JSON.stringify(value));
+const manifest = readJson(path.join(fixtureSource, "project.json"));
+const standardTables = Object.fromEntries(["process", "collect", "transmit"].map((kind) =>
+  [kind, readJson(path.join(fixtureSource, "UPM", `${kind}.json`))],
+));
+function projectFixture(key, name, codes = null, workbook = null) {
+  const directory = path.join(projectConfigs, key);
+  fs.cpSync(fixtureSource, directory, { recursive: true });
+  const config = { ...structuredClone(manifest), key, name, workbook };
+  if (codes) {
+    for (const board of config.topology.board_types) fs.rmSync(path.join(directory, board.directory), { recursive: true });
+    config.topology = {
+      version: 2,
+      board_types: codes.map(code => ({ code, model_code: code, name: code, directory: code })),
+      root: { type: codes[0], quantity: 1 },
+      mounts: codes.slice(1).map(child => ({ parent: codes[0], child, quantity: 1, connections: [] })),
+    };
+    config.workspace.boards = {};
+    for (const code of codes) {
+      fs.mkdirSync(path.join(directory, code));
+      config.workspace.boards[code] = { tables: ["process", "collect", "transmit"] };
+      for (const [kind, definition] of Object.entries(standardTables)) {
+        writeJson(path.join(directory, code, `${kind}.json`), definition);
+      }
+    }
+  }
+  writeJson(path.join(directory, "project.json"), config);
+  return config;
 }
-const orderDefaults = JSON.parse(fs.readFileSync("config/point-tables.json", "utf8"));
-orderDefaults.workspace.boards.ORDER_PROTOCOL = {
-  tables: ["process", "forward"],
-  rules: { forward: { ordering: { mode: "protocol", group_by: ["endpoint_id", "upp_model", "bank"] } } },
-};
-orderDefaults.workspace.boards.ORDER_DISABLED = {
-  tables: ["process"], rules: { process: { ordering: { mode: "disabled", group_by: [] } } },
-};
-const orderConfig = path.join(projectConfigs, "point-tables-defaults.json");
-fs.writeFileSync(orderConfig, JSON.stringify(orderDefaults));
+function updateTable(key, code, kind, update) {
+  const filename = path.join(projectConfigs, key, code, `${kind}.json`);
+  const definition = readJson(filename);
+  update(definition);
+  writeJson(filename, definition);
+}
+const upmManifest = projectFixture("upm", manifest.name, null, manifest.workbook);
+upmManifest.workspace.boards.DSP.tables = ["transmit", "process", "fields"];
+writeJson(path.join(projectConfigs, "upm/project.json"), upmManifest);
+updateTable("upm", "UPM", "process", table => {
+  table.fields.name.label = "UPM 自定义名称";
+  table.columns = ["name", "sig_id"];
+});
+updateTable("upm", "DSP", "transmit", table => { table.label = "自定义转发表"; });
+const secondManifest = projectFixture("second", "Script second");
+// Directory names are explicit and need not equal the board code or model code.
+fs.renameSync(path.join(projectConfigs, "second/UPM"), path.join(projectConfigs, "second/controller"));
+secondManifest.topology.board_types.find(board => board.code === "UPM").directory = "controller";
+for (const code of ["UPM", "DSP"]) secondManifest.workspace.boards[code].tables = ["process", "collect", "transmit", "fields"];
+secondManifest.workspace.boards.UPM.labels = { fields: "控制器协议字段" };
+writeJson(path.join(projectConfigs, "second/project.json"), secondManifest);
+for (const board of secondManifest.topology.board_types) updateTable("second", board.directory, "process", table => {
+  table.fields.name.label = "第二项目名称";
+  table.columns = ["name", "sig_id"];
+});
+updateTable("second", "controller", "process", table => {
+  Object.assign(table, {
+    label: "板卡目录处理表", description: "只配置 UPM 板卡的处理表",
+    columns: ["sig_id", "name"], editor: ["name", "sig_id"], inline: {},
+    ordering: { mode: "disabled", group_by: [] },
+  });
+  table.fields.name.label = "UPM 专用信号名";
+});
+updateTable("second", "controller", "collect", table => {
+  Object.assign(table, { enabled: false, columns: ["poll_interval", "signal_name"], editor: ["poll_interval"], inline: { poll_interval: "poll_interval" } });
+  table.fields.signal_name.label = "UPM 采集来源";
+});
+updateTable("second", "DSP", "collect", table => { table.enabled = false; });
+updateTable("second", "DSP", "transmit", table => {
+  Object.assign(table, {
+    enabled: true, label: "DSP 目录转发表", columns: ["effective_address", "signal_name"],
+    editor: ["signal_id"], inline: { signal_name: "signal_id" },
+    ordering: { mode: "protocol", group_by: ["endpoint_id", "upp_model", "bank"] },
+  });
+  table.fields.signal_name.label = "DSP 转发来源";
+});
+projectFixture("web_seed", "HTTP seeded project", null, manifest.workbook);
+projectFixture("broken", "Script broken", null, "sources/invalid.xlsx");
+fs.writeFileSync(path.join(projectConfigs, "broken/sources/invalid.xlsx"), "invalid workbook archive");
+const requestFixtures = new Map();
+for (const [key, name, codes] of [
+  ["alpha", "Test alpha"], ["beta", "Test beta"],
+  ["json", "JSON-created project"], ["legacy", "Legacy JSON import"],
+  ["ordering", "Point editing and merging", ["ORDER_PROTOCOL", "ORDER_DISABLED"]],
+  ["batch", "Atomic point batches", ["BATCH", "OTHER"]],
+  ["foreign_batch", "Foreign batch target"],
+  ["strings", "String defaults without numeric bounds", ["STRING_TEST"]],
+  ["locks", "Exclusive editing", ["LEASE_BOARD"]],
+  ["lock_import", "Exclusive import"],
+  ["scopes", "Scoped editors", ["SCOPE_A", "SCOPE_B"]],
+  ["foreign_scope", "Foreign grant target"],
+]) {
+  const config = projectFixture(key, name, codes);
+  if (key === "alpha") {
+    // Later topology previews expand 12 controllers to the manifest's 24.
+    config.topology.mounts[0].quantity = 12;
+    writeJson(path.join(projectConfigs, key, "project.json"), config);
+  }
+  if (key === "scopes") {
+    config.topology.mounts[0].connections = [{ protocol: "MODBUS", transport: "CANFD" }];
+    writeJson(path.join(projectConfigs, key, "project.json"), config);
+  }
+  requestFixtures.set(name, key);
+}
+updateTable("ordering", "ORDER_PROTOCOL", "transmit", table => {
+  table.ordering = { mode: "protocol", group_by: ["endpoint_id", "upp_model", "bank"] };
+});
+updateTable("ordering", "ORDER_DISABLED", "process", table => {
+  table.ordering = { mode: "disabled", group_by: [] };
+});
 let server;
 const testEnv = {
   ...process.env,
@@ -94,7 +163,6 @@ const testEnv = {
   BIND_ADDR: "127.0.0.1:18081",
   RUST_LOG: "warn",
   PROJECT_CONFIG_DIR: projectConfigs,
-  POINT_TABLE_CONFIG: orderConfig,
 };
 const base = "http://127.0.0.1:18081/api";
 let assertions = 0;
@@ -131,6 +199,10 @@ class Client {
     }
   }
   async rawUnlocked(p, method = "GET", body, extra = {}) {
+    // Each named test owns one complete directory; invalid unnamed keys pass through unchanged.
+    if (p === "/projects" && method === "POST" && body && !Object.hasOwn(body, "config_key") && requestFixtures.has(body.name)) {
+      body = { ...body, config_key: requestFixtures.get(body.name) };
+    }
     const response = await fetch(base + p, {
       method,
       headers: {
@@ -224,21 +296,21 @@ try {
   equal(upmProcess.rows.length, 202);
   equal(upmProcess.definition.fields.name.label, "UPM 自定义名称");
   equal(upmProcess.definition.columns.join(","), "name,sig_id");
-  equal(
-    (await client.call(`${seededUrl}/point-tables/schema`)).fields.name.label,
-    "UPM 自定义名称",
-  );
-  ok(
-    (await client.call("/point-tables/schema")).fields.name.label !==
-      "UPM 自定义名称",
-  );
   const projectDisplay = await client.call(`${seededUrl}/point-tables/schema`);
-  const defaultDisplay = await client.call("/point-tables/schema");
+  equal(projectDisplay.boards.UPM.process.fields.name.label, "UPM 自定义名称");
   equal(projectDisplay.workspace.boards.DSP.tables.join(","), "forward,process,fields");
-  equal(defaultDisplay.workspace.boards.DSP.tables.join(","), "process,forward");
   equal(projectDisplay.workspace.boards.DSP.labels.process, "DSP内部数据");
   equal(projectDisplay.workspace.boards.DSP.labels.forward, "自定义转发表");
-  equal(projectDisplay.workspace.default_tables.join(","), defaultDisplay.workspace.default_tables.join(","));
+  equal(Object.hasOwn(projectDisplay, "fields"), false);
+  equal(Object.hasOwn(projectDisplay, "tables"), false);
+  equal((await client.raw("/point-tables/schema")).status, 404);
+  const templates = await client.call("/project-templates");
+  ok(templates.some(template => template.key === "upm"));
+  ok(templates.some(template => template.key === "second"));
+  equal((await new Client().raw("/project-templates")).status, 401);
+  equal((await client.raw("/projects", "POST", { name: "Missing directory key" })).status, 400);
+  equal((await client.raw("/projects", "POST", { config_key: "unknown_directory" })).status, 400);
+  equal((await client.raw("/projects", "POST", { config_key: "upm" })).status, 409);
   const savedEdit = await client.call(`${seededUrl}/changes/preview`, "POST", {
     revision: seededGraph.revision,
     entity: "data_items",
@@ -265,7 +337,7 @@ try {
     { env: testEnv, encoding: "utf8" },
   );
   equal(failed.status, 1);
-  ok(failed.stderr.includes("读取工作簿"));
+  ok(failed.stderr.includes("工作簿"));
   equal((await client.call("/projects")).length, 1); // Failed imports roll back project and models.
   const simultaneous = () =>
     new Promise((resolve, reject) => {
@@ -284,15 +356,102 @@ try {
   equal(scriptedProjects.length, 2);
   const second = scriptedProjects.find((p) => p.config_key === "second");
   equal(second.point_count, 0);
-  ok(
-    (await client.call(`/projects/${second.id}/point-tables/schema`)).fields
-      .name.label !== "UPM 自定义名称",
+  // Explicit directory controller maps topology UPM to model UPM_ARM.
+  // Complete table definitions stay isolated between projects and boards.
+  const secondUrl = `/projects/${second.id}`;
+  const secondGraph = await client.call(`${secondUrl}/topology`);
+  const secondDisplay = await client.call(`${secondUrl}/point-tables/schema`);
+  equal(secondDisplay.boards.CSU.process.fields.name.label, "第二项目名称");
+  equal(secondGraph.project_config.board_types.find(board => board.code === "UPM").directory, "controller");
+  equal(secondDisplay.workspace.boards.UPM.labels.fields, "控制器协议字段");
+  equal(secondDisplay.workspace.boards.UPM.tables.join(","), "process,forward,fields");
+  equal(secondDisplay.workspace.boards.DSP.tables.join(","), "process,forward,fields");
+  equal(secondDisplay.boards.UPM.process.label, "板卡目录处理表");
+  equal(secondDisplay.boards.DSP.forward.label, "DSP 目录转发表");
+  const secondTable = (code, kind) => client.call(
+    `${secondUrl}/board-models/${secondGraph.board_models.find((m) => m.code === code).id}/point-tables/${kind}`,
   );
+  const boardProcess = (await secondTable("UPM_ARM", "process")).definition;
+  const expectedProcess = readJson(path.join(projectConfigs, "second/controller/process.json"));
+  delete expectedProcess.version;
+  delete expectedProcess.enabled;
+  assert.deepEqual(boardProcess, expectedProcess);
+  assertions++;
+  equal(boardProcess.label, "板卡目录处理表");
+  equal(boardProcess.description, "只配置 UPM 板卡的处理表");
+  equal(boardProcess.columns.join(","), "sig_id,name");
+  equal(boardProcess.editor.join(","), "name,sig_id");
+  equal(boardProcess.fields.name.label, "UPM 专用信号名");
+  equal(boardProcess.fields.sig_id.type, standardTables.process.fields.sig_id.type);
+  equal(JSON.stringify(boardProcess.inline), "{}");
+  equal(boardProcess.ordering.mode, "disabled");
+  equal(boardProcess.ordering.group_by.length, 0);
+  const boardCollect = (await secondTable("UPM_ARM", "collect")).definition;
+  equal(boardCollect.columns.join(","), "poll_interval,signal_name");
+  equal(boardCollect.editor.join(","), "poll_interval");
+  equal(boardCollect.fields.signal_name.label, "UPM 采集来源");
+  equal(JSON.stringify(boardCollect.inline), JSON.stringify({ poll_interval: "poll_interval" }));
+  const boardForward = (await secondTable("DSP", "forward")).definition;
+  equal(boardForward.label, "DSP 目录转发表");
+  equal(boardForward.columns.join(","), "effective_address,signal_name");
+  equal(boardForward.editor.join(","), "signal_id");
+  equal(boardForward.fields.signal_name.label, "DSP 转发来源");
+  equal(JSON.stringify(boardForward.inline), JSON.stringify({ signal_name: "signal_id" }));
+  equal(boardForward.ordering.mode, "protocol");
+  equal(boardForward.ordering.group_by.join(","), "endpoint_id,upp_model,bank");
+  for (const code of ["CSU", "DSP"]) {
+    const unaffected = (await secondTable(code, "process")).definition;
+    equal(unaffected.columns.join(","), "name,sig_id");
+    equal(unaffected.fields.name.label, "第二项目名称");
+    equal(unaffected.editor.join(","), standardTables.process.editor.join(","));
+    ok(Object.keys(unaffected.inline).length > 0);
+    equal(unaffected.ordering.mode, "display");
+  }
+  equal(
+    (await secondTable("UPM_ARM", "forward")).definition.fields.signal_name.label,
+    standardTables.transmit.fields.signal_name.label,
+  );
+  equal(JSON.stringify(await client.call(`${seededUrl}/point-tables/schema`)), JSON.stringify(projectDisplay));
+  equal(
+    JSON.stringify((await client.call(`${seededUrl}/board-models/${upmModel.id}/point-tables/process`)).definition),
+    JSON.stringify(upmProcess.definition),
+  );
+  // HTTP creation and the CLI import the same self-contained workbook atomically.
+  const beforeHttpImport = (await client.call("/projects")).length;
+  const brokenHttp = await client.raw("/projects", "POST", { config_key: "broken" });
+  equal(brokenHttp.status, 400);
+  ok(brokenHttp.data.error.includes("工作簿"));
+  equal((await client.call("/projects")).length, beforeHttpImport);
+  const webSeed = await client.call("/projects", "POST", { config_key: "web_seed" });
+  equal(webSeed.name, "HTTP seeded project");
+  const webGraph = await client.call(`/projects/${webSeed.id}/topology`);
+  const webDsp = webGraph.board_models.find(model => model.code === "DSP");
+  equal(webGraph.v_signals.filter(signal => signal.model_id === webDsp.id).length, 552);
+  const fixtureDb = new pg.Client({ connectionString: migration.toString() });
+  await fixtureDb.connect();
+  try {
+    equal(Number((await fixtureDb.query("SELECT count(*) FROM imports WHERE project_id=$1", [webSeed.id])).rows[0].count), 1);
+    // Old/unbound project rows must surface their missing configuration, never another project's defaults.
+    await fixtureDb.query("UPDATE projects SET config_key=NULL WHERE id=$1", [second.id]);
+    equal((await client.raw(`${secondUrl}/point-tables/schema`)).status, 400);
+  } finally {
+    await fixtureDb.query("UPDATE projects SET config_key='second' WHERE id=$1", [second.id]);
+    await fixtureDb.end();
+  }
+  equal((await client.raw("/projects", "POST", { config_key: "web_seed" })).status, 409);
+  const wrongDirectory = structuredClone(manifest.topology);
+  wrongDirectory.board_types.find(board => board.code === "DSP").directory = "UPM";
+  equal((await client.raw("/projects", "POST", { config_key: "json", config: wrongDirectory })).status, 400);
+  const wrongModel = structuredClone(manifest.topology);
+  wrongModel.board_types.find(board => board.code === "DSP").model_code = "UNKNOWN_MODEL";
+  equal((await client.raw("/projects", "POST", { config_key: "json", config: wrongModel })).status, 400);
   const p = await client.call("/projects", "POST", {
       name: "Test alpha",
       description: "integration",
     }),
-    other = await client.call("/projects", "POST", { name: "Test beta" });
+    other = await client.call("/projects", "POST", { config_key: "beta" });
+  equal(other.name, "Test beta");
+  equal((await client.call(`/projects/${other.id}/topology`)).board_models.length, 5);
   const url = `/projects/${p.id}`;
   const engineer = await client.call("/users", "POST", {
       username: "engineer",
@@ -317,6 +476,7 @@ try {
   await e.call("/auth/login", "POST", { username: "engineer", password });
   await v.call("/auth/login", "POST", { username: "viewer", password });
   equal((await e.call("/projects")).length, 1);
+  equal((await e.raw("/project-templates")).status, 403);
   equal((await e.raw(`${seededUrl}/point-tables/schema`)).status, 403);
   equal((await v.raw(`${seededUrl}/point-tables/schema`)).status, 403);
   await client.call(`${seededUrl}/members`, "PUT", {
@@ -324,7 +484,7 @@ try {
     role: "viewer",
   });
   equal(
-    (await v.call(`${seededUrl}/point-tables/schema`)).fields.name.label,
+    (await v.call(`${seededUrl}/point-tables/schema`)).boards.UPM.process.fields.name.label,
     "UPM 自定义名称",
   );
   equal(
@@ -386,16 +546,15 @@ try {
     ok(p.allowed, JSON.stringify(p.errors));
     return (await commit(p)).record;
   };
+  const initialModels = (await graph()).board_models;
   const am = await edit("board_models", {
-    name: "ARM",
-    code: "ARM",
-    firmware_profile: "aidc",
-  });
+    name: "ARM", firmware_profile: "aidc",
+  }, initialModels.find(model => model.code === "UPM_ARM").id);
   equal((await e.call(`${url}/overview`)).has_configuration, true);
   const configOnlyForm = new FormData();
   configOnlyForm.append(
     "file",
-    new Blob([fs.readFileSync("UPM项目测点数据表.xlsx")]),
+    new Blob([fs.readFileSync(workbookPath)]),
     "UPM.xlsx",
   );
   const configOnlyPreview = await e.call(
@@ -408,7 +567,7 @@ try {
       .status,
     409,
   );
-  const bm = await edit("board_models", { name: "DSP", code: "DSP" });
+  const bm = initialModels.find(model => model.code === "DSP");
   const ab = await edit("boards", {
     model_id: am.id,
     name: "控制板",
@@ -615,8 +774,8 @@ try {
       values,
     });
   };
-  equal((await new Client().raw("/point-tables/schema")).status, 401);
-  equal((await e.call("/point-tables/schema")).version, 1);
+  equal((await new Client().raw(`${url}/point-tables/schema`)).status, 401);
+  equal((await e.call(`${url}/point-tables/schema`)).version, 1);
   equal((await e.raw(`${pointUrl}/missing`)).status, 404);
   equal(
     (await e.raw(`${url}/board-models/999999/point-tables/process`)).status,
@@ -1002,37 +1161,37 @@ try {
   });
   const explicitGenerated = await e.call(`${url}/generate`);
   equal(explicitGenerated.blocked, false);
-  const explicitContexts = JSON.parse(explicitGenerated.files["boards/ARM_1/connections.json"]).contexts;
+  const explicitContexts = JSON.parse(explicitGenerated.files["board_types/UPM/connections.json"]).contexts;
   equal(explicitContexts.find(c => c.kind === "virtual").id, savedVir.id);
   const removeVir = await preview("device_contexts", {}, savedVir.id, "delete");
   ok(removeVir.allowed, JSON.stringify(removeVir.errors));
   await commit(removeVir);
   const generated = await e.call(`${url}/generate`);
   equal(generated.blocked, false);
-  const autoContexts = JSON.parse(generated.files["boards/ARM_1/connections.json"]).contexts;
+  const autoContexts = JSON.parse(generated.files["board_types/UPM/connections.json"]).contexts;
   equal(autoContexts.filter(c => c.kind === "virtual").length, 1);
   equal(autoContexts.find(c => c.kind === "virtual").generated, true);
   equal(autoContexts.find(c => c.kind === "virtual").dev_id, 1);
   equal((await graph()).device_contexts.some(c => c.model_id === am.id && c.kind === "virtual"), false);
-  equal(generated.files["boards/ARM_1/dev_cfg.c"], explicitGenerated.files["boards/ARM_1/dev_cfg.c"]);
+  equal(generated.files["board_types/UPM/dev_cfg.c"], explicitGenerated.files["board_types/UPM/dev_cfg.c"]);
   const collision = await preview("device_contexts", { dev_id: 1 }, ctx.id);
   equal(collision.allowed, false);
   ok(collision.errors.some(e => e.code === "virtual_service"));
   equal((await graph()).device_contexts.find(c => c.id === ctx.id).dev_id, 11);
   ok(
-    generated.files["boards/ARM_1/collect.c"].includes(".dec_p=0.1"),
+    generated.files["board_types/UPM/collect.c"].includes(".dec_p=0.1"),
     "fractional conversion retained",
   );
   ok(
-    generated.files["boards/ARM_1/transmit.c"].includes(".sig_id=2502"),
+    generated.files["board_types/UPM/transmit.c"].includes(".sig_id=2502"),
     "updated stable signal propagated to C",
   );
   ok(
-    generated.files["boards/ARM_1/dev_cfg.c"].includes(".coll_addr=1"),
+    generated.files["board_types/UPM/dev_cfg.c"].includes(".coll_addr=1"),
     "link address used in registration",
   );
   ok(
-    generated.files["boards/DSP_1/SERVE.xml"].includes('DevCode="1"'),
+    generated.files["board_types/DSP/SERVE.xml"].includes('DevCode="0"'),
     "peer protocol contract generated",
   );
   const staleRelease = await e.raw(`${url}/releases`, "POST", { name: "stale", revision: generated.revision - 1 });
@@ -1064,7 +1223,7 @@ try {
   );
   ok(zip.equals(frozen), "normalized release stays immutable");
 
-  const book = fs.readFileSync("UPM项目测点数据表.xlsx"),
+  const book = fs.readFileSync(workbookPath),
     digest = crypto.createHash("sha256").update(book).digest("hex");
   const upload = () => {
     const form = new FormData();
@@ -1120,7 +1279,7 @@ try {
   equal(
     crypto
       .createHash("sha256")
-      .update(fs.readFileSync("UPM项目测点数据表.xlsx"))
+      .update(fs.readFileSync(workbookPath))
       .digest("hex"),
     digest,
   );
@@ -1132,9 +1291,7 @@ try {
     "normalized before snapshot retained",
   );
   // Portable composition is type-based, with no multiplied board/point rows.
-  const projectConfig = JSON.parse(
-    fs.readFileSync("config/project.example.json", "utf8"),
-  );
+  const projectConfig = structuredClone(manifest.topology);
   const beforeConfig = await graph();
   const cp = await preview("project_config", projectConfig, null, "update");
   ok(cp.allowed, JSON.stringify(cp.errors));
@@ -1179,6 +1336,8 @@ try {
   const invalid = structuredClone(projectConfig);
   invalid.mounts[0].parent = "DSP";
   ok(!(await preview("project_config", invalid, null, "update")).allowed);
+  ok(!(await preview("project_config", wrongDirectory, null, "update")).allowed);
+  ok(!(await preview("project_config", wrongModel, null, "update")).allowed);
   const wrongProtocol = structuredClone(projectConfig);
   wrongProtocol.mounts[1].connections[0].protocol = "MODBUS";
   wrongProtocol.mounts[1].connections[0].transport = "RS485";
@@ -1346,6 +1505,7 @@ try {
   await checkStringRanges({ client, engineer: e, viewer: v, engineerId: engineer.id, viewerId: viewer.id, equal, ok });
   await checkEditLocks({ client, engineer: e, viewer: v, engineerId: engineer.id, viewerId: viewer.id, password, migrationUrl: migration.toString(), equal, ok });
   await checkEditScopes({ client, engineer: e, viewer: v, engineerId: engineer.id, viewerId: viewer.id, password, migrationUrl: migration.toString(), equal, ok });
+  await checkProjectFolders({ client, engineer: e, viewer: v, engineerId: engineer.id, viewerId: viewer.id, password, makeClient: () => new Client(), projectConfigs, fixtureSource, testEnv, equal, ok });
   const direct = new pg.Client({ connectionString: appUrl.toString() });
   await direct.connect();
   equal(

@@ -12,7 +12,9 @@ mod point_batch;
 mod point_order;
 mod point_tables;
 mod project_config;
+mod project_dump;
 mod project_files;
+mod project_folders;
 mod sql_workspace;
 mod topology;
 mod topology_codegen;
@@ -43,6 +45,7 @@ pub struct AppState {
     pub secure_cookie: bool,
     pub dummy_hash: String,
     pub project_files: std::sync::Arc<project_files::ProjectFiles>,
+    pub folder_gate: std::sync::Arc<tokio::sync::RwLock<bool>>,
 }
 
 async fn csrf(request: Request, next: Next) -> std::result::Result<Response, StatusCode> {
@@ -118,6 +121,7 @@ async fn main() -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!(e.1))?;
         sqlx::query("INSERT INTO users(username,display_name,password_hash,is_admin) VALUES($1,'系统管理员',$2,true) ON CONFLICT(username) DO NOTHING").bind(std::env::var("ADMIN_USERNAME").unwrap_or("admin".into())).bind(hash).execute(&pool).await?;
     }
+    project_folders::recover(&pool).await?;
     let project_files = project_files::ProjectFiles::load()?;
     if arguments.first().is_some_and(|a| a == "create-project") {
         return project_files.create(&pool, &arguments[1]).await;
@@ -130,13 +134,13 @@ async fn main() -> anyhow::Result<()> {
         secure_cookie: std::env::var("COOKIE_SECURE").is_ok_and(|v| v == "true"),
         dummy_hash,
         project_files: std::sync::Arc::new(project_files),
+        folder_gate: Default::default(),
     };
     let api = Router::new()
         .route("/health", get(api::health))
         .route("/auth/login", post(auth::login))
         .route("/auth/me", get(auth::me))
         .route("/auth/logout", post(auth::logout))
-        .route("/point-tables/schema", get(point_tables::schema))
         .route(
             "/projects/{pid}/point-tables/schema",
             get(point_tables::project_schema),
@@ -153,12 +157,21 @@ async fn main() -> anyhow::Result<()> {
             "/projects/{pid}/board-models/{mid}/point-tables/{kind}/batch/preview",
             post(point_batch::preview),
         )
-        .route("/project-template", get(project_config::template))
+        .route("/project-templates", get(project_config::templates))
+        .route(
+            "/project-folders/preview",
+            post(project_folders::preview).layer(DefaultBodyLimit::max(65 * 1024 * 1024)),
+        )
+        .route("/project-folders/commit", post(project_folders::commit))
         .route(
             "/projects/{pid}/board-models/{mid}/point-tables/{kind}/reorder/preview",
             post(point_order::preview),
         )
         .route("/projects/{pid}/configuration", get(project_config::read))
+        .route(
+            "/projects/{pid}/configuration/source",
+            get(project_config::source),
+        )
         .route("/projects", get(api::projects).post(api::create_project))
         .route("/projects/{pid}/overview", get(api::overview))
         .route("/projects/{pid}/edit-lock", get(edit_lock::read))
@@ -206,6 +219,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/users/{id}", put(api::update_user))
         .fallback(api::fallback)
         .layer(DefaultBodyLimit::max(15 * 1024 * 1024))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            project_folders::file_gate,
+        ))
         .layer(middleware::from_fn(csrf));
     let static_dir = std::env::var("STATIC_DIR").unwrap_or("frontend/dist".into());
     let app=Router::new().nest("/api",api)
@@ -229,7 +246,8 @@ async fn main() -> anyhow::Result<()> {
 mod tests {
     #[test]
     fn imports_real_workbook_without_formula_cache() {
-        let bytes = std::fs::read("UPM项目测点数据表.xlsx").expect("reference workbook");
+        let bytes =
+            std::fs::read("config/upm/sources/UPM项目测点数据表.xlsx").expect("reference workbook");
         let imported = crate::importer::parse(bytes).expect("parse source workbook");
         assert_eq!(
             imported.points.iter().filter(|p| p.scope == "DSP").count(),

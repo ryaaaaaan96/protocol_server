@@ -279,7 +279,7 @@ fn issue_keys(report: &Value) -> BTreeSet<String> {
         .map(|v| v["key"].to_string())
         .collect()
 }
-fn new_errors(before: &Value, after: &Value) -> Vec<Value> {
+pub(crate) fn new_errors(before: &Value, after: &Value) -> Vec<Value> {
     let keys = issue_keys(before);
     rows(after, "issues")
         .iter()
@@ -601,6 +601,26 @@ async fn apply_change(
     pid: i64,
     c: &Change,
 ) -> Result<Value> {
+    if c.entity == "project_config" {
+        let key: Option<String> = sqlx::query_scalar("SELECT config_key FROM projects WHERE id=$1")
+            .bind(pid)
+            .fetch_one(&mut **tx)
+            .await?;
+        crate::project_config::validate_directory(&s.project_files, key.as_deref(), &c.values)?;
+        if let Some(expected) = c.expected.get("source_sha256") {
+            let source = s
+                .project_files
+                .topology_source(key.as_deref().unwrap())
+                .map_err(|e| AppError::bad(format!("{e:#}")))?;
+            let proposed =
+                serde_json::to_value(crate::project_config::Config::parse(c.values.clone())?)?;
+            if expected != &source["sha256"] || proposed != source["config"] {
+                return Err(AppError::conflict(
+                    "服务器项目文件已变化，请重新读取并检查后导入",
+                ));
+            }
+        }
+    }
     if c.entity == "point_batch" {
         crate::point_batch::apply(tx, pid, c).await
     } else if c.entity == "point_order" {

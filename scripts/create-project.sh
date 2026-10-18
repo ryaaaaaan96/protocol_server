@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Explicit project creation from config/projects/<key>/project.json.
+# Explicit project creation from config/<key>/project.json.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 if [ "$#" -ne 1 ]; then

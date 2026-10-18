@@ -1,94 +1,74 @@
 <script setup lang="ts">
-import { ref, onMounted, watch } from "vue";
+import { ref, computed, onMounted } from "vue";
 import { api, revisionConflict, type Row } from "../api";
 import Modal from "./Modal.vue";
-import { Upload, Download, FileJson } from "@lucide/vue";
+import { Download, RefreshCw, FileJson } from "@lucide/vue";
 const props = defineProps<{ pid: number; graph: Row; canWrite: boolean }>();
-const emit = defineEmits<{ close: []; done: []; error: [message:string]; conflict: [] }>();
-const value = ref(""),
+const emit = defineEmits<{ close: []; done: []; error: [message: string]; conflict: [] }>();
+const source = ref<Row | null>(null),
   error = ref(""),
   busy = ref(false),
   preview = ref<Row | null>(null);
-onMounted(async () => {
-  try {
-    value.value = JSON.stringify(
-      props.graph.project_config || (await api("/project-template")),
-      null,
-      2,
-    );
-  } catch (e) {
-    error.value = (e as Error).message;
-    emit("error", error.value);
-    if (revisionConflict(e)) emit("conflict");
-  }
-});
-watch(value, () => {
-  preview.value = null;
-  error.value = "";
-});
-async function upload(event: Event) {
-  const file = (event.target as HTMLInputElement).files?.[0];
-  if (!file) return;
-  if (file.size > 65536) {
-    error.value = "项目配置文件不能超过 64 KB";
-    return;
-  }
-  value.value = await file.text();
+const value = computed(() => source.value ? JSON.stringify(source.value.config, null, 2) : "");
+function report(e: unknown) {
+  error.value = (e as Error).message;
+  emit("error", error.value);
+  if (revisionConflict(e)) emit("conflict");
 }
-function download() {
-  try {
-    const blob = new Blob(
-        [JSON.stringify(JSON.parse(value.value), null, 2) + "\n"],
-        { type: "application/json" },
-      ),
-      url = URL.createObjectURL(blob),
-      a = document.createElement("a");
-    a.href = url;
-    a.download = `project-${props.pid}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-  } catch {
-    error.value = "JSON 格式无效，请先修正。";
-  }
-}
-async function review() {
-  if (!props.canWrite || busy.value) return;
+async function load() {
   busy.value = true;
   error.value = "";
+  preview.value = null;
+  source.value = null;
   try {
-    preview.value = await api(
-      `/projects/${props.pid}/changes/preview`,
-      "POST",
-      {
-        revision: props.graph.revision,
-        entity: "project_config",
-        operation: "update",
-        values: JSON.parse(value.value),
-      },
-    );
-    if (preview.value && !preview.value.allowed) emit("error", preview.value.errors.map((e:Row) => e.message).join("；"));
+    source.value = await api(`/projects/${props.pid}/configuration/source`);
   } catch (e) {
-    error.value = (e as Error).message;
-    emit("error", error.value);
-    if (revisionConflict(e)) emit("conflict");
+    report(e);
+  } finally {
+    busy.value = false;
+  }
+}
+onMounted(load);
+function download() {
+  if (!source.value) return;
+  const blob = new Blob([value.value + "\n"], { type: "application/json" }),
+    url = URL.createObjectURL(blob),
+    a = document.createElement("a");
+  a.href = url;
+  a.download = `topology-${source.value.key}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+async function review() {
+  if (!props.canWrite || busy.value || !source.value) return;
+  busy.value = true;
+  error.value = "";
+  preview.value = null;
+  try {
+    preview.value = await api(`/projects/${props.pid}/changes/preview`, "POST", {
+      revision: props.graph.revision,
+      entity: "project_config",
+      operation: "update",
+      values: source.value.config,
+      expected: { source_sha256: source.value.sha256 },
+    });
+    if (preview.value && !preview.value.allowed) {
+      emit("error", preview.value.errors.map((e: Row) => e.message).join("；"));
+    }
+  } catch (e) {
+    report(e);
   } finally {
     busy.value = false;
   }
 }
 async function commit() {
-  if (!props.canWrite || busy.value) return;
+  if (!props.canWrite || busy.value || !preview.value?.allowed) return;
   busy.value = true;
   try {
-    await api(
-      `/projects/${props.pid}/changes/${preview.value!.id}/commit`,
-      "POST",
-      {},
-    );
+    await api(`/projects/${props.pid}/changes/${preview.value.id}/commit`, "POST", {});
     emit("done");
   } catch (e) {
-    error.value = (e as Error).message;
-    emit("error", error.value);
-    if (revisionConflict(e)) emit("conflict");
+    report(e);
     preview.value = null;
   } finally {
     busy.value = false;
@@ -96,68 +76,48 @@ async function commit() {
 }
 </script>
 <template>
-  <Modal title="项目 JSON 配置" wide lock-guard @close="emit('close')"
-    ><form @submit.prevent="review">
+  <Modal title="项目拓扑配置" wide lock-guard @close="emit('close')">
+    <form @submit.prevent="review">
       <div class="modal-body project-json">
         <p class="notice">
-          每种板卡维护一份点表。quantity 表示每个上级挂载的数量， connections
-          可填写多组协议与传输方式，数量只计算一次；空数组表示待配置。
+          通过 SSH 修改服务器项目文件中的 topology，然后重新读取、检查并导入。
+          项目和板卡定义会实时读取，无需重启；拓扑变更在检查并导入后生效，点表展示定义刷新页面即可更新。
         </p>
+        <p v-if="source" class="muted">项目目录：{{ source.key }} · project.json → topology</p>
         <div class="inline json-actions">
-          <label v-if="canWrite" class="button"
-            ><Upload :size="16" />导入 JSON<input
-              type="file"
-              accept=".json,application/json"
-              aria-label="导入项目 JSON"
-              @change="upload"
-              hidden
-              :disabled="busy" /></label
-          ><button type="button" class="button" @click="download">
-            <Download :size="16" />导出 JSON
+          <button type="button" class="button" :disabled="busy" @click="load">
+            <RefreshCw :size="16" />重新读取项目文件
+          </button>
+          <button type="button" class="button" :disabled="busy || !source" @click="download">
+            <Download :size="16" />下载拓扑 JSON
           </button>
         </div>
         <textarea
-          v-model="value"
-          aria-label="项目 JSON 内容"
+          :value="value"
+          aria-label="项目拓扑内容"
           class="json-editor"
           spellcheck="false"
-          :readonly="!canWrite"
-          :disabled="busy"
+          readonly
         />
         <p v-if="error" class="notice danger" role="alert">{{ error }}</p>
-        <div
-          v-if="preview"
-          :class="['notice', { danger: !preview.allowed }]"
-          role="status"
-        >
-          <strong>{{
-            preview.allowed ? "配置检查通过" : "配置不能提交"
-          }}</strong>
+        <div v-if="preview" :class="['notice', { danger: !preview.allowed }]" role="status">
+          <strong>{{ preview.allowed ? "配置检查通过" : "配置不能导入" }}</strong>
           <p v-for="(e, i) in preview.errors" :key="i">{{ e.message }}</p>
           <p v-if="preview.allowed">
-            {{
-              preview.impact.affected_types
-                ?.map((t: Row) => `${t.code} × ${t.quantity}`)
-                .join(" · ")
-            }}
+            {{ preview.impact.affected_types?.map((t: Row) => `${t.code} × ${t.quantity}`).join(" · ") }}
           </p>
-          <p v-if="preview.allowed">更新挂载关系与类型配置，现有点表保留。</p>
+          <p v-if="preview.allowed">确认后导入已检查的拓扑与挂载关系。</p>
         </div>
       </div>
       <div class="modal-footer">
-        <button type="button" class="button" @click="emit('close')">关闭</button
-        ><button v-if="canWrite" class="button" :disabled="busy || !value">
-          <FileJson :size="16" />检查项目配置</button
-        ><button
-          v-if="canWrite && preview?.allowed"
-          type="button"
-          class="button primary"
-          :disabled="busy"
-          @click="commit"
-        >
-          应用项目配置
+        <button type="button" class="button" @click="emit('close')">关闭</button>
+        <button v-if="canWrite" class="button" :disabled="busy || !source">
+          <FileJson :size="16" />检查项目配置
+        </button>
+        <button v-if="canWrite && preview?.allowed" type="button" class="button primary" :disabled="busy" @click="commit">
+          导入已检查的拓扑
         </button>
       </div>
-    </form></Modal
-  >
+    </form>
+  </Modal>
 </template>

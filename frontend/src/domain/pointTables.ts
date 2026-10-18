@@ -21,10 +21,9 @@ export type PointDefinition = {
   ordering: { mode: "disabled" | "display" | "protocol"; group_by: string[] };
 };
 export type PointSchema = {
-  tables: Record<PointKind, Omit<PointDefinition, "fields">>;
-  workspace?: {
-    default_tables: string[];
-    boards?: Record<
+  boards: Record<string, Record<PointKind, PointDefinition>>;
+  workspace: {
+    boards: Record<
       string,
       { tables: string[]; labels?: Record<string, string> }
     >;

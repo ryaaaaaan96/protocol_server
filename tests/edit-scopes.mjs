@@ -34,8 +34,9 @@ export async function checkEditScopes({
     return (await client.call(`${url}/changes/${p.data.id}/commit`, "POST", {}))
       .record;
   };
-  const a = await edit("board_models", { name: "UPM A", code: "SCOPE_A" }),
-    b = await edit("board_models", { name: "DSP B", code: "SCOPE_B" });
+  const models = (await graph()).board_models;
+  const a = models.find(model => model.code === "SCOPE_A"),
+    b = models.find(model => model.code === "SCOPE_B");
   const ga = await edit("signal_groups", {
       model_id: a.id,
       name: "A internal",

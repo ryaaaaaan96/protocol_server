@@ -40,9 +40,9 @@ const source = (await compile("../frontend/src/composables/usePointGrid.ts"))
   .replace('"../domain/pointGrid"', JSON.stringify(domain));
 const { usePointGrid } = await import(moduleUrl(source));
 const { parseClipboard } = await import(domain);
-const schema = JSON.parse(
+const definition = JSON.parse(
   await readFile(
-    new URL("../config/point-tables.json", import.meta.url),
+    new URL("../config/upm/UPM/process.json", import.meta.url),
     "utf8",
   ),
 );
@@ -71,7 +71,7 @@ const data = ref({
   kind: "process",
   revision: 1,
   rows: records,
-  definition: { ...schema.tables.process, fields: schema.fields },
+  definition,
   options: {
     groups: [{ id: 1, name: "本机", code: "LOCAL" }],
     data: [{ id: 10, name: "电压", data_type: "U16", default_value: "5" }],

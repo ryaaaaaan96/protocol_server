@@ -73,11 +73,8 @@ export function configuredBoardSheets(
   schema: PointSchema,
   code: string,
 ): Sheet[] {
-  const board = schema.workspace?.boards?.[code];
-  const keys =
-    board?.tables ??
-    schema.workspace?.default_tables ??
-    ["process", "collect", "forward"];
+  const board = schema.workspace.boards[code];
+  const keys = board?.tables ?? [];
   return keys.flatMap((key) => {
     const sheet = boardSheets.find((s) => (s.pointKind || s.key) === key);
     return sheet
@@ -87,7 +84,7 @@ export function configuredBoardSheets(
             label:
               board?.labels?.[key] ??
               (sheet.pointKind
-                ? schema.tables[sheet.pointKind].label
+                ? schema.boards[code][sheet.pointKind].label
                 : sheet.label),
           },
         ]
