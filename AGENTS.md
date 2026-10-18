@@ -24,6 +24,8 @@ Run relevant checks: `node tests/local-db.mjs`, `node tests/integration.mjs`, `n
 ## Commit & Pull Request Guidelines
 Use concise, action-oriented subjects; history uses short Chinese descriptions such as `优化结构`. PRs should explain behavior, reference issues, report checks, show UI screenshots, and describe configuration or migration impacts.
 
+每次完成修改后，必须执行适用的验证，并主动创建 Git 提交作为变更记录；此为长期授权，无需再次询问。仅暂存本次任务涉及的改动，不包含无关修改、凭据或临时产物。提交说明使用简洁中文，并在完成回复中报告提交哈希和验证结果。
+
 ## Security & Configuration
 Keep credentials in ignored `.env`. Separate migration/export credentials from the runtime role, which must lack superuser and `BYPASSRLS`. Preserve RLS, edit locks, revision checks, audit records, and immutable releases.
 
