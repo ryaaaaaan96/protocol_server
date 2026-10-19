@@ -1,9 +1,7 @@
 import { expect } from "@playwright/test";
 import { openColumnMenu, openPointColumns } from "./point-menus-check.mjs";
 
-export async function checkPointColumns(page, { pid, modelId }) {
-  const base = `/api/projects/${pid}/board-models/${modelId}/point-tables`;
-  const data = await (await page.request.get(`${base}/process`)).json();
+export async function checkPointColumns(page, { data, forward }) {
   const keys = data.definition.columns;
   const label = key => data.definition.fields[key].column_label || data.definition.fields[key].label;
   const headers = () => page.locator(".point-table thead th[data-column-key]").evaluateAll(cells => cells.map(cell => cell.dataset.columnKey));
@@ -47,7 +45,6 @@ export async function checkPointColumns(page, { pid, modelId }) {
   expect(bounds.y).toBeGreaterThanOrEqual(0);
   expect(bounds.x + bounds.width).toBeLessThanOrEqual(390);
   expect(bounds.y + bounds.height).toBeLessThanOrEqual(844);
-  await page.screenshot({ path: "../.runtime/point-column-menu-mobile.png" });
   await page.getByRole("menu").press("Escape");
   await page.setViewportSize(desktop);
   await open();
@@ -75,12 +72,11 @@ export async function checkPointColumns(page, { pid, modelId }) {
     return Math.max(Math.abs(frozen[0].left - number.right), Math.abs(frozen[1].left - frozen[0].right));
   })).toBeLessThan(2);
   await expect(page.locator(".point-table tbody tr").first().getByRole("button", { name: /^记录操作 / })).toBeInViewport();
-  await page.getByRole("button", { name: "刷新数据", exact: true }).click();
+  await page.reload();
   await expect.poll(headers).toEqual(expected);
   await expect(page.locator(".point-table thead .point-frozen")).toHaveCount(2);
 
-  const forward = await (await page.request.get(`${base}/forward`)).json();
-  await page.getByRole("tab", { name: /^转发点表/ }).click();
+  await page.getByRole("tab", { name: /^DSP UPP转发表/ }).click();
   await expect.poll(headers).toEqual(forward.definition.columns);
   await page.getByRole("tab", { name: /^DSP内部数据/ }).click();
   await expect.poll(headers).toEqual(expected);
@@ -98,6 +94,5 @@ export async function checkPointColumns(page, { pid, modelId }) {
   await expect.poll(headers).toEqual(keys);
   await expect(page.locator(".point-table thead .point-frozen")).toHaveCount(1);
   await scroll.evaluate(el => { el.scrollLeft = 0; });
-  expect((await (await page.request.get(`${base}/process`)).json()).revision).toBe(data.revision);
   console.log("PASS: header context menus on mouse/keyboard/mobile, hide/freeze/move/reset, complete column editor, frozen offsets, persistence and minimum visibility");
 }

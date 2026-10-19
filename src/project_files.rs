@@ -1,7 +1,5 @@
 //! Self-contained project folders. Loading never writes to the database.
-use crate::{
-    auth::User, db, error::AppError, importer, point_tables, project_config, topology_import,
-};
+use crate::{auth::User, db, error::AppError, point_tables, project_config};
 use anyhow::{Context, Result, anyhow, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -640,22 +638,9 @@ impl ProjectFiles {
                 json!({"filename":filename,"sha256":hash,"boards":["DSP"],"process_count":data.process.len(),"transmit_count":data.transmit.len(),"validation":report}),
             );
         }
-        let data = tokio::task::spawn_blocking(move || importer::parse(bytes))
-            .await
-            .map_err(|_| AppError::bad(format!("解析工作簿 {} 失败", path.display())))?
-            .map_err(|mut error| {
-                error.1 = format!("{}: {}", path.display(), error.1);
-                error
-            })?;
-        let report = topology_import::import(tx, pid, &data).await?;
-        let filename = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("points.xlsx");
-        sqlx::query("INSERT INTO imports(project_id,filename,sha256,report,created_by) VALUES($1,$2,$3,$4,$5)")
-            .bind(pid).bind(filename).bind(&hash).bind(&report).bind(user.id)
-            .execute(&mut **tx).await?;
-        Ok(json!({"filename":filename,"sha256":hash,"validation":report}))
+        Err(AppError::bad(
+            "工作簿导入仅支持 workbook_boards: [\"DSP\"]；其他板卡暂未启用点表",
+        ))
     }
 
     pub async fn create(&self, pool: &PgPool, key: &str) -> Result<()> {

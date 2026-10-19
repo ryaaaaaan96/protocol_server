@@ -8,14 +8,14 @@ const help = `点表 Excel 批量追加示例（Node.js 22+）
 先安装依赖：npm ci --prefix scripts/excel-batch
 
 生成空模板：node scripts/excel-batch/index.mjs --kind process --template points.xlsx
-查询引用：  node scripts/excel-batch/index.mjs --project 1 --model 2 --kind process --references refs.json
-校验预览：  node scripts/excel-batch/index.mjs --project 1 --model 2 --kind process --file points.xlsx
+查询引用：  node scripts/excel-batch/index.mjs --project 1 --board DSP --kind process --references refs.json
+校验预览：  node scripts/excel-batch/index.mjs --project 1 --board DSP --kind process --file points.xlsx
 正式提交：  上述校验预览命令追加 --commit
 
 --url         服务地址，默认 http://127.0.0.1:8080（也接受 /api 结尾）
 --sheet       工作表名，默认等于 --kind；仅处理该工作表
 --report      将预览/提交结果写入 JSON 文件（不会覆盖已有文件）
---kind        process（DSP 内部数据/处理点）、collect（采集）、forward（转发）
+--kind        process（DSP 内部数据）、forward（转发）
 
 登录：环境变量 PROTOCOL_USERNAME、PROTOCOL_PASSWORD，或 PROTOCOL_SESSION。
 预览不保存业务数据；--commit 会预览并提交一次，不自动重试、覆盖或拆批。
@@ -34,12 +34,12 @@ async function main() {
   const { values: args } = parseArgs({ options: {
     help: { type: "boolean", short: "h" }, commit: { type: "boolean" },
     url: { type: "string", default: "http://127.0.0.1:8080" },
-    project: { type: "string" }, model: { type: "string" }, kind: { type: "string", default: "process" },
+    project: { type: "string" }, board: { type: "string" }, kind: { type: "string", default: "process" },
     file: { type: "string" }, sheet: { type: "string" }, template: { type: "string" },
     references: { type: "string" }, report: { type: "string" },
   } });
   if (args.help) { console.log(help); return; }
-  if (!["process", "collect", "forward"].includes(args.kind)) throw new Error("kind 必须为 process、collect 或 forward");
+  if (!["process", "forward"].includes(args.kind)) throw new Error("kind 必须为 process 或 forward");
   if ([args.template, args.references, args.file].filter(Boolean).length !== 1) throw new Error("请指定且仅指定 --template、--references 或 --file 中的一项");
   if (args.commit && !args.file) throw new Error("--commit 必须与 --file 一起使用");
   if (args.report && !args.file) throw new Error("--report 必须与 --file 一起使用");
@@ -48,11 +48,12 @@ async function main() {
     console.log(`模板已生成：${args.template}；填写后先运行校验预览。`);
     return;
   }
-  const pid = positive(args.project, "project"), mid = positive(args.model, "model");
+  const pid = positive(args.project, "project"), board = args.board;
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(board || "")) throw new Error("board 必须为 project.json 中的板卡代码，例如 DSP");
   const server = new URL(args.url);
   if (!["http:", "https:"].includes(server.protocol) || server.username || server.password || server.search || server.hash) throw new Error("url 必须是不含账号、密码和查询参数的 HTTP(S) 服务地址");
   const base = server.href.replace(/\/$/, "").replace(/\/api$/, "") + "/api";
-  const tablePath = `/projects/${pid}/board-models/${mid}/point-tables/${args.kind}`;
+  const tablePath = `/projects/${pid}/boards/${encodeURIComponent(board)}/point-tables/${args.kind}`;
   const rows = args.file ? await readRows(args.file, args.kind, args.sheet || args.kind) : null;
   let cookie = "", loggedIn = false, reportHandle;
   let editLease = false, commitAttempted = false, commitResponded = false, heartbeat, leaseError;
@@ -101,8 +102,8 @@ async function main() {
     }
     const table = await api(tablePath);
     if (args.references) {
-      await writeFile(args.references, JSON.stringify({ project_id: pid, model_id: mid, kind: args.kind, revision: table.revision, options: table.options }, null, 2), { flag: "wx" });
-      console.log(`引用 ID 已导出：${args.references}（分组、数据定义、处理点、端点、上下文和协议字段）`);
+      await writeFile(args.references, JSON.stringify({ project_id: pid, board_key: board, kind: args.kind, revision: table.revision, options: table.options }, null, 2), { flag: "wx" });
+      console.log(`引用 ID 已导出：${args.references}（分组代码、内部点 ID 和端点代码）`);
       return;
     }
     await api(`/projects/${pid}/edit-lock/acquire`, "POST", {});
@@ -116,7 +117,7 @@ async function main() {
       if (reportHandle) await reportHandle.writeFile(JSON.stringify({ stage: "preview", ...preview }, null, 2));
       throw new Error(`批量校验未通过，业务数据未保存：\n${issues(preview)}`);
     }
-    console.log(`预览通过：项目 ${pid}，板卡 ${mid}，${args.kind}，新增 ${rows.length} 行；关联变化 ${preview.impact.count} 项。`);
+    console.log(`预览通过：项目 ${pid}，板卡 ${board}，${args.kind}，新增 ${rows.length} 行；关联变化 ${preview.impact.count} 项。`);
     for (const issue of preview.validation?.issues || []) {
       if (issue.level === "warning") console.log(`校验提示（含项目已有问题）：${issue.message}`);
     }

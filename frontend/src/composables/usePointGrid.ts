@@ -97,9 +97,7 @@ export function usePointGrid(options: Options) {
       !(
         ["min_value", "max_value"].includes(key) &&
         pointIsString(options.data.value!, values(row), row)
-      ) &&
-      // A numeric edit must not silently replace a public symbol's identity.
-      !(key === "sig_id" && values(row).sig_symbol)
+      )
     );
   }
   function text(row: Row, column: string) {
@@ -322,7 +320,7 @@ export function usePointGrid(options: Options) {
         next[key] = parseCell(options.scoped.value, key, input.value, next);
       if (options.data.value!.definition.fields[key].reference)
         reconcile(next, options.scoped.value);
-      if (["internal_type", "data_item_id"].includes(key))
+      if (key === "internal_type")
         clearStringBounds(next, row);
       setDraft(new Map([[row.id, next]]));
       editor.value = null;
@@ -716,10 +714,8 @@ export function usePointGrid(options: Options) {
         // Resolve parent relations first, then parse their dependent signal/field selections.
         const priority = (key: string) =>
           [
-            "context_id",
-            "endpoint_id",
-            "group_id",
-            "data_item_id",
+            "group_key",
+            "endpoint_key",
             "internal_type",
           ].includes(key)
             ? 0
@@ -732,7 +728,7 @@ export function usePointGrid(options: Options) {
             if (
               internal &&
               definition.reference &&
-              typeof original === "number"
+              (typeof original === "number" || typeof original === "string")
             ) {
               if (
                 !pointChoices(options.scoped.value!, key, next).some(
@@ -763,7 +759,7 @@ export function usePointGrid(options: Options) {
           reconcile(next, options.scoped.value!);
         if (
           updates.some((update) =>
-            ["internal_type", "data_item_id"].includes(update.key),
+            update.key === "internal_type",
           )
         )
           clearStringBounds(next, row);

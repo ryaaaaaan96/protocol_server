@@ -14,15 +14,12 @@ import { usePermissionContext } from "../composables/useProjectPermissions";
 import { allowsPoint, allowsScope } from "../domain/permissions";
 const props = defineProps<{
   pid: number;
-  modelId: number;
+  boardKey: string;
   data: PointTableData;
   row: Row | null;
   canWrite: boolean;
-  processEnabled: boolean;
-  groupId?: number;
   groupKey?: string;
-  signalId?: number;
-  contextId?: number;
+  processPointId?: number;
 }>();
 const emit = defineEmits<{ close: []; done: [merged?: boolean]; error: [message: string]; conflict: []; dirty: [value: boolean] }>();
 const def = props.data.definition;
@@ -41,26 +38,18 @@ for (const key of def.editor) {
             : ""));
 }
 if (!props.row) {
-  if (props.data.storage === "native") {
-    if (props.data.kind === "process") {
-      values.value.group_key = props.groupKey ?? props.data.options.native_groups?.[0]?.code ?? "LOCAL";
-    } else if (props.signalId != null) {
-      values.value.process_point_id = props.signalId;
-    }
-  } else if (props.data.kind === "process") {
-    values.value.group_id = props.groupId ?? props.data.options.groups[0]?.id ?? null;
-    values.value.process_enabled = props.processEnabled;
+  if (props.data.kind === "process") {
+    values.value.group_key = props.groupKey ?? props.data.options.native_groups?.[0]?.code ?? "LOCAL";
   } else {
-    values.value.endpoint_id =
-      choices("endpoint_id")[0]?.id ?? null;
-    values.value.context_id =
-      props.contextId ?? pointChoices(props.data, "context_id", values.value)[0]?.id ?? null;
-    if (props.signalId != null) values.value.signal_id = props.signalId;
+    if (props.processPointId != null) values.value.process_point_id = props.processPointId;
+    const endpoints = choices("endpoint_key");
+    if (!endpoints.some(endpoint => endpoint.id === values.value.endpoint_key))
+      values.value.endpoint_key = endpoints[0]?.id ?? null;
   }
 }
 const initial: Row = JSON.parse(JSON.stringify(values.value));
-const scopeAllowed = computed(() => allowsPoint(permissions.state.value, props.modelId, props.data.kind, props.data, props.row));
-const canSubmit = computed(() => props.canWrite && scopeAllowed.value && allowsPoint(permissions.state.value, props.modelId, props.data.kind, props.data, { edit_values: values.value }));
+const scopeAllowed = computed(() => allowsPoint(permissions.state.value, props.boardKey, props.data.kind, props.data, props.row));
+const canSubmit = computed(() => props.canWrite && scopeAllowed.value && allowsPoint(permissions.state.value, props.boardKey, props.data.kind, props.data, { edit_values: values.value }));
 const preview = ref<Row | null>(null),
   busy = ref(false),
   error = ref("");
@@ -74,19 +63,15 @@ function close() {
   emit("close");
 }
 function locked(key: string) {
-  return (key === "group_id" && props.groupId != null) ||
-    (key === "group_key" && props.groupKey != null) ||
-    (["signal_id", "process_point_id"].includes(key) && props.signalId != null);
+  return (key === "group_key" && props.groupKey != null) ||
+    (key === "process_point_id" && props.processPointId != null);
 }
-const inherited = computed(() =>
-  props.data.options.data?.find((d) => d.id === values.value.data_item_id),
-);
 const stringPoint = computed(() => pointIsString(props.data, values.value, props.row || undefined));
 const editorFields = computed(() => def.editor.filter(key => !stringPoint.value || !["min_value", "max_value"].includes(key)));
 function choices(key: string) {
   const options = pointChoices(props.data, key, values.value);
-  return key === "endpoint_id" && props.canWrite
-    ? options.filter(endpoint => allowsScope(permissions.state.value, { model_id: props.modelId, scope: "protocol", contract_id: endpoint.contract_id }))
+  return key === "endpoint_key" && props.canWrite
+    ? options.filter(endpoint => allowsScope(permissions.state.value, { board_key: props.boardKey, scope: "protocol", endpoint_key: endpoint.id }))
     : options;
 }
 function set(key: string, event: Event) {
@@ -112,7 +97,7 @@ function set(key: string, event: Event) {
         )
           values.value[k] = null;
   }
-  if (["internal_type", "data_item_id"].includes(key) && stringPoint.value) {
+  if (key === "internal_type" && stringPoint.value) {
     for (const bound of ["min_value", "max_value"])
       if (def.editor.includes(bound)) values.value[bound] = null;
   }
@@ -133,7 +118,7 @@ async function review(op = props.row ? "update" : "create") {
     if (op === "update" && !Object.keys(changed).length)
       throw new Error("请先修改需要调整的字段。");
     preview.value = await api(
-      `/projects/${props.pid}/board-models/${props.modelId}/point-tables/${props.data.kind}/preview`,
+      `/projects/${props.pid}/boards/${encodeURIComponent(props.boardKey)}/point-tables/${props.data.kind}/preview`,
       "POST",
       {
         revision: props.data.revision,
@@ -199,21 +184,7 @@ function delta(change: Row): string {
       <div class="modal-body">
         <p class="muted">{{ def.description }}</p>
         <p v-if="!scopeAllowed" class="notice">此记录不在你的板卡或协议编辑范围内，可以查看和复制。请联系管理员授权。</p>
-        <p v-else-if="permissions.state.value?.edit_scope === 'scoped'" class="notice">修改名称、sigID、类型或共享字段可能影响关联板卡和协议，保存时需要覆盖全部受影响范围的权限。</p>
-        <p v-if="data.kind === 'process' && values.group_id != null" class="notice">
-          使用此组的设备：{{ data.options.contexts.filter(c => c.group_id === values.group_id).map(c => `${c.name} [${c.dev_id}]`).join('、') || '暂无' }}。
-          点定义和范围修改会作用于这些设备。
-        </p>
-        <div
-          v-if="data.kind === 'process' && inherited"
-          class="notice point-inheritance"
-        >
-          继承默认值 {{ pointText(inherited.default_value) }}<template v-if="!stringPoint">，下限
-          {{ pointText(inherited.min_value) }}，上限
-          {{ pointText(inherited.max_value) }}</template>。
-          <template v-if="stringPoint">字符串没有数值上下限，长度由字节数管理。</template>
-          留空覆盖字段即可恢复继承；配置作用于复用此处理点的所有设备上下文。
-        </div>
+        <p v-else-if="permissions.state.value?.edit_scope === 'scoped'" class="notice">保存时会检查内部点与转发表的一致性，并校验本次修改的授权范围。</p>
         <div class="form-grid">
           <Field
             v-for="key in editorFields"
@@ -242,7 +213,7 @@ function delta(change: Row): string {
               @change="set(key, $event)"
             >
               <option v-if="def.fields[key].nullable" value="">
-                {{ data.storage === 'native' ? '未指定' : '跟随数据定义' }}
+                未指定
               </option>
               <option v-for="o in def.fields[key].options" :key="o" :value="o">
                 {{ o }}
@@ -259,6 +230,7 @@ function delta(change: Row): string {
             <input
               v-else
               :type="def.fields[key].type === 'number' ? 'number' : 'text'"
+              :step="def.fields[key].type === 'number' ? 'any' : undefined"
               :aria-label="def.fields[key].label"
               :value="values[key] ?? ''"
               :required="['name', 'enum_name'].includes(key)"
@@ -284,7 +256,6 @@ function delta(change: Row): string {
               preview.impact.affected_types.map((t: Row) => t.code).join("、")
             }}
           </p>
-          <p v-if="preview.impact.affected_contexts?.length">涉及设备：{{ preview.impact.affected_contexts.map((c: Row) => `${c.name} [${c.dev_id}]`).join('、') }}</p>
           <div class="impact-list">
             <article v-for="(c, i) in preview.impact.changes" :key="i">
               <strong>{{

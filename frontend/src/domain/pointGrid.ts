@@ -125,7 +125,7 @@ export function parseCell(
     if (label !== undefined) return label;
     const name = select(choices.filter((row) => row.name === trimmed));
     if (name !== undefined) return name;
-    if (data.storage === "native" && field.type !== "number") {
+    if (field.type !== "number") {
       const code = select(choices.filter((row) => String(row.id) === trimmed));
       if (code !== undefined) return code;
     }
@@ -180,175 +180,30 @@ export function displayCell(
     data.options[list]?.find((item) => item.id === values[key]);
   const projected = (record: Row | undefined, key: string) =>
     record && key in record ? pointText(record[key]) : PENDING;
-  const current = () =>
-    data.storage !== "native" && column === "upp_model" && row.protocol !== "UPP"
-      ? "—"
-      : pointText(row[column]);
+  const current = () => pointText(row[column]);
 
-  if (data.storage === "native") {
-    if (["min_value", "max_value"].includes(column) && pointIsString(data, values, row)) return "—";
-    if (data.kind === "process") {
-      if (column === "group_name" && changed("group_key"))
-        return projected(data.options.native_groups?.find(group => group.code === values.group_key), "name");
-      if (column === "data_type" && changed("internal_type")) return pointText(values.internal_type);
-      if (column === "resolved_sig_id" && changed("sig_id")) return pointText(values.sig_id);
-      if (column === "byte_length" && changed("internal_type", "element_count")) {
-        const widths: Record<string, number> = { U8: 1, U16: 2, S16: 2, U32: 4, S32: 4, F32: 4, STRING: 1 };
-        const width = widths[String(values.internal_type)];
-        const count = Number(values.element_count);
-        return width && Number.isSafeInteger(count) && count > 0 ? String(width * count) : PENDING;
-      }
-    } else {
-      const signalColumns: Record<string, string> = {
-        signal_name: "name", resolved_sig_id: "sig_id", enum_name: "enum_name",
-        data_type: "data_type", byte_length: "byte_length", unit: "unit",
-      };
-      if (signalColumns[column] && changed("process_point_id"))
-        return projected(related("signals", "process_point_id"), signalColumns[column]);
-    }
-    const key = fieldForColumn(data, column);
-    if (key && changed(key)) return pointText(values[key]);
-    if (data.definition.editor.includes(column) && changed(column)) return pointText(values[column]);
-    return current();
-  }
-
-  if (pointIsString(data, values, row)) {
-    if (["min_value", "max_value"].includes(column)) return "—";
-    if (column === "range_inherited") {
-      const inherited =
-        data.kind === "process"
-          ? values.default_value == null
-          : String(
-              related("signals", "signal_id")?.range_inherited ??
-                (!changed("signal_id") ? (row.range_inherited ?? "") : ""),
-            )
-              .split("、")
-              .includes("默认值");
-      return inherited ? "默认值" : "";
-    }
-  }
-
+  if (["min_value", "max_value"].includes(column) && pointIsString(data, values, row)) return "—";
   if (data.kind === "process") {
-    if (column === "group_name" && changed("group_id"))
-      return projected(related("groups", "group_id"), "name");
-    if (column === "resolved_sig_id" && changed("sig_id", "sig_symbol")) {
-      if (values.sig_id != null) return pointText(values.sig_id);
-      return values.sig_symbol ? `${values.sig_symbol}（待解析）` : "—";
+    if (column === "group_name" && changed("group_key"))
+      return projected(data.options.native_groups?.find(group => group.code === values.group_key), "name");
+    if (column === "data_type" && changed("internal_type")) return pointText(values.internal_type);
+    if (column === "resolved_sig_id" && changed("sig_id")) return pointText(values.sig_id);
+    if (column === "byte_length" && changed("internal_type", "element_count")) {
+      const widths: Record<string, number> = { U8: 1, U16: 2, S16: 2, U32: 4, S32: 4, F32: 4, STRING: 1 };
+      const width = widths[String(values.internal_type)];
+      const count = Number(values.element_count);
+      return width && Number.isSafeInteger(count) && count > 0 ? String(width * count) : PENDING;
     }
-    if (column === "data_type" && changed("internal_type", "data_item_id"))
-      return values.internal_type != null
-        ? pointText(values.internal_type)
-        : projected(related("data", "data_item_id"), "data_type");
-    if (
-      ["default_value", "min_value", "max_value"].includes(column) &&
-      changed(column, "data_item_id", "internal_type")
-    )
-      return values[column] != null
-        ? pointText(values[column])
-        : projected(related("data", "data_item_id"), column);
-    if (
-      ["byte_length", "unit", "notes", "source_sheet", "source_row"].includes(
-        column,
-      ) &&
-      changed("data_item_id")
-    )
-      return projected(related("data", "data_item_id"), column);
-    if (column === "contexts" && changed("group_id")) {
-      if (!related("groups", "group_id")) return PENDING;
-      return (data.options.contexts || [])
-        .filter((context) => context.group_id === values.group_id)
-        .sort((a, b) => a.dev_id - b.dev_id)
-        .map((context) => `${context.name} [${context.dev_id}]`)
-        .join("、");
-    }
-    if (
-      column === "range_inherited" &&
-      changed(
-        "default_value",
-        "min_value",
-        "max_value",
-        "internal_type",
-        "data_item_id",
-      )
-    )
-      return [
-        ["default_value", "默认值"],
-        ["min_value", "下限"],
-        ["max_value", "上限"],
-      ]
-        .filter(([key]) => values[key] == null)
-        .map(([, label]) => label)
-        .join("、");
   } else {
     const signalColumns: Record<string, string> = {
-      signal_name: "name",
-      resolved_sig_id: "sig_id",
-      data_type: "data_type",
-      byte_length: "byte_length",
-      enum_name: "enum_name",
-      unit: "unit",
-      default_value: "default_value",
-      min_value: "min_value",
-      max_value: "max_value",
-      process_enabled: "process_enabled",
+      signal_name: "name", resolved_sig_id: "sig_id", enum_name: "enum_name",
+      data_type: "data_type", byte_length: "byte_length", unit: "unit",
     };
-    if (signalColumns[column] && changed("signal_id"))
-      return projected(related("signals", "signal_id"), signalColumns[column]);
-    const contextColumns: Record<string, string> = {
-      context_name: "name",
-      context_code: "code",
-      dev_id: "dev_id",
-    };
-    if (contextColumns[column] && changed("context_id"))
-      return projected(
-        related("contexts", "context_id"),
-        contextColumns[column],
-      );
-    const endpointColumns: Record<string, string> = {
-      endpoint_name: "name",
-      transport: "transport",
-      port: "port",
-      role: "role",
-      enabled: "enabled",
-    };
-    if (endpointColumns[column] && changed("endpoint_id"))
-      return projected(
-        related("endpoints", "endpoint_id"),
-        endpointColumns[column],
-      );
-    const fieldColumns: Record<string, string> = {
-      field_name: "name",
-      protocol: "protocol",
-      upp_model: "model",
-      effective_address: "effective_address",
-      address_length: "address_length",
-      effective_type: "effective_type",
-      effective_length: "effective_length",
-      register_type: "register_type",
-      access: "access",
-      scale: "scale",
-      byte_order: "byte_order",
-      field_ordinal: "ordinal",
-      bank: "bank",
-    };
-    if (fieldColumns[column] && changed("field_id", "endpoint_id")) {
-      const field = related("fields", "field_id");
-      const endpoint = related("endpoints", "endpoint_id");
-      if (column === "field_name") return projected(field, "name");
-      if (!field || !endpoint || field.contract_id !== endpoint.contract_id)
-        return PENDING;
-      if (column === "upp_model" && field.protocol !== "UPP") return "—";
-      return projected(field, fieldColumns[column]);
-    }
+    if (signalColumns[column] && changed("process_point_id"))
+      return projected(related("process_points", "process_point_id"), signalColumns[column]);
   }
-  if (data.definition.editor.includes(column) && changed(column))
-    return pointText(values[column]);
   const key = fieldForColumn(data, column);
-  if (key && changed(key)) {
-    const reference = data.definition.fields[key].reference;
-    return reference
-      ? projected(related(reference, key), "name")
-      : pointText(values[key]);
-  }
+  if (key && changed(key)) return pointText(values[key]);
+  if (data.definition.editor.includes(column) && changed(column)) return pointText(values[column]);
   return current();
 }

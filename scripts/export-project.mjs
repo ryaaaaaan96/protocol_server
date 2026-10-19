@@ -8,13 +8,7 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const tables = [
-  "board_models", "boards", "data_items", "signal_groups", "signals",
-  "signal_ranges", "device_contexts", "protocol_contracts", "protocol_fields",
-  "endpoints", "signal_bindings", "board_links", "passthrough_routes",
-  "platform_signals", "source_records",
-  "process_points", "transmit_points",
-];
+const tables = ["process_points", "transmit_points"];
 
 function environment() {
   const filename = path.join(root, ".env");
@@ -178,13 +172,13 @@ export async function exportProject(key, destination, overrides = {}) {
     const { rows: projects } = await sourceDb.query("SELECT id,revision,schema_version,topology_config FROM projects WHERE config_key=$1", [key]);
     if (projects.length !== 1) throw new Error("数据库中未找到唯一的对应项目。");
     const project = projects[0];
-    if (project.schema_version !== 2) throw new Error("请先迁移项目数据库到 v2。");
+    if (project.schema_version !== 3) throw new Error("请先迁移项目数据库到 v3。");
     if (comparableTopology(manifest.topology) !== comparableTopology(project.topology_config)) {
       throw new Error("服务器 project.json 与已应用的项目拓扑不同，请先在网页检查并导入配置后再导出。");
     }
     const { rows: migrations } = await sourceDb.query("SELECT max(version)::int AS version FROM _sqlx_migrations WHERE success");
     const payload = {
-      format: "protocol-studio-project", version: 1, key, schema_version: 2,
+      format: "protocol-studio-project", version: 1, key, schema_version: 3,
       migration_version: migrations[0].version, source_revision: project.revision,
       tables: {},
     };

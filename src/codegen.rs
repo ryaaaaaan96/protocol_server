@@ -11,22 +11,6 @@ pub(crate) fn xml(s: &str) -> String {
         .replace('\n', "&#10;")
         .replace('\r', "")
 }
-pub(crate) fn c_string(s: &str) -> String {
-    let mut out = String::from("\"");
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c.is_ascii_control() => out.push_str(&format!("\\{:03o}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
 pub async fn generate(tx: &mut Transaction<'_, Postgres>, pid: i64) -> Result<Value> {
     let graph = crate::topology::snapshot(tx, pid, true).await?;
     let mut generated = crate::topology_codegen::generate(&graph)?;

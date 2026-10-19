@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "enabled": true,
+  "enabled": false,
   "label": "转发点表",
   "description": "将处理点提供给对外协议；同一处理点可关联多种协议和多个地址。",
   "columns": [

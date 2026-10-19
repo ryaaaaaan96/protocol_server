@@ -66,7 +66,7 @@ function scopeSummary(member: Row) {
   if (member.edit_scope !== "scoped") return "全部板卡与协议";
   const grants: Row[] = member.grants || [];
   if (!grants.length) return "未分配（只读）";
-  return `${new Set(grants.map((grant) => grant.model_id)).size} 类板卡 · ${grants.length} 项授权`;
+  return `${new Set(grants.map((grant) => grant.board_key)).size} 类板卡 · ${grants.length} 项授权`;
 }
 function configure(member: Row, adding = false) {
   if (!catalog.value || busy.value) return;

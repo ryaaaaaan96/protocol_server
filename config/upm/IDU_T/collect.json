@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "enabled": true,
+  "enabled": false,
   "label": "采集点表",
   "description": "将下游协议字段关联到本板处理点；切换设备或端点会重新检查引用。",
   "columns": [

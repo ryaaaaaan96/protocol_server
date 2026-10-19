@@ -4,7 +4,7 @@ import type { Row } from "../api";
 import { boardTypes, typeMounts } from "../domain/project";
 import Loading from "../components/Loading.vue";
 const props = defineProps<{ graph: Row | null }>();
-const emit = defineEmits<{ board: [id: number] }>();
+const emit = defineEmits<{ board: [key: string] }>();
 const types = computed(() => boardTypes(props.graph));
 const links = computed(() => (props.graph ? typeMounts(props.graph) : []));
 const nodeWidth = 230,
@@ -75,7 +75,7 @@ const layout = computed(() => {
           <h2>
             板卡通信拓扑 <span>{{ types.length }} 类板卡</span>
           </h2>
-          <p>点击板卡，查看对应的内部点表与协议配置。</p>
+          <p>点击板卡查看点表，项目组成与连接通过服务器 JSON 定义。</p>
         </div>
       </div>
       <div v-if="!graph.project_config" class="notice config-reminder">
@@ -159,9 +159,9 @@ const layout = computed(() => {
             role="button"
             tabindex="0"
             :aria-label="`查看 ${type.code} 板卡内部信息`"
-            @click="emit('board', type.id)"
-            @keydown.enter.prevent="emit('board', type.id)"
-            @keydown.space.prevent="emit('board', type.id)"
+            @click="emit('board', type.code)"
+            @keydown.enter.prevent="emit('board', type.code)"
+            @keydown.space.prevent="emit('board', type.code)"
           >
             <rect
               :x="type.x"

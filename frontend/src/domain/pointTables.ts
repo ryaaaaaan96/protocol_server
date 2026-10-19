@@ -1,6 +1,6 @@
 import type { Row } from "../api";
 
-export type PointKind = "process" | "collect" | "forward";
+export type PointKind = "process" | "forward";
 export type PointField = {
   label: string;
   column_label?: string;
@@ -31,6 +31,7 @@ export type PointSchema = {
 };
 export type PointTableData = {
   revision: number;
+  board_key: string;
   kind: PointKind;
   storage?: "native";
   definition: PointDefinition;
@@ -48,40 +49,14 @@ export function isStringType(value: unknown): boolean {
   return normalizedDataType(value) === "STRING";
 }
 
-/** Resolve the draft's effective internal type, respecting inherited definitions. */
-export function pointDataType(
-  data: PointTableData,
-  values: Row,
-  fallbackRow?: Row,
-): string | undefined {
+/** Resolve the internal type directly or through the selected process point. */
+export function pointDataType(data: PointTableData, values: Row, fallbackRow?: Row): string | undefined {
   const original = { ...fallbackRow, ...fallbackRow?.edit_values };
   const current = { ...original, ...values };
-  if (data.kind === "process") {
-    const override = normalizedDataType(current.internal_type);
-    if (override) return override;
-    const definition = data.options.data?.find(
-      (item) => item.id === current.data_item_id,
-    );
-    const inherited = normalizedDataType(definition?.data_type);
-    if (inherited) return inherited;
-    // An old snapshot is only safe while neither source of the type changed.
-    if (
-      current.data_item_id === original.data_item_id &&
-      normalizedDataType(current.internal_type) ===
-        normalizedDataType(original.internal_type)
-    )
-      return normalizedDataType(fallbackRow?.data_type);
-  } else {
-    const signalKey = data.storage === "native" ? "process_point_id" : "signal_id";
-    const signal = data.options.signals?.find(
-      (item) => item.id === current[signalKey],
-    );
-    const type = normalizedDataType(signal?.data_type);
-    if (type) return type;
-    if (current[signalKey] === original[signalKey])
-      return normalizedDataType(fallbackRow?.data_type);
-  }
-  return undefined;
+  if (data.kind === "process") return normalizedDataType(current.internal_type ?? current.data_type);
+  const signal = data.options.process_points?.find(item => item.id === current.process_point_id);
+  if (signal) return normalizedDataType(signal.internal_type ?? signal.data_type);
+  return current.process_point_id === original.process_point_id ? normalizedDataType(fallbackRow?.data_type) : undefined;
 }
 
 export function pointIsString(
@@ -90,16 +65,6 @@ export function pointIsString(
   fallbackRow?: Row,
 ): boolean {
   return isStringType(pointDataType(data, values, fallbackRow));
-}
-
-export function pointGroupLabel(group: Row): string {
-  const names: Record<string, string> = {
-    LOCAL: "LOCAL · 本机数据",
-    ARM_LOCAL: "LOCAL · 本机数据",
-    DSP_LOCAL: "LOCAL · DSP 内部数据",
-    DSP_PROXY: "DSP · 下级 DSP 数据",
-  };
-  return names[group.code] || `${group.code} · ${group.name}`;
 }
 
 // All relations refer to stable record IDs. Captions and sigID are display values.
@@ -111,27 +76,10 @@ export function pointChoices(
   const field = data.definition.fields[key];
   if (!field) return [];
   const all = data.options[field.reference || ""] || [];
-  if (data.storage === "native" && field.reference === "native_groups")
+  if (field.reference === "native_groups")
     return all.map(group => ({ ...group, id: group.code }));
-  if (key === "endpoint_id")
-    return all.filter(
-      (e) => e.role === (data.kind === "collect" ? "client" : "server"),
-    );
-  if (key === "context_id") return all.filter((c) => c.group_id != null);
-  if (key === "signal_id") {
-    const context = data.options.contexts.find(
-      (c) => c.id === values.context_id,
-    );
-    return context ? all.filter((s) => s.group_id === context.group_id) : [];
-  }
-  if (key === "field_id") {
-    const endpoint = data.options.endpoints.find(
-      (e) => e.id === values.endpoint_id,
-    );
-    return endpoint
-      ? all.filter((f) => f.contract_id === endpoint.contract_id)
-      : [];
-  }
+  if (field.reference === "endpoints")
+    return all.map(endpoint => ({ ...endpoint, id: endpoint.endpoint_key ?? endpoint.code }));
   return all;
 }
 export function choiceLabel(row: Row): string {

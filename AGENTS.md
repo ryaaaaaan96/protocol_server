@@ -19,7 +19,7 @@ Protocol Studio uses Rust, Vue 3, TypeScript, and PostgreSQL. Backend modules li
 Use Rust 2024, four-space indentation, `snake_case` functions, and `PascalCase` types; run `cargo fmt`. Frontend code uses two spaces, double-quoted imports, `camelCase`, and `PascalCase.vue` components with `<script setup lang="ts">`. Number migrations sequentially. No dedicated frontend lint or formatter script exists.
 
 ## Testing Guidelines
-Run relevant checks: `node tests/local-db.mjs`, `node tests/integration.mjs`, `node tests/migration.mjs`, and `python3 tests/compile-generated.py`. Database checks require local tools and `.env`, using temporary databases. Run `node browser-check.mjs` from `frontend/` for UI changes. Keep unit tests near Rust modules. No numerical coverage threshold exists; generated-C checks do not replace firmware validation.
+Run relevant checks: `node tests/local-db.mjs`, `node tests/integration.mjs`, `node tests/migration.mjs`, and `node --test scripts/excel-batch/workbook.test.mjs`. Database checks require local tools and `.env`, using temporary databases. Run `node browser-check.mjs` from `frontend/` for UI changes. Keep unit tests near Rust modules. No numerical coverage threshold exists; DSP JSON/XML generation does not replace firmware validation.
 
 ## Commit & Pull Request Guidelines
 Use concise, action-oriented subjects; history uses short Chinese descriptions such as `优化结构`. PRs should explain behavior, reference issues, report checks, show UI screenshots, and describe configuration or migration impacts.
@@ -30,4 +30,4 @@ Use concise, action-oriented subjects; history uses short Chinese descriptions s
 Keep credentials in ignored `.env`. Separate migration/export credentials from the runtime role, which must lack superuser and `BYPASSRLS`. Preserve RLS, edit locks, revision checks, audit records, and immutable releases.
 
 ## Project Configuration Workflow
-Edit topology through server files or validated folder imports; point rows remain web-editable. Definitions reload live, while database topology changes require import. Folder imports preserve points without Dump and replace project data with Dump. Keep project identity and applied topology snapshots in PostgreSQL. Maintain import recovery and project isolation; use one server per configuration directory.
+Edit topology through server files or validated folder imports; point rows remain web-editable. Definitions reload live; topology changes require validated import. Board/group/endpoint organization lives in JSON, with stable `board_key`/`group_key`/`endpoint_key` references. Only `process_points` and `transmit_points` hold current business rows; `point_history` records changes. Folder imports preserve points without Dump and replace project data with Dump. Keep project identity and applied topology snapshots in PostgreSQL. Maintain import recovery and project isolation; use one server per configuration directory.

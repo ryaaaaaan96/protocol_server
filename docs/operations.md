@@ -29,51 +29,42 @@
 
 本地模式的 `.runtime/pgdata/` 保存完整业务数据库，不能当缓存删除。`config/<项目名>/` 中的 JSON 保存项目定义，点表行、用户和权限保存在 PostgreSQL。单项目可通过下面的项目 Dump 迁移；完整工作空间恢复使用全库备份，恢复目标须为空库。
 
-## DSP 首次启用与 0014 升级
+## 0015 精简升级
 
-本次新增 `0014_dsp_point_tables.sql`，包含 `process_points`、`transmit_points` 和只追加的 `point_history`。代码构建和测试不会代替本地业务库初始化；此前删除了 `.runtime/pgdata/` 时，需要重新执行：
+本版迁移 `0015_json_topology.sql` 删除 17 张旧关系表及 9 个视图，最终保留 16 张表。当前业务数据仅为 `process_points` / `transmit_points`；`point_history` 保存修改前后记录。板卡、分组和端点改为 JSON 代码，不再依赖 SQL 模板 ID。
 
-```bash
-./scripts/init-db.sh
-./scripts/create-project.sh upm
-./scripts/dev.sh
-```
-
-当前 `config/upm/project.json` 顶层的 `"workbook_boards": ["DSP"]` 让创建命令仅导入 DSP：552 个内部点、445 条 UPP 转发记录，107 个内部点没有转发映射。DSP 的 `point_storage: "native"` 和 `point_groups` 放在 `topology.board_types` 对应项中；实际表格显示规则仍在 `DSP/process.json`、`DSP/transmit.json`。不创建 UPM 的新处理或采集记录，其他板卡的配置入口可以保留。
-
-已有本地数据库先停止 HTTP 服务，再启动数据库、应用迁移、重新启动应用：
+升级顺序：停止旧 HTTP 服务 → 全库备份并保存匹配配置目录 → 迁移 → 部署新前后端。
 
 ```bash
 node scripts/local-db.mjs start
+# 先按后文完成全库备份
 cargo run -- migrate
 ./scripts/dev.sh
 ```
 
-迁移只增加表结构，不自动替换已有点表，也不把旧 DSP 或 UPM 关系图转换为原生数据。重复执行 `create-project.sh` 保留现有项目。新旧程序需使用一致的迁移版本。
+迁移保留 DSP 点和历史的原 ID，也保留账号、成员、锁、审计和发布。旧授权转为板卡/端点代码，同一协议对应多个端点时展开授权；旧预览失效，项目 revision 增加 1，业务 schema_version 升至 3。
 
-已有项目如果还有 DSP 所属的旧 `signal_groups`、`device_contexts` 或端点 `signal_bindings`，直接应用 `point_storage: "native"` 会被拒绝。先备份并在旧模式下按依赖解除 DSP 端绑定、清理其旧内部点、上下文和分组，保留 UPM 点表、采集绑定及共享数据定义和协议字段；确认清理后再应用原生配置、通过 Excel 导入 DSP 两张表。含 `workbook` 的原生 DSP 清单必须同时填写 `"workbook_boards": ["DSP"]`。
+若旧 `data_items`、`signals`、绑定、实例等仍有数据，或旧组织配置不能安全转成 JSON，迁移会报错并整体回滚。需在旧版本中整理/迁移这些项目后再升级；不要手工删表绕过保护。该迁移不实现 UPM 点表转换。回退需恢复完整备份及匹配旧程序，不能仅回滚 Git 后继续使用精简后的数据库。
 
-也可明确导入已整理并校验的新格式项目 Dump，同时切换配置。该 Dump 必须包含需要保留的其他板卡数据，因为带 Dump 的文件夹导入会替换整个项目的业务数据。含旧 DSP 分组或绑定的 Dump 不会自动转换，而会被拒绝；不带 Dump 的配置导入也不会自动清理这些记录。
+新环境依次执行 `init-db.sh`、`create-project.sh upm`、`dev.sh`。DC-UPS 的 `workbook_boards: ["DSP"]` 仅导入 552 条内部点和 445 条 UPP 转发；UPM 侧采集尚未实现。未知 DSP sigID 保持空值。生成 JSON/XML 不替代固件编译验证。
 
-DSP 转发来源是工作簿 `UPM-DSP采集数据` sheet；本阶段它只作为 DSP 的 UPP 对外布局，UPM 采集端重构留待后续。内部 `F32` 到通信 `S32` 使用显式定点转换，数组按字节映射；不把 UPM 的信号编号写成 DSP sigID。未知 DSP sigID 保持空值，仍可编辑数据定义和导出 JSON/XML；这些导出不能视为经过 DSP 固件编译验证的 C 配置。
-
-验收时检查 DSP 两张表的数量、单元格或设置弹窗保存、批量操作、显示顺序、引用删除保护和修改历史。原生 DSP 行拖动不会改变 UPP 显式偏移。`point_history` 可在只读 SQL 工作台查询，按 `batch_id` 查看同一次保存的多条修改；失败校验不应增加成功修改记录。
+验收时检查两表数量、ID 与历史、分组/端点归属、编辑保存、批量、显示排序、权限和项目 Dump 往返。`node tests/migration.mjs` 在临时库检查保留数据、授权转换、失败回滚及重复迁移，不操作业务项目。
 
 ## 板卡点表配置部署
 
-每个项目都使用独立的 `config/<项目名>/` 目录。`project.json` 的 `topology.board_types[].directory` 指向该项目内的板卡目录；当前 UPM 项目直接包含 CSU、UPM、DSP、IDU_T、IDU_R 五个目录，每个目录有完整的 `process.json`、`collect.json`、`transmit.json`。目录名可与板卡类型代码不同，由清单明确关联；同类型板卡实例共用配置。
+每个项目都使用独立的 `config/<项目标识>/` 目录。DC-UPS 项目的稳定标识为 `upm`，配置位于 `config/upm/`。`project.json` 的 `topology.board_types[].directory` 指向该项目内的板卡目录；当前项目直接包含 CSU、UPM、DSP、IDU_T、IDU_R 五个目录，每个目录有完整的 `process.json`、`collect.json`、`transmit.json`。目录名可与板卡类型代码不同，由清单明确关联；同类型板卡实例共用配置。
 
-各表必须包含 `version: 1`、`enabled`、`label`、`description`、`columns`、`editor`、`ordering`、`inline` 和 `fields`。字段元数据直接保存在本表中，不读取公共默认或项目覆盖文件。空 `inline` 使单元格只读，`enabled: false` 隐藏入口；DSP 采集表当前隐藏。`project.json.workspace.boards` 为所有类型指定页签顺序和辅助表标题，转发表使用 `transmit` 标识。
+各表必须包含 `version: 1`、`enabled`、`label`、`description`、`columns`、`editor`、`ordering`、`inline` 和 `fields`。字段元数据直接保存在本表中，不读取公共默认或项目覆盖文件。空 `inline` 使单元格只读，`enabled: false` 隐藏入口；DSP 采集表当前隐藏。`project.json.workspace.boards` 为所有类型指定页签顺序，转发表使用 `transmit` 标识。
 
 迁移时复制完整项目目录，包括清单引用的来源文件；路径必须位于项目内。`PROJECT_CONFIG_DIR` 为这些项目目录的父目录，默认 `config`；更改这个环境变量需重启服务。目录内的项目、板卡及点表定义实时读取，刷新页面即可读取更新。配置缺失或格式错误会报告对应文件路径。
 
-单纯隐藏表格或调整列显示不需要数据库迁移，也不删除记录或改变成员权限；启用原生 DSP 存储需要先应用迁移 0014。`point_storage`、`point_groups` 属于已应用项目配置，修改后需要通过配置导入生效。
+单纯隐藏表格或调整列显示不需要数据库迁移，也不删除记录或改变成员权限；运行本版程序需要应用至迁移 0015。`point_storage`、`point_groups`、`point_endpoints` 属于已应用项目配置，修改后需要通过配置导入生效。
 
 ## 更新项目拓扑
 
 拓扑在服务器的 `config/<项目名>/project.json` 中维护，网页只读显示其 `topology` 内容。修改并保存文件后，在网页打开项目配置窗口，重新读取服务器文件，检查差异并导入；导入沿用项目全部编辑权限、编辑权、版本检查和审计。仅读取文件不会写入数据库。
 
-挂载数量、协议、板卡类型、目录和显示定义都会实时读取。新增类型先准备完整板卡目录，再检查导入；`workspace` 和单表显示定义刷新页面即可更新。数据库保留项目标识、板卡模板及 `projects.topology_config` 生效快照，文件内容经校验导入后才更新该快照。处理、采集、转发点表继续在网页编辑。
+挂载数量、协议、板卡类型、目录和显示定义都会实时读取。新增类型先准备完整板卡目录，再检查导入；`workspace` 和单表显示定义刷新页面即可更新。数据库保留项目标识及 `projects.topology_config` 生效快照，文件内容经校验导入后才更新该快照。DSP 内部点和转发表继续在网页编辑。
 
 ## 导出与导入项目文件夹
 
@@ -87,11 +78,11 @@ node scripts/export-project.mjs upm /tmp/project-export
 
 默认输出 `.runtime/exports/<时间>/upm/`，已有输出目录不会被覆盖。脚本读取 `.env`，需要 Node `pg` 驱动、`pg_dump`、`MIGRATION_DATABASE_URL` 及创建临时数据库的权限；源业务库只读。缺少驱动时执行 `npm install --prefix .runtime/db-tools pg`。客户端版本须兼容源数据库和归档版本，本地数据库默认 PostgreSQL 18。
 
-导出目录包含原配置和 `project.dump`，清单增加 `"dump": "project.dump"`。这是 `pg_dump -Fc` 生成的专用单项目归档，内部承载白名单业务表数据，包含新 DSP 的 `process_points`、`transmit_points`；它不包含账号、会话、成员授权、`point_history`、通用历史审计和发布包。普通全库 Dump 不能用于网页项目导入。归档记录的迁移版本必须与目标程序支持的版本一致；版本不同时先统一程序与数据库版本，再重新导出。未设置 `dump` 时也可识别项目根目录唯一的 `.dump` 文件；多个归档会被拒绝。
+导出目录包含原配置和 `project.dump`，清单增加 `"dump": "project.dump"`。这是 `pg_dump -Fc` 生成的专用单项目归档，内部承载白名单业务表数据，仅包含 DSP 的 `process_points`、`transmit_points`；它不包含账号、会话、成员授权、`point_history`、通用历史审计和发布包。普通全库 Dump 不能用于网页项目导入。归档记录的迁移版本必须与目标程序支持的版本一致；版本不同时先统一程序与数据库版本，再重新导出。未设置 `dump` 时也可识别项目根目录唯一的 `.dump` 文件；多个归档会被拒绝。
 
 目标服务器初始化数据库并启动应用后，管理员在「项目设置 → 导入项目文件夹」选择完整目录；无项目时可从空页面导入。预览会检查配置、关联和数据，确认后同 `key` 覆盖配置、新 `key` 建立项目：
 
-- **带 Dump**：替换该项目的点表、协议和映射；保留其他项目与已有账号、`point_history`、审计及发布历史，本次 DSP 替换也追加修改历史。
+- **带 Dump**：替换该项目的内部点和转发映射；保留其他项目与已有账号、`point_history`、审计及发布历史，本次 DSP 替换也追加修改历史。
 - **不带 Dump**：保留现有点表，新项目为空点表。即使文件夹包含 XLSX，也不会触发工作簿导入。需要仅导入配置时，移除 Dump 文件及清单中的 `dump` 引用。
 
 每次最多 512 个文件、64 MiB，预览 30 分钟有效。其他成员持有编辑权、项目版本或服务器文件已变化时，需要处理提示并重新预览。导入只调用 `pg_restore` 输出归档内容，由程序解析白名单数据并在项目事务内写入，不执行上传归档中的 SQL。服务账号需要项目根目录写权限；网页无需迁移管理员凭据。
@@ -136,12 +127,9 @@ pg_dump -h DB_HOST -U postgres -d protocol_studio -Fc -f protocol_studio.dump
 
 迁移到其他电脑时运行 `cargo fetch --locked` 准备锁定的 Rust 依赖（包括 `json-patch`），再构建。可先用 `scripts/check-env.sh` 查看缺少的工具、库与配置。点表排序和编辑通过重新导出的项目 Dump 或全库备份迁移。
 
-代码生成遵循参考工程接口，目标固件的宏、回调实现和 ABI 由目标工程提供。平台不会自动改写参考工程，也不会将生成文件直接覆盖进固件目录。
+当前只生成 DSP JSON/XML 和项目快照，旧关系图的 C 生成流程已移除。平台不会自动改写原工作簿或固件工程。
 
-## 旧版平面拓扑升级
 
-本节仅适用于原 `points/devices` 到旧版关系图的升级；原生 DSP 的迁移与启用步骤见前面的 0014 小节。
+## 可选容器部署
 
-从旧平面点表升级时，先停止旧 HTTP 进程，备份数据库，然后使用新二进制执行 `protocol-server migrate`，最后启动新服务。迁移保留旧 points/devices 档案，但旧 API 的写权限已撤回，因此不要继续运行旧后端。
-
-本地可先执行 `node tests/migration.mjs` 验证独立旧数据库升级。若提供本地 JSON 备份路径作为参数，测试会将其中旧业务数据装入临时数据库，验证真实数据迁移与重复执行；不会改写备份或现有项目。完整跨机器备份仍使用 pg_dump / pg_restore。
+Dockerfile 和 Compose 提供独立部署方式，容器构建需在目标环境验证。配置 `.env` 中的 `POSTGRES_PASSWORD`、`POSTGRES_APP_PASSWORD`、`ADMIN_PASSWORD` 后运行 `docker compose up --build -d`。默认监听本机 8080；内网部署可设置 `HTTP_BIND=0.0.0.0`，HTTPS 代理下设置 `COOKIE_SECURE=true`。不会自动创建业务项目。

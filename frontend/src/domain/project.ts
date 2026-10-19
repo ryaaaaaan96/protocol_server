@@ -4,19 +4,7 @@ import type { Row } from "../api";
 export function boardTypes(graph: Row | null): Row[] {
   if (!graph) return [];
   const config = graph.project_config;
-  if (!config)
-    return graph.board_models.map((m: Row) => ({
-      id: m.id,
-      model_id: m.id,
-      model_code: m.code,
-      code: m.code,
-      name: m.name,
-      kind: "type",
-      quantity:
-        graph.boards.filter((b: Row) => b.model_id === m.id).length || 1,
-      per_parent: 1,
-      parent: null,
-    }));
+  if (!config) return [];
   const counts: Record<string, number> = {
     [config.root.type]: config.root.quantity,
   };
@@ -25,12 +13,9 @@ export function boardTypes(graph: Row | null): Row[] {
       if (counts[edge.parent] != null)
         counts[edge.child] = counts[edge.parent] * edge.quantity;
   return config.board_types.map((t: Row) => {
-    const model = graph.board_models.find((m: Row) => m.code === t.model_code),
-      edge = config.mounts.find((e: Row) => e.child === t.code);
+    const edge = config.mounts.find((e: Row) => e.child === t.code);
     return {
       ...t,
-      id: model?.id,
-      model_id: model?.id,
       kind: "type",
       quantity: counts[t.code] || 0,
       per_parent: edge?.quantity || config.root.quantity,
@@ -52,16 +37,4 @@ export function typeMounts(graph: Row): Row[] {
         : []),
     total: types.find((t) => t.code === edge.child)?.quantity || 0,
   }));
-}
-export function typeConnections(graph: Row): Row[] {
-  return typeMounts(graph).flatMap((mount) => {
-    const connections = mount.connections.length
-      ? mount.connections
-      : [{ protocol: "待配置", transport: "待配置" }];
-    return connections.map((connection: Row, i: number) => ({
-      ...mount,
-      ...connection,
-      id: `${mount.id}:${i}`,
-    }));
-  });
 }

@@ -83,7 +83,7 @@ export async function checkProjectFolders({ client, engineer, viewer, engineerId
     ok(result.status === 200, `Folder commit: ${JSON.stringify(result)}`);
     return result.data;
   };
-  const untouched = (await client.call("/projects")).find(project => project.config_key === "upm");
+  const untouched = (await client.call("/projects")).find(project => ["dsp_native","cli"].includes(project.config_key));
   const unrelatedBefore = JSON.stringify(await client.call(`/projects/${untouched.id}/topology`));
   const projectsBefore = JSON.stringify(await client.call("/projects"));
   equal((await preview(new Map(), makeClient())).status, 401);
@@ -102,27 +102,22 @@ export async function checkProjectFolders({ client, engineer, viewer, engineerId
   equal((await commit(initial.token)).status, 400);
   const url = `/projects/${created.project_id}`;
   const graph = () => client.call(`${url}/topology`);
-  equal((await graph()).signals.length, 0);
-  equal((await graph()).data_items.length, 0);
+  equal((await graph()).process_points.length, 0);
+  equal((await graph()).transmit_points.length, 0);
   equal((await client.call("/project-templates")).some(project => project.key === key), true);
   const edit = async (entity, values, id = null) => {
-    const prepared = await client.call(`${url}/changes/preview`, "POST", { revision: (await graph()).revision, entity, values, id, operation: id ? "update" : "create" });
+    const prepared = await client.call(`${url}/changes/preview`, "POST", { revision: (await graph()).revision, entity, values: {board_key:"DSP",fields:values}, id, operation: id ? "update" : "create" });
     ok(prepared.allowed, JSON.stringify(prepared.errors));
     return (await client.call(`${url}/changes/${prepared.id}/commit`, "POST", {})).record;
   };
-  const model = (await graph()).board_models.find(model => model.code === "DSP");
-  const group = await edit("signal_groups", { model_id: model.id, name: "Local DSP", code: "LOCAL" });
-  const item = await edit("data_items", { name: "Portable voltage", data_type: "U16", byte_length: 2, unit: "V", notes: "Round trip: 中文\tnewline\n\\slash" });
-  const signal = await edit("signals", { group_id: group.id, data_item_id: item.id, name: "Portable signal", enum_name: "PORTABLE_VOLTAGE", sig_id: 1 });
-  await edit("signal_ranges", { signal_id: signal.id, min_value: "0", max_value: "100", default_value: "3", boot_restore: true });
-  const context = await edit("device_contexts", { model_id: model.id, group_id: group.id, name: "Local DSP", code: "LOCAL", dev_id: 1, kind: "local" });
-  const contract = await edit("protocol_contracts", { name: "Portable UPP", code: "PORTABLE_UPP", protocol: "UPP" });
-  const field = await edit("protocol_fields", { contract_id: contract.id, data_item_id: item.id, name: "Voltage field", ordinal: 0, model: 9 });
-  const endpoint = await edit("endpoints", { model_id: model.id, contract_id: contract.id, name: "Portable server", code: "PORTABLE_SERVER", role: "server", transport: "CAN", port: "CAN_PORT1" });
-  await edit("signal_bindings", { endpoint_id: endpoint.id, context_id: context.id, signal_id: signal.id, field_id: field.id });
+  const signal = await edit("process_points", {name:"Portable signal",enum_name:"PORTABLE_VOLTAGE",sig_id:1,
+    group_key:"LOCAL",internal_type:"U16",element_count:1,byte_length:2,unit:"V",notes:"Round trip: 中文\tnewline\n\\slash",
+    min_value:"0",max_value:"100",default_value:"3",boot_restore:true});
+  await edit("transmit_points", {process_point_id:signal.id,endpoint_key:"UPP_SERVICE",name:"Voltage field",
+    upp_model:9,address:6,wire_type:"U16",wire_length:2,scale:1,access:"RO",byte_order:0,conversion:"identity",enabled:true});
   await client.call(`${url}/members`, "PUT", { user_id: engineerId, role: "engineer", edit_scope: "scoped", grants: [
-    { model_id: model.id, scope: "internal", contract_id: null },
-    { model_id: model.id, scope: "protocol", contract_id: contract.id },
+    { board_key: "DSP", scope: "internal" },
+    { board_key: "DSP", scope: "protocol", endpoint_key: "UPP_SERVICE" },
   ] });
   await client.call(`${url}/members`, "PUT", { user_id: viewerId, role: "viewer" });
   const release = await client.call(`${url}/releases`, "POST", { revision: (await graph()).revision, name: "Before folder replacement" });
@@ -136,7 +131,7 @@ export async function checkProjectFolders({ client, engineer, viewer, engineerId
     manifest.description = "Folder config changed without data replacement";
     manifest.topology.board_types.push({ code: "EXTRA", model_code: "EXTRA", name: "Added board", directory: "ExtraBoard" });
     manifest.topology.mounts.push({ parent: manifest.topology.root.type, child: "EXTRA", quantity: 1, connections: [] });
-    manifest.workspace.boards.EXTRA = { tables: ["process", "collect", "transmit"] };
+    manifest.workspace.boards.EXTRA = { tables: [] };
   });
   for (const kind of ["process", "collect", "transmit"]) files.set(`ExtraBoard/${kind}.json`, files.get(`UPM/${kind}.json`));
   json(files, "DSP/process.json", table => { table.label = "Imported DSP data"; table.fields.name.label = "Imported name"; });
@@ -159,9 +154,9 @@ export async function checkProjectFolders({ client, engineer, viewer, engineerId
   equal(installed.project_id, created.project_id);
   equal(fs.existsSync(path.join(directory, "obsolete.txt")), false);
   const after = await graph();
-  equal(JSON.stringify(after.signals), JSON.stringify(before.signals));
-  equal(JSON.stringify(after.data_items), JSON.stringify(before.data_items));
-  equal(after.board_models.some(model => model.code === "EXTRA"), true);
+  equal(JSON.stringify(after.process_points), JSON.stringify(before.process_points));
+  equal(JSON.stringify(after.transmit_points), JSON.stringify(before.transmit_points));
+  equal(after.project_config.board_types.some(board => board.code === "EXTRA"), true);
   const schema = await client.call(`${url}/point-tables/schema`);
   equal(schema.boards.DSP.process.label, "Imported DSP data");
   equal(schema.boards.DSP.process.fields.name.label, "Imported name");
@@ -179,7 +174,7 @@ export async function checkProjectFolders({ client, engineer, viewer, engineerId
   equal((await graph()).revision, after.revision);
   equal(JSON.parse(fs.readFileSync(sshTable)).label, "SSH changed label");
   const staleData = await checked();
-  await edit("signals", { name: "Concurrent saved signal" }, signal.id);
+  await edit("process_points", { name: "Concurrent saved signal" }, signal.id);
   const afterConcurrent = await graph(), afterConcurrentFiles = fingerprint(directory);
   equal((await commit(staleData.token)).status, 409);
   equal(JSON.stringify(await graph()), JSON.stringify(afterConcurrent));
@@ -216,37 +211,34 @@ export async function checkProjectFolders({ client, engineer, viewer, engineerId
     equal(fs.readFileSync(archive).subarray(0, 5).toString(), "PGDMP");
     const dumpFiles = folderFiles(exported.directory);
     const exportedGraph = await graph();
-    await edit("signals", { name: "Must be replaced by Dump" }, signal.id);
-    await edit("signals", { group_id: group.id, data_item_id: item.id, name: "New after export", enum_name: "NEW_AFTER_EXPORT", sig_id: 2 });
+    await edit("process_points", { name: "Must be replaced by Dump" }, signal.id);
+    await edit("process_points", { name: "New after export", enum_name: "NEW_AFTER_EXPORT", sig_id: 2 });
     const mutated = await graph(), members = await client.call(`${url}/members`);
     const history = await client.call(`${url}/audit`), filesBeforeDump = fingerprint(directory);
     const dumpPreview = await checked(dumpFiles);
     equal(dumpPreview.replace_data, true);
-    equal(dumpPreview.summary.signal_count, exportedGraph.signals.length);
+    equal(dumpPreview.summary.signal_count, exportedGraph.process_points.length);
     equal(JSON.stringify(await graph()), JSON.stringify(mutated));
     equal(fingerprint(directory), filesBeforeDump);
     const restored = await saved(dumpPreview.token);
     equal(restored.replace_data, true);
     equal(restored.revision, mutated.revision + 1);
     const restoredGraph = await graph();
-    equal(restoredGraph.signals.length, exportedGraph.signals.length);
-    equal(restoredGraph.signals[0].name, exportedGraph.signals[0].name);
-    ok(restoredGraph.signals[0].id !== exportedGraph.signals[0].id);
-    equal(restoredGraph.data_items[0].notes, exportedGraph.data_items[0].notes);
-    equal(restoredGraph.signals[0].group_id, restoredGraph.signal_groups[0].id);
-    equal(restoredGraph.signals[0].data_item_id, restoredGraph.data_items[0].id);
-    equal(restoredGraph.signal_ranges[0].signal_id, restoredGraph.signals[0].id);
-    equal(restoredGraph.signal_bindings[0].signal_id, restoredGraph.signals[0].id);
-    equal(restoredGraph.signal_bindings[0].field_id, restoredGraph.protocol_fields[0].id);
-    equal(restoredGraph.device_contexts[0].group_id, restoredGraph.signal_groups[0].id);
-    equal(restoredGraph.endpoints[0].contract_id, restoredGraph.protocol_contracts[0].id);
+    equal(restoredGraph.process_points.length, exportedGraph.process_points.length);
+    equal(restoredGraph.process_points[0].name, exportedGraph.process_points[0].name);
+    ok(restoredGraph.process_points[0].id !== exportedGraph.process_points[0].id);
+    equal(restoredGraph.process_points[0].notes, exportedGraph.process_points[0].notes);
+    equal(restoredGraph.process_points[0].group_key,"LOCAL");
+    equal(restoredGraph.process_points[0].default_value,"3");
+    equal(restoredGraph.transmit_points[0].process_point_id,restoredGraph.process_points[0].id);
+    equal(restoredGraph.transmit_points[0].endpoint_key,"UPP_SERVICE");
     const restoredMembers = await client.call(`${url}/members`);
     equal(restoredMembers.length, members.length);
     const scoped = restoredMembers.find(member => member.id === engineerId);
     equal(scoped.edit_scope, "scoped");
     equal(scoped.grants.length, 2);
-    equal(scoped.grants.every(grant => grant.model_id === restoredGraph.board_models.find(model => model.code === "DSP").id), true);
-    equal(scoped.grants.find(grant => grant.scope === "protocol").contract_id, restoredGraph.protocol_contracts[0].id);
+    equal(scoped.grants.every(grant => grant.board_key === "DSP"), true);
+    equal(scoped.grants.find(grant => grant.scope === "protocol").endpoint_key, "UPP_SERVICE");
     equal(JSON.stringify(await client.call(`${url}/releases`)), releasesBefore);
     const restoredAudit = await client.call(`${url}/audit`);
     equal(restoredAudit.length, history.length + 1);
@@ -274,5 +266,5 @@ export async function checkProjectFolders({ client, engineer, viewer, engineerId
   } finally {
     fs.rmSync(exportParent, { recursive: true, force: true });
   }
-  console.log("PASS: folder create/replace, preview rollback, no-Dump preservation, live config, file/revision/lease conflicts, native Dump restore, ID/grant remapping and project isolation");
+  console.log("PASS: folder create/replace, preview rollback, no-Dump preservation, live config, file/revision/lease conflicts, native Dump restore, ID remapping and stable grants and project isolation");
 }

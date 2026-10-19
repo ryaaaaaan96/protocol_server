@@ -41,7 +41,7 @@ const rows = computed(
               : "当前数据通过阻断性检查"
           }}
         </h3>
-        <p>检查 ID 映射、C 枚举、UPP 区间、Modbus 地址、类型长度与取值范围。</p>
+        <p>检查内部点关联、枚举、UPP 地址区间、类型转换、长度与取值范围。</p>
       </div>
       <button class="button" @click="$emit('refresh')">
         <RefreshCw :size="16" />重新校验
@@ -85,7 +85,7 @@ const rows = computed(
             <div>
               <strong>{{ r.name }}</strong
               ><Badge
-                :tone="r.entity === 'protocol_fields' ? 'blue' : 'teal'"
+                :tone="r.entity === 'transmit_points' ? 'blue' : 'teal'"
                 >{{ r.entity }}</Badge
               ><code>{{ r.code }}</code>
             </div>

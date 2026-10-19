@@ -21,23 +21,22 @@ const point = {
 };
 const alternate = { ...point, id: 2, name: "设备名称", enum_name: "DEVICE_NAME", sig_id: 4098, data_type: "STRING", internal_type: "STRING", element_count: 32, byte_length: 32 };
 const boardGraph = {
-  board_models: [{ id: 7, code: "DSP_FIRMWARE" }, { id: 8, code: "UPM_ARM" }],
   project_config: { board_types: [
-    { code: "DSP", model_code: "DSP_FIRMWARE", point_storage: "native" },
-    { code: "UPM", model_code: "UPM_ARM" },
+    { code: "DSP", point_storage: "native" },
+    { code: "UPM" },
   ] },
 };
-const dspBoard = { id: 12, model_id: 7, code: "DSP_INSTANCE_1" }, upmBoard = { id: 13, model_id: 8, code: "UPM" };
+const dspBoard = { code: "DSP" }, upmBoard = { code: "UPM" };
 for (const entity of ["process_points", "transmit_points"]) {
   assert.equal(belongsToBoard(boardGraph, dspBoard, entity, point), true);
   assert.equal(belongsToBoard(boardGraph, upmBoard, entity, point), false);
-  assert.equal(belongsToBoard(boardGraph, { model_id: 99 }, entity, point), false);
+  assert.equal(belongsToBoard(boardGraph, { code: "MISSING" }, entity, point), false);
   assert.equal(belongsToBoard({ ...boardGraph, project_config: null }, dspBoard, entity, point), false);
   assert.deepEqual(scopedRows(boardGraph, dspBoard, entity, [point, { ...alternate, board_key: "UPM" }]), [point]);
   assert.deepEqual(scopedRows(boardGraph, upmBoard, entity, [point]), []);
 }
-const options = { native_groups: [{ code: "LOCAL", name: "本机数据" }], signals: [point, alternate], groups: [], contexts: [], data: [], fields: [], endpoints: [] };
-const process = { storage: "native", kind: "process", definition: processDefinition, options, rows: [], revision: 1 };
+const options = { native_groups: [{ code: "LOCAL", name: "本机数据" }], process_points: [point, alternate], endpoints: [{ code: "UPP_SERVICE", name: "UPP 对外接口", protocol: "UPP" }] };
+const process = { storage: "native", board_key: "DSP", kind: "process", definition: processDefinition, options, rows: [], revision: 1 };
 const processRow = { ...point, group_name: "本机数据", resolved_sig_id: point.sig_id, edit_values: { ...point } };
 assert.deepEqual(pointChoices(process, "group_key", {}).map(group => group.id), ["LOCAL"]);
 assert.equal(parseCell(process, "group_key", "LOCAL", point), "LOCAL");
@@ -66,12 +65,16 @@ assert.equal(displayCell(forward, forwardRow, "signal_name", { process_point_id:
 assert.equal(displayCell(forward, forwardRow, "enum_name", { process_point_id: 2 }), "DEVICE_NAME");
 assert.equal(displayCell(forward, forwardRow, "data_type", { process_point_id: 2 }), "STRING");
 assert.equal(displayCell(forward, forwardRow, "byte_length", { process_point_id: 2 }), "32");
-const permissions = { role: "engineer", can_edit: true, can_manage_project: false, edit_scope: "scoped", grants: [{ model_id: 7, scope: "internal" }], catalog: [] };
-assert.equal(allowsPoint(permissions, 7, "process", process, processRow), true);
-assert.equal(allowsPoint(permissions, 7, "forward", forward, forwardRow), false);
-assert.equal(allowsPoint({ ...permissions, grants: [{ model_id: 7, scope: "board" }] }, 7, "forward", forward, forwardRow), true);
-assert.equal(allowsPoint({ ...permissions, can_edit: false }, 7, "process", process, processRow), false);
-assert.equal(allowsPoint({ ...permissions, grants: [{ model_id: 7, scope: "protocol", contract_id: 9 }] }, 7, "forward", {
-  ...forward, options: { ...options, endpoints: [{ id: 3, role: "server", contract_id: 9 }] },
-}, forwardRow), true);
+const permissions = { role: "engineer", can_edit: true, can_manage_project: false, edit_scope: "scoped", grants: [{ board_key: "DSP", scope: "internal" }], catalog: [] };
+assert.equal(allowsPoint(permissions, "DSP", "process", process, processRow), true);
+assert.equal(allowsPoint(permissions, "DSP", "forward", forward, forwardRow), false);
+assert.equal(allowsPoint({ ...permissions, grants: [{ board_key: "DSP", scope: "board" }] }, "DSP", "forward", forward, forwardRow), true);
+assert.equal(allowsPoint({ ...permissions, can_edit: false }, "DSP", "process", process, processRow), false);
+const protocolPermissions = { ...permissions, grants: [{ board_key: "DSP", scope: "protocol", endpoint_key: "UPP_SERVICE" }] };
+assert.equal(allowsPoint(protocolPermissions, "DSP", "forward", forward, forwardRow), true);
+assert.equal(allowsPoint(protocolPermissions, "DSP", "forward", forward), true);
+assert.equal(allowsPoint(protocolPermissions, "DSP", "forward", forward, { ...forwardRow, edit_values: { ...mapping, endpoint_key: "OTHER" } }), false);
+assert.equal(allowsPoint(protocolPermissions, "UPM", "forward", forward, forwardRow), false);
+assert.equal(allowsPoint(protocolPermissions, "DSP", "process", process, processRow), false);
+assert.deepEqual(pointChoices(forward, "endpoint_key", {}).map(endpoint => endpoint.id), ["UPP_SERVICE"]);
 console.log("PASS: native DSP references, draft projection, nullable values, fractional scale, numeric choices and scoped permissions");

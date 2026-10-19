@@ -243,8 +243,8 @@ async fn apply(
     }
     Ok((
         pid,
-        json!({"point_count":topology::rows(&after,"data_items").len()+topology::rows(&after,"process_points").len(),
-        "signal_count":topology::rows(&after,"signals").len()+topology::rows(&after,"process_points").len(),
+        json!({"point_count":topology::rows(&after,"process_points").len(),
+        "signal_count":topology::rows(&after,"process_points").len(),
         "transmit_count":topology::rows(&after,"transmit_points").len(),"validation":report,"restored":restored}),
     ))
 }

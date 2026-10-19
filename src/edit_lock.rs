@@ -17,7 +17,7 @@ const LEASE_SECONDS: i64 = 120;
 
 async fn status(tx: &mut Transaction<'_, Postgres>, pid: i64, uid: i64) -> Result<Value> {
     let lease: Option<Value> = sqlx::query_scalar(
-        "SELECT jsonb_build_object('owner',jsonb_build_object('id',u.id,'display_name',u.display_name,'username',u.username),'expires_at',l.expires_at) FROM project_edit_locks l JOIN users u ON u.id=l.user_id WHERE l.project_id=$1 AND l.expires_at>clock_timestamp() AND u.active AND (u.is_admin OR EXISTS(SELECT 1 FROM project_members m WHERE m.project_id=l.project_id AND m.user_id=u.id AND m.role='engineer' AND (m.edit_scope='all' OR EXISTS(SELECT 1 FROM project_member_grants g WHERE g.project_id=m.project_id AND g.user_id=m.user_id AND (g.scope<>'protocol' OR EXISTS(SELECT 1 FROM endpoints e WHERE e.project_id=g.project_id AND e.model_id=g.model_id AND e.contract_id=g.contract_id))))))"
+        "SELECT jsonb_build_object('owner',jsonb_build_object('id',u.id,'display_name',u.display_name,'username',u.username),'expires_at',l.expires_at) FROM project_edit_locks l JOIN users u ON u.id=l.user_id WHERE l.project_id=$1 AND l.expires_at>clock_timestamp() AND u.active AND (u.is_admin OR EXISTS(SELECT 1 FROM project_members m WHERE m.project_id=l.project_id AND m.user_id=u.id AND m.role='engineer' AND (m.edit_scope='all' OR EXISTS(SELECT 1 FROM project_member_grants g WHERE g.project_id=m.project_id AND g.user_id=m.user_id ))))"
     ).bind(pid).fetch_optional(&mut **tx).await?;
     let lease = lease.unwrap_or(Value::Null);
     let mut permissions = crate::permissions::load(tx, pid).await?.value(&json!({}));

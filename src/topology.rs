@@ -3,7 +3,6 @@ use crate::{
     auth::User,
     db,
     error::{AppError, Result},
-    model,
 };
 use axum::{
     Json,
@@ -14,63 +13,7 @@ use serde_json::{Value, json};
 use sqlx::{Acquire, Postgres, Transaction};
 use std::collections::BTreeSet;
 
-pub const TABLES: &[&str] = &[
-    "board_models",
-    "boards",
-    "data_items",
-    "signal_groups",
-    "signals",
-    "signal_ranges",
-    "device_contexts",
-    "protocol_contracts",
-    "protocol_fields",
-    "endpoints",
-    "signal_bindings",
-    "board_links",
-    "passthrough_routes",
-    "platform_signals",
-    "source_records",
-    "process_points",
-    "transmit_points",
-];
-pub const VIEWS: &[&str] = &[
-    "v_signals",
-    "v_protocol_fields",
-    "v_bindings",
-    "v_passthrough_fields",
-    "v_topology_links",
-];
-pub fn columns(entity: &str) -> Option<&'static str> {
-    Some(match entity {
-        "board_models" => "name,code,description,firmware_profile",
-        "boards" => "name,code,model_id",
-        "data_items" => "name,data_type,byte_length,unit,default_value,min_value,max_value,notes",
-        "signal_groups" => "model_id,name,code",
-        "signals" => {
-            "group_id,data_item_id,name,enum_name,sig_id,sig_symbol,flags,callback,process_enabled,internal_type"
-        }
-        "signal_ranges" => {
-            "signal_id,default_value,min_value,max_value,boot_restore,manual_restore"
-        }
-        "device_contexts" => "model_id,group_id,name,code,dev_id,kind",
-        "protocol_contracts" => "name,code,protocol,description",
-        "protocol_fields" => {
-            "contract_id,data_item_id,name,ordinal,access,address_mode,address,model,register_type,wire_type,wire_length,scale,byte_order"
-        }
-        "endpoints" => "model_id,contract_id,name,code,role,transport,port,enabled",
-        "signal_bindings" => {
-            "endpoint_id,context_id,field_id,signal_id,poll_interval,set_priority,scan_priority"
-        }
-        "board_links" => {
-            "name,client_board_id,client_endpoint_id,client_context_id,server_board_id,server_endpoint_id,remote_address,dev_code"
-        }
-        "passthrough_routes" => {
-            "name,server_endpoint_id,client_endpoint_id,context_id,base_address,end_address,register_type,writable,callback"
-        }
-        "platform_signals" => "symbol,signal_id",
-        _ => return None,
-    })
-}
+pub const TABLES: &[&str] = &["process_points", "transmit_points"];
 pub fn rows<'a>(g: &'a Value, k: &str) -> &'a [Value] {
     g[k].as_array().map(Vec::as_slice).unwrap_or(&[])
 }
@@ -86,87 +29,29 @@ pub fn find<'a>(g: &'a Value, t: &str, id: i64) -> Option<&'a Value> {
 pub async fn snapshot(
     tx: &mut Transaction<'_, Postgres>,
     pid: i64,
-    computed: bool,
+    _computed: bool,
 ) -> Result<Value> {
-    let config: Option<Value> =
-        sqlx::query_scalar("SELECT topology_config FROM projects WHERE id=$1")
-            .bind(pid)
-            .fetch_one(&mut **tx)
-            .await?;
-    let mut g = json!({"schema_version":2,"project_config":config});
-    for &t in TABLES
-        .iter()
-        .chain(if computed { VIEWS.iter() } else { [].iter() })
-    {
-        g[t] = json!(
+    let project: Value = sqlx::query_scalar("SELECT jsonb_build_object('project_config',topology_config,'revision',revision,'schema_version',schema_version) FROM projects WHERE id=$1")
+        .bind(pid).fetch_one(&mut **tx).await?;
+    let mut graph = project;
+    for table in TABLES {
+        graph[*table] = json!(
             db::all_json(
                 tx,
-                &format!(
-                    "SELECT to_jsonb(t) FROM {t} t WHERE project_id=$1 ORDER BY {}",
-                    if t == "v_passthrough_fields" {
-                        "route_id,register_address"
-                    } else {
-                        "id"
-                    }
-                ),
+                &format!("SELECT to_jsonb(t) FROM {table} t WHERE project_id=$1 ORDER BY id"),
                 pid
             )
             .await?
         );
-        let source = match t {
-            "v_signals" => Some("signals"),
-            "v_bindings" => Some("signal_bindings"),
-            _ => None,
-        };
-        if let Some(source) = source {
-            let positions: std::collections::BTreeMap<_, _> = rows(&g, source)
-                .iter()
-                .map(|r| (num(r, "id"), r["display_order"].clone()))
-                .collect();
-            for row in g[t].as_array_mut().unwrap() {
-                row["display_order"] = positions
-                    .get(&num(row, "id"))
-                    .cloned()
-                    .unwrap_or(Value::Null);
-            }
-        }
     }
-    g["revision"] = json!(
-        sqlx::query_scalar::<_, i32>("SELECT revision FROM projects WHERE id=$1")
-            .bind(pid)
-            .fetch_one(&mut **tx)
-            .await?
-    );
-    Ok(g)
+    Ok(graph)
 }
 pub async fn read(State(s): State<AppState>, u: User, Path(pid): Path<i64>) -> Result<Json<Value>> {
     let mut tx = db::read_snapshot_context(&s.pool, &u, pid).await?;
-    let mut g = snapshot(&mut tx, pid, true).await?;
-    g["validation"] = crate::topology_validation::validate(&g);
-    g["permissions"] = crate::permissions::load(&mut tx, pid).await?.value(&g);
-    // Raw workbook cells can be large; fetch them on demand from source_records.
-    g["source_records"]=json!(rows(&g,"source_records").iter().map(|r|json!({"id":r["id"],"sheet":r["sheet"],"row_number":r["row_number"],"classification":r["classification"]})).collect::<Vec<_>>());
-    for d in g["data_items"].as_array_mut().unwrap() {
-        d.as_object_mut().unwrap().remove("raw_json");
-    }
-    Ok(Json(g))
-}
-pub async fn source(
-    State(s): State<AppState>,
-    u: User,
-    Path((pid, id)): Path<(i64, i64)>,
-) -> Result<Json<Value>> {
-    let mut tx = db::context(&s.pool, &u, Some(pid), false).await?;
-    Ok(Json(
-        sqlx::query_scalar(
-            "SELECT to_jsonb(s) FROM source_records s WHERE project_id=$1 AND id=$2",
-        )
-        .bind(pid)
-        .bind(id)
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or(AppError::not_found())?,
-    ))
+    let mut graph = snapshot(&mut tx, pid, true).await?;
+    graph["validation"] = crate::topology_validation::validate(&graph);
+    graph["permissions"] = crate::permissions::load(&mut tx, pid).await?.value(&graph);
+    Ok(Json(graph))
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Change {
@@ -189,90 +74,9 @@ pub async fn apply(tx: &mut Transaction<'_, Postgres>, pid: i64, c: &Change) -> 
         }
         return crate::project_config::apply(tx, pid, &c.values).await;
     }
-    if c.entity == "board_models" && c.operation != "create" {
-        let referenced:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM projects p JOIN board_models m ON m.project_id=p.id CROSS JOIN LATERAL jsonb_array_elements(p.topology_config->'board_types') t WHERE p.id=$1 AND m.id=$2 AND t->>'model_code'=m.code AND ($3 OR ($4::text IS NOT NULL AND $4<>m.code)))")
-            .bind(pid).bind(c.id).bind(c.operation=="delete").bind(c.values["code"].as_str()).fetch_one(&mut **tx).await?;
-        if referenced {
-            return Err(AppError::bad(
-                "板卡类型已在项目 JSON 中引用，不能删除或修改模板代码",
-            ));
-        }
-    }
-    let allowed = columns(&c.entity).ok_or(AppError::bad("不可编辑此类数据"))?;
-    if c.operation == "delete" {
-        return Ok(sqlx::query_scalar(&format!(
-            "DELETE FROM {} WHERE project_id=$1 AND id=$2 RETURNING to_jsonb({}.*)",
-            c.entity, c.entity
-        ))
-        .bind(pid)
-        .bind(c.id.ok_or(AppError::bad("缺少记录 ID"))?)
-        .fetch_optional(&mut **tx)
-        .await?
-        .ok_or(AppError::not_found())?);
-    }
-    if !["create", "update"].contains(&c.operation.as_str()) {
-        return Err(AppError::bad("操作类型无效"));
-    }
-    let values = c
-        .values
-        .as_object()
-        .ok_or(AppError::bad("字段必须是对象"))?;
-    if values.is_empty() {
-        return Err(AppError::bad("未提供字段"));
-    }
-    for (key, v) in values {
-        if !allowed.split(',').any(|k| k == key) {
-            return Err(AppError::bad(format!("字段 {key} 不允许修改")));
-        }
-        if v.is_string() && v.as_str().unwrap().len() > 4096 {
-            return Err(AppError::bad("字段内容过长"));
-        }
-        if ["name", "code", "enum_name", "symbol"].contains(&key.as_str())
-            && v.as_str()
-                .is_none_or(|x| x.trim().is_empty() || x.len() > 300)
-        {
-            return Err(AppError::bad("名称或标识符不能为空，最多 300 字节"));
-        }
-        if ["code", "enum_name", "symbol", "callback", "sig_symbol"].contains(&key.as_str())
-            && !v.is_null()
-            && !v.as_str().is_some_and(model::identifier)
-        {
-            return Err(AppError::bad(format!("{key} 必须为合法 C 标识符")));
-        }
-        if key == "flags" && !v.as_str().is_some_and(model::flag_expression) {
-            return Err(AppError::bad("配置标志必须是整数、宏名或按位或表达式"));
-        }
-    }
-    let mut prepared = c.values.clone();
-    crate::value_ranges::prepare(tx, pid, c, &mut prepared).await?;
-    let cols = prepared
-        .as_object()
-        .unwrap()
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(",");
-    let t = &c.entity;
-    let sql = if c.operation == "create" {
-        format!(
-            "INSERT INTO {t}(project_id,{cols}) SELECT $1,{cols} FROM jsonb_populate_record(NULL::{t},$2) RETURNING to_jsonb({t}.*)"
-        )
-    } else {
-        format!(
-            "UPDATE {t} SET ({cols})=(SELECT {cols} FROM jsonb_populate_record(NULL::{t},$2)) WHERE project_id=$1 AND id=$3 RETURNING to_jsonb({t}.*)"
-        )
-    };
-    let q = sqlx::query_scalar(&sql).bind(pid).bind(&prepared);
-    let row = if c.operation == "create" {
-        q.fetch_optional(&mut **tx).await?
-    } else {
-        q.bind(c.id.ok_or(AppError::bad("缺少记录 ID"))?)
-            .fetch_optional(&mut **tx)
-            .await?
-    };
-    let row = row.ok_or(AppError::not_found())?;
-    crate::value_ranges::after_write(tx, pid, &c.entity, &row).await?;
-    Ok(row)
+    Err(AppError::bad(
+        "此业务实体已移除；请通过点表接口或项目 JSON 配置修改",
+    ))
 }
 fn issue_keys(report: &Value) -> BTreeSet<String> {
     rows(report, "issues")
@@ -290,140 +94,44 @@ pub(crate) fn new_errors(before: &Value, after: &Value) -> Vec<Value> {
         .collect()
 }
 fn impact(before: &Value, after: &Value) -> Value {
-    let mut diffs = Vec::new();
+    let mut changes = Vec::new();
     let config_changed = before["project_config"] != after["project_config"];
+    let mut boards = BTreeSet::new();
     if config_changed {
-        diffs.push(json!({"entity":"project_config","key":"project_config","before":before["project_config"],"after":after["project_config"]}));
+        changes.push(json!({"entity":"project_config","key":"project_config","before":before["project_config"],"after":after["project_config"]}));
     }
-    for t in [
-        "board_models",
-        "signal_groups",
-        "protocol_contracts",
-        "signal_ranges",
-        "platform_signals",
-        "passthrough_routes",
-        "data_items",
-        "v_signals",
-        "v_protocol_fields",
-        "v_bindings",
-        "v_passthrough_fields",
-        "v_topology_links",
-        "boards",
-        "device_contexts",
-        "endpoints",
-        "process_points",
-        "transmit_points",
-    ] {
-        let key = |r: &Value| {
-            if t == "v_passthrough_fields" {
-                format!("{}:{}", r["route_id"], r["field_id"])
-            } else {
-                r["id"].to_string()
-            }
-        };
-        let b: std::collections::BTreeMap<_, _> =
-            rows(before, t).iter().map(|r| (key(r), r)).collect();
-        let a: std::collections::BTreeMap<_, _> =
-            rows(after, t).iter().map(|r| (key(r), r)).collect();
-        for id in b.keys().chain(a.keys()).collect::<BTreeSet<_>>() {
-            if b.get(id) != a.get(id) {
-                diffs.push(json!({"entity":t,"key":id,"before":b.get(id),"after":a.get(id)}));
-            }
-        }
-    }
-    let mut models = BTreeSet::new();
-    let mut board_ids = BTreeSet::new();
-    let mut contexts = std::collections::BTreeMap::new();
-    for diff in &diffs {
-        let table = strv(diff, "entity");
-        for (g, side) in [(before, "before"), (after, "after")] {
-            let r = &diff[side];
-            if r.is_null() {
-                continue;
-            }
-            let signal = if table == "v_signals" {
-                Some(r)
-            } else if table == "signal_ranges" {
-                find(g, "signals", num(r, "signal_id"))
-            } else {
-                None
-            };
-            for context in rows(g, "device_contexts") {
-                if (signal.is_some_and(|s| s["group_id"] == context["group_id"]))
-                    || (table == "signal_groups" && r["id"] == context["group_id"])
-                    || (table == "v_bindings" && r["context_id"] == context["id"])
-                {
-                    contexts.insert(num(context, "id"), json!({"id":context["id"],"model_id":context["model_id"],"name":context["name"],"dev_id":context["dev_id"]}));
+    for table in TABLES {
+        let old: std::collections::BTreeMap<_, _> = rows(before, table)
+            .iter()
+            .map(|r| (num(r, "id"), r))
+            .collect();
+        let new: std::collections::BTreeMap<_, _> = rows(after, table)
+            .iter()
+            .map(|r| (num(r, "id"), r))
+            .collect();
+        for id in old.keys().chain(new.keys()).collect::<BTreeSet<_>>() {
+            if old.get(id) != new.get(id) {
+                for row in [old.get(id), new.get(id)].into_iter().flatten() {
+                    boards.insert(strv(row, "board_key").to_owned());
                 }
-            }
-            if r["model_id"].is_number() {
-                models.insert(num(r, "model_id"));
-            }
-            if matches!(table, "process_points" | "transmit_points") {
-                models.extend(
-                    crate::permissions::resources(g, table, r)
-                        .iter()
-                        .map(|scope| scope.model_id),
+                changes.push(
+                    json!({"entity":table,"key":id,"before":old.get(id),"after":new.get(id)}),
                 );
             }
-            if table == "board_models" {
-                models.insert(num(r, "id"));
-            }
-            if table == "boards" {
-                board_ids.insert(num(r, "id"));
-            }
-            if table == "v_topology_links" {
-                board_ids.insert(num(r, "client_board_id"));
-                board_ids.insert(num(r, "server_board_id"));
-            }
-            let mut contracts = BTreeSet::new();
-            if table == "protocol_contracts" {
-                contracts.insert(num(r, "id"));
-            }
-            if table == "v_protocol_fields" {
-                contracts.insert(num(r, "contract_id"));
-            }
-            if table == "data_items" {
-                for sig in rows(g, "v_signals")
-                    .iter()
-                    .filter(|s| s["data_item_id"] == r["id"])
-                {
-                    models.insert(num(sig, "model_id"));
-                }
-                for f in rows(g, "protocol_fields")
-                    .iter()
-                    .filter(|f| f["data_item_id"] == r["id"])
-                {
-                    contracts.insert(num(f, "contract_id"));
-                }
-            }
-            for e in rows(g, "endpoints")
-                .iter()
-                .filter(|e| contracts.contains(&num(e, "contract_id")))
-            {
-                models.insert(num(e, "model_id"));
-            }
         }
     }
-    let affected: Vec<_> = rows(after, "boards")
-        .iter()
-        .filter(|b| models.contains(&num(b, "model_id")) || board_ids.contains(&num(b, "id")))
-        .map(|b| json!({"id":b["id"],"name":b["name"],"code":b["code"]}))
-        .collect();
     let mut types = Vec::new();
     if let Ok(config) = crate::project_config::Config::parse(after["project_config"].clone()) {
         let counts = config.counts().unwrap_or_default();
-        for t in config.board_types {
-            if config_changed
-                || rows(after, "board_models")
-                    .iter()
-                    .any(|m| m["code"] == t.model_code && models.contains(&num(m, "id")))
-            {
-                types.push(json!({"code":t.code,"name":t.name,"quantity":counts[&t.code]}));
+        for board in config.board_types {
+            if config_changed || boards.contains(&board.code) {
+                types.push(
+                    json!({"code":board.code,"name":board.name,"quantity":counts[&board.code]}),
+                );
             }
         }
     }
-    json!({"count":diffs.len(),"affected_boards":affected,"affected_types":types,"affected_contexts":contexts.into_values().collect::<Vec<_>>(),"changes":diffs.into_iter().take(200).collect::<Vec<_>>()})
+    json!({"count":changes.len(),"affected_types":types,"changes":changes.into_iter().take(200).collect::<Vec<_>>()})
 }
 pub async fn preview(
     State(s): State<AppState>,
@@ -588,7 +296,7 @@ pub async fn commit(
             &before,
             &c.entity,
             num(&row, "id"),
-            num(&c.values, "model_id"),
+            strv(&c.values, "board_key"),
         )
     } else {
         find(&before, &c.entity, num(&row, "id")).cloned()

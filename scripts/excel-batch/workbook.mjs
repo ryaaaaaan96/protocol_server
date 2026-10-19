@@ -2,29 +2,31 @@ import ExcelJS from "exceljs";
 import { stat, writeFile } from "node:fs/promises";
 
 export const columns = {
-  process: ["group_id", "data_item_id", "name", "enum_name", "sig_id", "sig_symbol", "internal_type", "flags", "callback", "process_enabled", "default_value", "min_value", "max_value", "boot_restore", "manual_restore"],
-  collect: ["endpoint_id", "context_id", "signal_id", "field_id", "poll_interval", "set_priority", "scan_priority"],
-  forward: ["endpoint_id", "context_id", "signal_id", "field_id"],
+  process: ["group_key", "name", "enum_name", "sig_id", "internal_type", "element_count", "unit", "flags", "callback", "process_enabled", "default_value", "min_value", "max_value", "boot_restore", "manual_restore", "notes"],
+  forward: ["process_point_id", "endpoint_key", "name", "upp_model", "address", "wire_type", "wire_length", "scale", "access", "byte_order", "conversion", "enabled"],
 };
-const numbers = new Set(["group_id", "data_item_id", "sig_id", "endpoint_id", "context_id", "signal_id", "field_id", "poll_interval", "set_priority", "scan_priority"]);
-const booleans = new Set(["process_enabled", "boot_restore", "manual_restore"]);
+const numbers = new Set(["sig_id", "element_count", "process_point_id", "upp_model", "address", "wire_length", "byte_order"]);
+const booleans = new Set(["process_enabled", "boot_restore", "manual_restore", "enabled"]);
 const required = {
-  process: ["group_id", "data_item_id", "name", "enum_name"],
-  collect: columns.forward,
-  forward: columns.forward,
+  process: ["group_key", "name", "enum_name", "internal_type"],
+  forward: ["process_point_id", "endpoint_key", "name", "upp_model", "address", "wire_type", "wire_length"],
 };
 const descriptions = {
-  group_id: "当前板卡的点表分组 ID（必填）", data_item_id: "已有数据定义 ID（必填）",
-  name: "点名称（必填）", enum_name: "合法 C 枚举标识符（必填）",
-  sig_id: "数字 sigID；参与处理表时与 sig_symbol 二选一", sig_symbol: "已有公共 sigID 符号",
-  internal_type: "留空继承类型；U8/U16/S16/U32/S32/F32/STRING",
+  group_key: "project.json 定义的分组代码，例如 LOCAL（必填）",
+  name: "点名称（必填）", enum_name: "同板卡唯一的 C 枚举标识符（必填）",
+  sig_id: "可选的已确认 DSP sigID，不用采集端编号或行号填充",
+  internal_type: "内部类型 U8/U16/S16/U32/S32/F32/STRING（必填）",
+  element_count: "元素数量，默认 1；STRING 表示字节容量", unit: "单位", notes: "备注",
   flags: "留空默认 0", callback: "留空默认 NULL", process_enabled: "留空默认 true",
-  default_value: "默认值覆盖；留空继承数据定义", min_value: "下限覆盖；留空继承数据定义",
-  max_value: "上限覆盖；留空继承数据定义", boot_restore: "上电恢复；留空默认 false",
-  manual_restore: "手动恢复；留空默认 false", endpoint_id: "端点 ID（必填）",
-  context_id: "设备上下文 ID（必填）", signal_id: "已有处理点 ID（必填）",
-  field_id: "已有协议字段 ID（必填）", poll_interval: "采集周期 0～255；默认 0",
-  set_priority: "设置优先级 0～3；默认 0", scan_priority: "扫描优先级 0～1；默认 0",
+  default_value: "默认值；留空表示未指定", min_value: "数值下限；STRING 不填写",
+  max_value: "数值上限；STRING 不填写", boot_restore: "上电恢复；默认 false",
+  manual_restore: "手动恢复；默认 false", process_point_id: "当前板卡已有内部点 ID（必填）",
+  endpoint_key: "project.json 中的 UPP 端点代码，例如 UPP_SERVICE（必填）",
+  upp_model: "UPP 模型号（必填）", address: "显式字节偏移（必填）",
+  wire_type: "通信类型 U8/U16/S16/U32/S32/F32/STRING（必填）",
+  wire_length: "通信字节长度（必填）", scale: "比例系数，支持小数；默认 1",
+  access: "访问属性 RO/WO/RW，默认 RO", byte_order: "字节序，默认 0",
+  conversion: "identity/fixed_point/array_bytes；默认 identity", enabled: "启用；默认 true",
 };
 
 function scalar(cell) {
@@ -47,6 +49,11 @@ function convert(value, key) {
     }
     return Number(value);
   }
+  if (key === "scale") {
+    const number = Number(value);
+    if (!Number.isFinite(number)) throw new Error("比例系数必须为有限数值");
+    return number;
+  }
   if (booleans.has(key)) {
     if ([true, 1, "1", "true", "TRUE", "是"].includes(value)) return true;
     if ([false, 0, "0", "false", "FALSE", "否"].includes(value)) return false;
@@ -58,7 +65,7 @@ function convert(value, key) {
 }
 
 export async function readRows(file, kind, sheetName = kind) {
-  if (!columns[kind]) throw new Error("kind 必须为 process、collect 或 forward");
+  if (!columns[kind]) throw new Error("kind 必须为 process 或 forward");
   if (!file.toLowerCase().endsWith(".xlsx")) throw new Error("仅支持 .xlsx 文件");
   if ((await stat(file)).size > 15 * 1024 * 1024) throw new Error("文件不能超过 15 MB");
   const book = new ExcelJS.Workbook();
@@ -103,7 +110,7 @@ export async function readRows(file, kind, sheetName = kind) {
 }
 
 export async function writeTemplate(file, kind) {
-  if (!columns[kind]) throw new Error("kind 必须为 process、collect 或 forward");
+  if (!columns[kind]) throw new Error("kind 必须为 process 或 forward");
   const book = new ExcelJS.Workbook();
   const sheet = book.addWorksheet(kind, { views: [{ state: "frozen", ySplit: 1 }] });
   sheet.columns = columns[kind].map(key => ({ header: key, key, width: 23 }));
@@ -113,7 +120,7 @@ export async function writeTemplate(file, kind) {
   help.addRow(["字段", "含义"]);
   for (const key of columns[kind]) help.addRow([key, descriptions[key]]);
   help.addRow(["规则", "第 1 行保留英文字段名，第 2 行开始填数据；仅处理指定工作表，每批最多 200 行。"]);
-  help.addRow(["空值", "空单元格省略，采用数据库默认值或数据定义继承值。ID 请用 --references 查询，不能跨项目复用。"]);
+  help.addRow(["空值", "空单元格省略，采用字段默认值。代码和 ID 请用 --references 查询，不能跨项目复用。"]);
   help.addRow(["添加", "仅新增，不覆盖现有记录；公式先粘贴为值；所有引用必须已存在。"]);
   help.columns = [{ width: 25 }, { width: 100 }];
   await writeFile(file, Buffer.from(await book.xlsx.writeBuffer()), { flag: "wx" });

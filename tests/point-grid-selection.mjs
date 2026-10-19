@@ -42,7 +42,7 @@ const { usePointGrid } = await import(moduleUrl(source));
 const { parseClipboard } = await import(domain);
 const definition = JSON.parse(
   await readFile(
-    new URL("../config/upm/UPM/process.json", import.meta.url),
+    new URL("../config/upm/DSP/process.json", import.meta.url),
     "utf8",
   ),
 );
@@ -50,12 +50,14 @@ const records = Array.from({ length: 250 }, (_, index) => {
   const edit_values = {
     id: index + 1,
     name: `点 ${index + 1}`,
-    group_id: 1,
-    data_item_id: 10,
+    board_key: "DSP",
+    group_key: "LOCAL",
+    enum_name: `POINT_${index + 1}`,
+    element_count: 1,
+    byte_length: 2,
     sig_id: index + 1,
-    sig_symbol: null,
-    internal_type: null,
-    default_value: null,
+    internal_type: "U16",
+    default_value: "5",
     min_value: null,
     max_value: null,
   };
@@ -69,21 +71,20 @@ const records = Array.from({ length: 250 }, (_, index) => {
 });
 const data = ref({
   kind: "process",
+  board_key: "DSP",
+  storage: "native",
   revision: 1,
   rows: records,
   definition,
   options: {
-    groups: [{ id: 1, name: "本机", code: "LOCAL" }],
-    data: [{ id: 10, name: "电压", data_type: "U16", default_value: "5" }],
-    contexts: [],
-    signals: [],
+    native_groups: [{ name: "本机", code: "LOCAL" }],
+    process_points: [],
     endpoints: [],
-    fields: [],
   },
 });
 const rows = ref(records);
 const columns = ref(
-  ["name", "default_value", "group_name", "unit"].map((key) => ({
+  ["name", "default_value", "group_name", "byte_length"].map((key) => ({
     key,
     visible: true,
     frozen: false,
@@ -137,21 +138,21 @@ assert.deepEqual(
   "copy order follows the current filter, not click order",
 );
 assert.equal(
-  grid.selected(1, "unit"),
+  grid.selected(1, "byte_length"),
   true,
   "row selection includes read-only columns",
 );
 assert.equal(await grid.copyRows(), true, "viewers can copy");
 assert.deepEqual(parseClipboard(await written["text/plain"].text()), [
-  ["点 1", "5", "本机 · LOCAL", "V"],
-  ["点 3", "5", "本机 · LOCAL", "V"],
+  ["点 1", "5", "本机 · LOCAL", "2"],
+  ["点 3", "5", "本机 · LOCAL", "2"],
 ]);
 let metadata = JSON.parse(await written[`web ${clipboardType}`].text());
-assert.deepEqual(metadata.columns, ["name", "default_value", "group_id", null]);
+assert.deepEqual(metadata.columns, ["name", "default_value", "group_key", null]);
 assert.equal(
   metadata.values[0][1],
-  null,
-  "copy retains inherited values in its typed payload",
+  "5",
+  "copy retains stored values in its typed payload",
 );
 assert.equal(await grid.copyRows(records[7]), true);
 assert.equal(parseClipboard(await written["text/plain"].text())[0][0], "点 8");

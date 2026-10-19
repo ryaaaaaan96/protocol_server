@@ -22,7 +22,7 @@ const emit = defineEmits<{
 }>();
 const list = ref<Row[]>([]),
   generated = ref<Row | null>(null),
-  file = ref("collect.c"),
+  file = ref(""),
   loading = ref(false),
   name = ref(""),
   publishing = ref(false);
@@ -82,7 +82,7 @@ async function copy() {
     <div class="panel-heading">
       <div>
         <h3><FileCode2 :size="19" />配置生成</h3>
-        <p>按板卡分别生成协议契约、内部信号、采集转发、范围和设备连接配置。</p>
+        <p>按板卡生成内部数据、转发表和 UPP 配置，保存每次交付的快照。</p>
       </div>
       <button class="button primary" :disabled="loading" @click="generate">
         <LoaderCircle v-if="loading" class="spin" :size="16" /><Code2

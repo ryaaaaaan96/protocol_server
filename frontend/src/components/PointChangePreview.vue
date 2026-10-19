@@ -50,7 +50,6 @@ function changes(change:Row) {
       </template>
       <p v-if="preview.merged" class="notice">已合并其他成员的无关修改，请确认最新关联影响。</p>
       <p v-if="preview.impact.affected_types?.length">涉及板卡：{{ preview.impact.affected_types.map((t:Row) => t.name || t.code).join('、') }}</p>
-      <p v-if="preview.impact.affected_contexts?.length">涉及设备：{{ preview.impact.affected_contexts.map((c:Row) => `${c.name} [${c.dev_id}]`).join('、') }}</p>
       <p>关联变更 {{ preview.impact.count }} 项</p>
       <div class="impact-list">
         <article v-for="(change,i) in preview.impact.changes" :key="i"><strong>{{ change.after?.name || change.after?.signal_name || change.key }}</strong><p>{{ changes(change) }}</p></article>

@@ -5,9 +5,9 @@ import Modal from "./Modal.vue";
 import Badge from "./Badge.vue";
 
 type Grant = {
-  model_id: number;
+  board_key: string;
   scope: "board" | "internal" | "protocol";
-  contract_id?: number;
+  endpoint_key?: string;
 };
 const props = defineProps<{
   pid: number;
@@ -26,45 +26,35 @@ const grants = ref<Grant[]>(
 const busy = ref(false),
   error = ref("");
 const selectedBoards = computed(
-  () => new Set(grants.value.map((grant) => grant.model_id)).size,
+  () => new Set(grants.value.map((grant) => grant.board_key)).size,
 );
-function granted(modelId: number, scope: Grant["scope"], contractId?: number) {
+function granted(boardKey: string, scope: Grant["scope"], endpointKey?: string) {
   return grants.value.some(
     (grant) =>
-      grant.model_id === modelId &&
+      grant.board_key === boardKey &&
       grant.scope === scope &&
-      (scope !== "protocol" || grant.contract_id === contractId),
+      (scope !== "protocol" || grant.endpoint_key === endpointKey),
   );
 }
-function toggle(modelId: number, scope: Grant["scope"], contractId?: number) {
+function toggle(boardKey: string, scope: Grant["scope"], endpointKey?: string) {
   if (props.readonly || busy.value) return;
-  const selected = granted(modelId, scope, contractId);
+  const selected = granted(boardKey, scope, endpointKey);
   grants.value = grants.value.filter(
     (grant) =>
-      grant.model_id !== modelId ||
+      grant.board_key !== boardKey ||
       (scope !== "board" &&
         (grant.scope !== scope ||
-          (scope === "protocol" && grant.contract_id !== contractId))),
+          (scope === "protocol" && grant.endpoint_key !== endpointKey))),
   );
   if (!selected)
     grants.value.push({
-      model_id: modelId,
+      board_key: boardKey,
       scope,
-      ...(scope === "protocol" ? { contract_id: contractId } : {}),
+      ...(scope === "protocol" ? { endpoint_key: endpointKey } : {}),
     });
 }
-function protocolDetails(protocol: Row) {
-  const peers = (protocol.peer_models || []).map(
-    (peer: Row) => peer.model_code || peer.model_name,
-  );
-  return [
-    protocol.protocol,
-    ...(protocol.transports || []),
-    ...(protocol.endpoints || peers),
-    protocol.code,
-  ]
-    .filter(Boolean)
-    .join(" · ");
+function protocolDetails(endpoint: Row) {
+  return `${endpoint.protocol} · ${endpoint.endpoint_key}`;
 }
 async function save() {
   if (props.readonly || busy.value) return;
@@ -146,26 +136,26 @@ async function save() {
             <span>已授权 {{ selectedBoards }} 类板卡</span>
           </div>
           <p class="scope-help">
-            内部点表包含信号与处理配置；协议范围包含对应的采集和转发点表。共享数据的修改需要拥有全部受影响范围的权限。
+            内部点表包含处理数据与范围；协议范围包含对应的转发表。转发按端点独立授权，修改内部点不自动获得转发权限。
           </p>
           <div v-if="!catalog.length" class="notice">
-            项目还没有板卡，可在添加板卡后分配范围。
+            项目还没有启用点表的板卡，请在服务器项目文件中配置。
           </div>
           <fieldset
             v-for="board in catalog"
-            :key="board.model_id"
+            :key="board.board_key"
             class="scope-board"
             :disabled="readonly || busy"
           >
             <legend>
-              {{ board.model_name }}
-              <span class="mono">{{ board.model_code }}</span>
+              {{ board.board_name }}
+              <span class="mono">{{ board.board_key }}</span>
             </legend>
             <label class="scope-option scope-whole">
               <input
                 type="checkbox"
-                :checked="granted(board.model_id, 'board')"
-                @change="toggle(board.model_id, 'board')"
+                :checked="granted(board.board_key, 'board')"
+                @change="toggle(board.board_key, 'board')"
               />
               <span
                 ><strong>整个板卡</strong
@@ -179,30 +169,30 @@ async function save() {
                 <input
                   type="checkbox"
                   :checked="
-                    granted(board.model_id, 'board') ||
-                    granted(board.model_id, 'internal')
+                    granted(board.board_key, 'board') ||
+                    granted(board.board_key, 'internal')
                   "
-                  :disabled="granted(board.model_id, 'board')"
-                  @change="toggle(board.model_id, 'internal')"
+                  :disabled="granted(board.board_key, 'board')"
+                  @change="toggle(board.board_key, 'internal')"
                 />
                 <span
                   ><strong>内部点表</strong><small>信号与处理配置</small></span
                 >
               </label>
               <label
-                v-for="protocol in board.protocols"
-                :key="protocol.contract_id"
+                v-for="protocol in board.endpoints"
+                :key="protocol.endpoint_key"
                 class="scope-option"
               >
                 <input
                   type="checkbox"
                   :checked="
-                    granted(board.model_id, 'board') ||
-                    granted(board.model_id, 'protocol', protocol.contract_id)
+                    granted(board.board_key, 'board') ||
+                    granted(board.board_key, 'protocol', protocol.endpoint_key)
                   "
-                  :disabled="granted(board.model_id, 'board')"
+                  :disabled="granted(board.board_key, 'board')"
                   @change="
-                    toggle(board.model_id, 'protocol', protocol.contract_id)
+                    toggle(board.board_key, 'protocol', protocol.endpoint_key)
                   "
                 />
                 <span

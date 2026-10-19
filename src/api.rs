@@ -3,7 +3,7 @@ use crate::{
     auth::{User, hash_password},
     codegen, db,
     error::{AppError, Result},
-    importer, model, topology, topology_import, topology_validation,
+    model, topology, topology_validation,
 };
 use axum::{
     Json,
@@ -21,8 +21,7 @@ pub async fn projects(State(s): State<AppState>, u: User) -> Result<Json<Value>>
         SELECT to_jsonb(p) || jsonb_build_object(
             'role', CASE WHEN app_is_admin() THEN 'admin' ELSE
                 (SELECT role FROM project_members WHERE project_id=p.id AND user_id=app_user_id()) END,
-            'point_count', (SELECT count(*) FROM data_items WHERE project_id=p.id)
-                + (SELECT count(*) FROM process_points WHERE project_id=p.id))
+            'point_count', (SELECT count(*) FROM process_points WHERE project_id=p.id))
         FROM projects p ORDER BY p.id"#)
         .fetch_all(&mut *tx)
         .await?;
@@ -123,10 +122,9 @@ pub async fn overview(
         .fetch_one(&mut *tx)
         .await?;
     let g = topology::snapshot(&mut tx, pid, true).await?;
-    let native_count = topology::rows(&g, "process_points").len();
-    let stats = json!({"total":topology::rows(&g,"data_items").len()+native_count,"boards":topology::rows(&g,"boards").len(),"signals":topology::rows(&g,"signals").len()+native_count,"contracts":topology::rows(&g,"protocol_contracts").len(),"links":topology::rows(&g,"board_links").len()});
-    let transmit = topology::rows(&g, "v_passthrough_fields").len()
-        + topology::rows(&g, "transmit_points").len();
+    let config = crate::project_config::Config::parse(g["project_config"].clone())?;
+    let stats = json!({"total":topology::rows(&g,"process_points").len(),"boards":config.board_types.len(),"signals":topology::rows(&g,"process_points").len(),"links":config.mounts.len()});
+    let transmit = topology::rows(&g, "transmit_points").len();
     let report = topology_validation::validate(&g);
     let activity=db::all_json(&mut tx,"SELECT to_jsonb(t) FROM (SELECT a.id,a.action,a.entity,a.created_at,u.display_name FROM audit_logs a LEFT JOIN users u ON u.id=a.user_id WHERE project_id=$1 ORDER BY a.id DESC LIMIT 8) t",pid).await?;
     Ok(Json(
@@ -173,48 +171,30 @@ pub async fn preview_import(
         .map_err(|_| AppError::bad("文件过大或上传失败"))?
         .to_vec();
     let hash = hex::encode(Sha256::digest(&bytes));
-    if dsp_only {
-        let data = tokio::task::spawn_blocking(move || crate::dsp_workbook::parse_workbook(bytes))
-            .await
-            .map_err(|_| AppError::bad("DSP Excel 解析失败"))??;
-        let mut tx = db::context(&s.pool, &u, Some(pid), true).await?;
-        crate::permissions::require_all(&mut tx, pid).await?;
-        let revision = db::lock_project(&mut tx, pid).await?;
-        sqlx::query("DELETE FROM import_previews WHERE created_by=$1 AND project_id=$2")
-            .bind(u.id)
-            .bind(pid)
-            .execute(&mut *tx)
-            .await?;
-        let id: i64 = sqlx::query_scalar("INSERT INTO import_previews(project_id,created_by,filename,sha256,revision,payload) VALUES($1,$2,$3,$4,$5,$6) RETURNING id")
-            .bind(pid).bind(u.id).bind(&filename).bind(&hash).bind(revision)
-            .bind(json!({"kind":"dsp_native","data":data})).fetch_one(&mut *tx).await?;
-        tx.commit().await?;
-        return Ok(Json(
-            json!({"id":id,"filename":filename,"sha256":hash,"revision":revision,"import_scope":"dsp",
-            "point_count":data.process.len(),"dsp_count":data.process.len(),"local_count":0,"transmit_count":data.transmit.len(),
-            "mapping_count":data.transmit.len(),"device_count":1,"sheets":["DSP内部数据","UPM-DSP采集数据"],
-            "warnings":["本次仅替换 DSP 内部数据与 UPP 转发表；UPM 及其他板卡数据保持原样。DSP sigID 未在来源中提供，按变量枚举关联。"],
-            "sample":data.process.iter().take(6).collect::<Vec<_>>()}),
-        ));
+    if !dsp_only {
+        return Err(AppError::bad("当前仅支持已配置 DSP 内部点表的工作簿导入"));
     }
-    let data = tokio::task::spawn_blocking(move || importer::parse(bytes))
+    let data = tokio::task::spawn_blocking(move || crate::dsp_workbook::parse_workbook(bytes))
         .await
-        .map_err(|_| AppError::bad("Excel 解析失败"))??;
+        .map_err(|_| AppError::bad("DSP Excel 解析失败"))??;
     let mut tx = db::context(&s.pool, &u, Some(pid), true).await?;
     crate::permissions::require_all(&mut tx, pid).await?;
-    let revision: i32 = sqlx::query_scalar("SELECT revision FROM projects WHERE id=$1")
-        .bind(pid)
-        .fetch_one(&mut *tx)
-        .await?;
+    let revision = db::lock_project(&mut tx, pid).await?;
     sqlx::query("DELETE FROM import_previews WHERE created_by=$1 AND project_id=$2")
         .bind(u.id)
         .bind(pid)
         .execute(&mut *tx)
         .await?;
-    let id:i64=sqlx::query_scalar("INSERT INTO import_previews(project_id,created_by,filename,sha256,revision,payload) VALUES($1,$2,$3,$4,$5,$6) RETURNING id").bind(pid).bind(u.id).bind(&filename).bind(&hash).bind(revision).bind(serde_json::to_value(&data)?).fetch_one(&mut *tx).await?;
+    let id: i64 = sqlx::query_scalar("INSERT INTO import_previews(project_id,created_by,filename,sha256,revision,payload) VALUES($1,$2,$3,$4,$5,$6) RETURNING id")
+        .bind(pid).bind(u.id).bind(&filename).bind(&hash).bind(revision)
+        .bind(json!({"kind":"dsp_native","data":data})).fetch_one(&mut *tx).await?;
     tx.commit().await?;
     Ok(Json(
-        json!({"id":id,"filename":filename,"sha256":hash,"point_count":data.points.len(),"local_count":data.points.iter().filter(|p|p.scope=="LOCAL").count(),"dsp_count":data.points.iter().filter(|p|p.scope=="DSP").count(),"mapping_count":data.mappings.len(),"device_count":data.devices.len(),"warnings":data.warnings,"sheets":data.sheets,"sample":data.points.iter().take(6).collect::<Vec<_>>(),"revision":revision}),
+        json!({"id":id,"filename":filename,"sha256":hash,"revision":revision,"import_scope":"dsp",
+        "point_count":data.process.len(),"dsp_count":data.process.len(),"local_count":0,"transmit_count":data.transmit.len(),
+        "mapping_count":data.transmit.len(),"device_count":1,"sheets":["DSP内部数据","UPM-DSP采集数据"],
+        "warnings":["本次仅替换 DSP 内部数据与 UPP 转发表；UPM 及其他板卡数据保持原样。DSP sigID 未在来源中提供，按变量枚举关联。"],
+        "sample":data.process.iter().take(6).collect::<Vec<_>>()}),
     ))
 }
 #[derive(Deserialize)]
@@ -259,26 +239,18 @@ pub async fn commit_import(
     {
         return Err(AppError::conflict("项目已有配置，必须明确确认替换"));
     }
-    let (report, point_count) = if row["payload"]["kind"] == "dsp_native" {
-        let data: crate::dsp_workbook::DspImport =
-            serde_json::from_value(row["payload"]["data"].clone())?;
-        crate::dsp_points::import(&mut tx, pid, &data).await?;
-        let graph = topology::snapshot(&mut tx, pid, true).await?;
-        let report = topology_validation::validate(&graph);
-        let errors = topology::new_errors(&topology_validation::validate(&before), &report);
-        if !errors.is_empty() {
-            let mut error = AppError::bad("DSP 导入校验失败，数据未保存");
-            error.2 = Some(json!({"errors":errors}));
-            return Err(error);
-        }
-        (report, data.process.len())
-    } else {
-        let data: importer::ImportData = serde_json::from_value(row["payload"].clone())?;
-        (
-            topology_import::import(&mut tx, pid, &data).await?,
-            data.points.len(),
-        )
-    };
+    let data: crate::dsp_workbook::DspImport =
+        serde_json::from_value(row["payload"]["data"].clone())?;
+    crate::dsp_points::import(&mut tx, pid, &data).await?;
+    let graph = topology::snapshot(&mut tx, pid, true).await?;
+    let report = topology_validation::validate(&graph);
+    let errors = topology::new_errors(&topology_validation::validate(&before), &report);
+    if !errors.is_empty() {
+        let mut error = AppError::bad("DSP 导入校验失败，数据未保存");
+        error.2 = Some(json!({"errors":errors}));
+        return Err(error);
+    }
+    let point_count = data.process.len();
     sqlx::query(
         "INSERT INTO imports(project_id,filename,sha256,report,created_by) VALUES($1,$2,$3,$4,$5)",
     )
@@ -428,7 +400,7 @@ pub async fn members(
     Path(pid): Path<i64>,
 ) -> Result<Json<Value>> {
     let mut tx = db::context(&s.pool, &u, Some(pid), false).await?;
-    Ok(Json(json!(db::all_json(&mut tx,"SELECT to_jsonb(t) FROM (SELECT u.id,u.username,u.display_name,u.active,m.role,m.edit_scope,COALESCE((SELECT jsonb_agg(jsonb_build_object('model_id',g.model_id,'scope',g.scope,'contract_id',g.contract_id) ORDER BY g.model_id,g.scope,g.contract_id) FROM project_member_grants g WHERE g.project_id=m.project_id AND g.user_id=m.user_id),'[]'::jsonb) AS grants FROM project_members m JOIN users u ON u.id=m.user_id WHERE m.project_id=$1 ORDER BY u.id) t",pid).await?)))
+    Ok(Json(json!(db::all_json(&mut tx,"SELECT to_jsonb(t) FROM (SELECT u.id,u.username,u.display_name,u.active,m.role,m.edit_scope,COALESCE((SELECT jsonb_agg(jsonb_build_object('board_key',g.board_key,'scope',g.scope,'endpoint_key',g.endpoint_key) ORDER BY g.board_key,g.scope,g.endpoint_key) FROM project_member_grants g WHERE g.project_id=m.project_id AND g.user_id=m.user_id),'[]'::jsonb) AS grants FROM project_members m JOIN users u ON u.id=m.user_id WHERE m.project_id=$1 ORDER BY u.id) t",pid).await?)))
 }
 #[derive(Deserialize)]
 pub struct MemberInput {
@@ -476,7 +448,7 @@ pub async fn set_member(
                 .execute(&mut *tx)
                 .await?;
             for grant in grants {
-                sqlx::query("INSERT INTO project_member_grants(project_id,user_id,model_id,scope,contract_id) VALUES($1,$2,$3,$4,$5)").bind(pid).bind(input.user_id).bind(grant.model_id).bind(&grant.scope).bind(grant.contract_id).execute(&mut *tx).await?;
+                sqlx::query("INSERT INTO project_member_grants(project_id,user_id,board_key,scope,endpoint_key) VALUES($1,$2,$3,$4,$5)").bind(pid).bind(input.user_id).bind(&grant.board_key).bind(&grant.scope).bind(&grant.endpoint_key).execute(&mut *tx).await?;
             }
         }
     }

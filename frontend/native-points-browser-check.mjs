@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { checkPointColumns } from "./point-columns-check.mjs";
+import { checkPointCopy } from "./point-copy-check.mjs";
+import { openRowAction } from "./point-menus-check.mjs";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { createServer } from "vite";
@@ -13,16 +16,19 @@ const points = [
 ];
 const mappings = [3, 4].map((id, index) => ({ id, project_id: 1, board_key: "DSP", process_point_id: 1, endpoint_key: "UPP_SERVICE", name: `电压转发 ${index + 1}`, upp_model: 5 + index, address: 6, wire_type: "S32", wire_length: 4, scale: 0.001, access: "RO", byte_order: 0, conversion: "fixed_point", enabled: true }));
 const processRows = points.map(point => ({ ...point, edit_values: { ...point }, data_type: point.internal_type, group_name: "DSP 内部数据", resolved_sig_id: point.sig_id, forward_count: point.id === 1 ? 2 : 0 }));
-const forwardRows = mappings.map(mapping => ({ ...mapping, edit_values: { ...mapping }, group_key: "LOCAL", signal_id: 1, signal_name: points[0].name, enum_name: points[0].enum_name, data_type: "F32", byte_length: 4, resolved_sig_id: 4097, effective_address: mapping.address, effective_type: mapping.wire_type, effective_length: mapping.wire_length }));
-const options = { native_groups: [{ code: "LOCAL", name: "DSP 内部数据" }], signals: processRows, groups: [], contexts: [], endpoints: [], fields: [], data: [] };
+const forwardRows = mappings.map(mapping => ({ ...mapping, edit_values: { ...mapping }, group_key: "LOCAL", signal_name: points[0].name, enum_name: points[0].enum_name, data_type: "F32", byte_length: 4, resolved_sig_id: 4097, effective_address: mapping.address, effective_type: mapping.wire_type, effective_length: mapping.wire_length }));
+const options = { native_groups: [{ code: "LOCAL", name: "DSP 内部数据" }], process_points: processRows, endpoints: [{ code: "UPP_SERVICE", name: "UPP 对外接口", protocol: "UPP" }] };
 const tables = {
-  process: { revision: 1, kind: "process", storage: "native", definition: processDefinition, rows: processRows, options },
-  forward: { revision: 1, kind: "forward", storage: "native", definition: forwardDefinition, rows: forwardRows, options },
+  process: { revision: 1, board_key: "DSP", kind: "process", storage: "native", definition: processDefinition, rows: processRows, options },
+  forward: { revision: 1, board_key: "DSP", kind: "forward", storage: "native", definition: forwardDefinition, rows: forwardRows, options },
 };
 const graph = {
-  revision: 1, board_models: [{ id: 7, code: "DSP", name: "DSP 功率板", firmware_profile: "aidc" }],
-  project_config: { root: { type: "DSP", quantity: 8 }, mounts: [], board_types: [{ code: "DSP", model_code: "DSP", name: "DSP 功率板", point_storage: "native", point_groups: options.native_groups }] },
-  process_points: points, transmit_points: mappings, collect_points: [], signals: [], signal_groups: [], v_signals: [], signal_bindings: [], v_bindings: [], device_contexts: [], endpoints: [], boards: [], protocol_fields: [], data_items: [],
+  revision: 1,
+  project_config: { root: { type: "UPM", quantity: 1 }, mounts: [{ parent: "UPM", child: "DSP", quantity: 8, connections: [{ protocol: "UPP", transport: "CAN" }] }], board_types: [
+    { code: "UPM", name: "UPM 控制板" },
+    { code: "DSP", name: "DSP 功率板", point_storage: "native", point_groups: options.native_groups, point_endpoints: options.endpoints },
+  ] },
+  process_points: points, transmit_points: mappings,
 };
 const schema = { boards: { DSP: { process: processDefinition, forward: forwardDefinition } }, workspace: { boards: { DSP: { tables: ["process", "forward"] } } } };
 const preview = { id: 99, allowed: true, merged: false, errors: [], impact: { count: 0, changes: [] } };
@@ -42,8 +48,8 @@ try {
     import Workspace from '/src/pages/TopologyWorkspace.vue';
     import { permissionKey } from '/src/composables/useProjectPermissions.ts';
     import '/src/style.css';
-    const app = createApp({ render: () => h(Workspace, { pid: 1, graph: window.__graph, canWrite: true, mode: 'board', boardId: 7 }) });
-    app.provide(permissionKey, { state: ref({ role: 'engineer', can_edit: true, can_manage_project: false, edit_scope: 'scoped', grants: [{ model_id: 7, scope: 'board' }], catalog: [] }), error: ref(''), refresh: async () => {} });
+    const app = createApp({ render: () => h(Workspace, { pid: 1, graph: window.__graph, canWrite: true, boardKey: 'DSP' }) });
+    app.provide(permissionKey, { state: ref({ role: 'engineer', can_edit: true, can_manage_project: false, edit_scope: 'scoped', grants: [{ board_key: 'DSP', scope: 'board' }], catalog: [] }), error: ref(''), refresh: async () => {} });
     app.mount('#test');
   </script></body></html>` }));
   await page.route("**/api/**", async route => {
@@ -55,7 +61,10 @@ try {
     }
     if (path.endsWith("/point-tables/schema")) return route.fulfill({ json: schema });
     const kind = path.split("/").at(-1);
-    if (tables[kind]) return route.fulfill({ json: tables[kind] });
+    if (tables[kind]) {
+      assert.equal(path, `/api/projects/1/boards/DSP/point-tables/${kind}`);
+      return route.fulfill({ json: tables[kind] });
+    }
     throw new Error(`Unexpected request ${path}`);
   });
   await page.goto("/__native_test");
@@ -64,7 +73,23 @@ try {
   await expect(rows()).toHaveCount(2);
   await expect(page.getByRole("group", { name: "点表分组", exact: true })).toContainText("LOCAL · DSP 内部数据");
   await expect(page.getByRole("tab", { name: /^DSP内部数据/ })).toContainText("2");
-  await expect(page.getByRole("button", { name: "选择 DSP 板卡", exact: true })).toContainText("2 个信号");
+  await expect(page.getByRole("button", { name: "选择 DSP 板卡", exact: true })).toContainText("2 个内部点");
+  await checkPointColumns(page, { data: tables.process, forward: tables.forward });
+  await checkPointCopy(page, tables.process);
+  assert.equal(requests.length, 0, "column views and copying never submit data");
+  await rows().first().locator(".drag-handle").dragTo(rows().nth(1));
+  await expect(rows().first()).toHaveAttribute("data-row-id", "2");
+  await page.getByRole("button", { name: "检查关联影响", exact: true }).click();
+  await expect(page.locator("dialog")).toContainText("排序变更预览");
+  assert.equal(requests.at(-1).path, "/api/projects/1/boards/DSP/point-tables/process/reorder/preview");
+  assert.deepEqual(requests.at(-1).body.ids, [2, 1]);
+  assert.deepEqual(requests.at(-1).body.expected, [1, 2]);
+  await page.getByRole("button", { name: "返回调整", exact: true }).click();
+  await page.getByRole("button", { name: "取消修改", exact: true }).click();
+  await expect(rows().first()).toHaveAttribute("data-row-id", "1");
+  await rows().first().locator(".drag-handle").press("ArrowDown");
+  await expect(rows().first()).toHaveAttribute("data-row-id", "2");
+  await page.getByRole("button", { name: "取消修改", exact: true }).click();
   await cell("max_value").dblclick();
   await page.getByLabel("编辑 上限", { exact: true }).fill("");
   await page.getByLabel("编辑 上限", { exact: true }).press("Enter");
@@ -105,6 +130,13 @@ try {
   assert.equal(changed.byte_order, 2);
   await page.getByRole("button", { name: "继续编辑", exact: true }).click();
   await page.getByRole("button", { name: "放弃修改", exact: true }).click();
+  await openRowAction(page, rows().first());
+  await page.getByLabel("转发字段名称", { exact: true }).fill("小数协议系数保留");
+  await page.getByRole("button", { name: "检查关联影响", exact: true }).click();
+  await expect(page.locator("dialog")).toContainText("关联检查通过");
+  assert.equal(requests.at(-1).body.values.name, "小数协议系数保留");
+  assert.equal(requests.at(-1).body.expected.scale, 0.001);
+  await page.locator("dialog").getByRole("button", { name: "关闭", exact: true }).last().click();
   await page.getByRole("button", { name: "新建DSP UPP转发表", exact: true }).click();
   await page.getByLabel("DSP 内部点", { exact: true }).selectOption("1");
   await page.getByLabel("转发字段名称", { exact: true }).fill("新增转发");
@@ -119,7 +151,7 @@ try {
     import { createApp, h } from '/node_modules/.vite/deps/vue.js';
     import ImportModal from '/src/components/ImportModal.vue';
     import '/src/style.css';
-    createApp({ render: () => h(ImportModal, { pid: 1, hasPoints: false, canWrite: true, dspOnly: true }) }).mount('#test');
+    createApp({ render: () => h(ImportModal, { pid: 1, canWrite: true }) }).mount('#test');
   </script></body></html>` }));
   await page.route("**/api/projects/1/imports/**", async route => {
     const path = new URL(route.request().url()).pathname;

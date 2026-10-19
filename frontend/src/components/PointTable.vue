@@ -23,16 +23,14 @@ import PointChangePreview from "./PointChangePreview.vue";
 import Modal from "./Modal.vue";
 const props = defineProps<{
   pid: number;
-  modelId: number;
+  boardKey: string;
   kind: PointKind;
   label: string;
   revision: number;
   canWrite: boolean;
-  processEnabled: boolean;
   focusId?: number;
-  groupId?: number;
   groupKey?: string;
-  signalId?: number;
+  processPointId?: number;
   allowForward?: boolean;
   forwardLabel?: string;
 }>();
@@ -47,11 +45,10 @@ const data = ref<PointTableData | null>(null),
   error = ref(""),
   query = ref(""),
   page = ref(1);
-const filter = ref<number | "">("");
 const showHelp = ref(false);
 const permissions = usePermissionContext();
 function scopeEditable(row?: Row | null, values?: Row) {
-  return !!data.value && allowsPoint(permissions.state.value, props.modelId, props.kind, data.value,
+  return !!data.value && allowsPoint(permissions.state.value, props.boardKey, props.kind, data.value,
     row && values ? { ...row, edit_values: { ...row.edit_values, ...values } } : row);
 }
 const canEditTable = computed(() => props.canWrite && scopeEditable());
@@ -69,7 +66,7 @@ watch(dirty, value => emit("dirty", value), {flush:"sync"});
 onBeforeUnmount(() => emit("dirty", false));
 watch(
   () => [
-    props.pid, props.modelId, props.kind, props.label, props.revision, reload.value,
+    props.pid, props.boardKey, props.kind, props.label, props.revision, reload.value,
   ],
   async (_, __, cleanup) => {
     let cancelled = false;
@@ -85,7 +82,7 @@ watch(
     actionError.value = "";
     try {
       const result = await api(
-        `/projects/${props.pid}/board-models/${props.modelId}/point-tables/${props.kind}`,
+        `/projects/${props.pid}/boards/${encodeURIComponent(props.boardKey)}/point-tables/${props.kind}`,
       );
       if (!cancelled) {
         result.definition.label = props.label;
@@ -106,8 +103,8 @@ watch(
 );
 const def = computed(() => data.value?.definition);
 const columnSettings = ref(false), columns = ref<TableColumn[]>([]);
-const columnKey = computed(() => `point-columns:${props.pid}:${props.modelId}:${props.kind}`);
-const { pageSize, setPageSize } = usePageSize(computed(() => `point-page-size:${props.pid}:${props.modelId}:${props.kind}`));
+const columnKey = computed(() => `point-columns:${props.pid}:${encodeURIComponent(props.boardKey)}:${props.kind}`);
+const { pageSize, setPageSize } = usePageSize(computed(() => `point-page-size:${props.pid}:${encodeURIComponent(props.boardKey)}:${props.kind}`));
 const displayColumns = computed(() => orderedColumns(columns.value).filter(c => c.visible));
 watch([() => def.value?.columns, columnKey], ([keys]) => {
   if (!keys) return;
@@ -148,32 +145,17 @@ watch([tableHead, displayColumns], async (_, __, cleanup) => {
 const scopedData = computed<PointTableData | null>(() => {
   if (!data.value) return null;
   const options = { ...data.value.options };
-  if (props.groupId != null) {
-    options.groups = options.groups.filter(g => g.id === props.groupId);
-    options.contexts = options.contexts.filter(c => c.group_id === props.groupId);
-    options.signals = options.signals.filter(s => s.group_id === props.groupId);
-  }
-  if (data.value.storage === "native" && props.groupKey != null) {
+  if (props.groupKey != null) {
     options.native_groups = (options.native_groups || []).filter(group => group.code === props.groupKey);
-    options.signals = (options.signals || []).filter(signal => signal.group_key === props.groupKey);
+    options.process_points = (options.process_points || []).filter(signal => signal.group_key === props.groupKey);
   }
-  if (props.signalId != null) options.signals = options.signals.filter(s => s.id === props.signalId);
+  if (props.processPointId != null) options.process_points = options.process_points.filter(s => s.id === props.processPointId);
   return { ...data.value, options };
 });
-const contextOptions = computed(() => scopedData.value?.options.contexts?.filter(c => c.group_id != null) || []);
-watch(contextOptions, options => {
-  if (!data.value) return;
-  if (filter.value !== "" && !options.some(c => c.id === filter.value)) filter.value = "";
-});
 function inScope(row: Row) {
-  if (data.value?.storage === "native") return (
-    (props.signalId == null || (row.process_point_id ?? row.signal_id) === props.signalId) &&
+  return (props.processPointId == null || row.process_point_id === props.processPointId) &&
     (props.groupKey == null || (row.group_key ?? row.edit_values?.group_key ??
-      data.value.options.signals.find(signal => signal.id === (row.process_point_id ?? row.signal_id))?.group_key) === props.groupKey)
-  );
-  return (props.signalId == null || row.signal_id === props.signalId) &&
-    (props.groupId == null || (props.kind === "process" ? row.group_id === props.groupId :
-      data.value?.options.signals.some(s => s.id === row.signal_id && s.group_id === props.groupId)));
+      data.value?.options.process_points.find(point => point.id === row.process_point_id)?.group_key) === props.groupKey);
 }
 const indexed = computed(() =>
   (data.value?.rows || []).map((row) => ({
@@ -189,7 +171,6 @@ const filtered = computed(() =>
     .filter(
       ({ row, search }) =>
         inScope(row) &&
-        (!filter.value || row.context_id === filter.value) &&
         search.includes(query.value.trim().toLowerCase()),
     )
     .map(({ row }) => row),
@@ -204,11 +185,10 @@ const grid = usePointGrid({
   data, scoped: scopedData, rows: filtered, columns: displayColumns, page, pageSize,
   writable: () => canEditTable.value,
   rowWritable: (row, values) => scopeEditable(row) && scopeEditable(row, values),
-  allowedChoice: (row, key, choice, values) => key !== "endpoint_id" || scopeEditable(row, { ...values, endpoint_id: choice.id }),
+  allowedChoice: (row, key, choice, values) => key !== "endpoint_key" || scopeEditable(row, { ...values, endpoint_key: choice.id }),
   blocked: () => busy.value || !!review.value || !!orderDraft.value,
-  locked: key => (key === "group_id" && props.groupId != null) ||
-    (key === "group_key" && props.groupKey != null) ||
-    (["signal_id", "process_point_id"].includes(key) && props.signalId != null),
+  locked: key => (key === "group_key" && props.groupKey != null) ||
+    (key === "process_point_id" && props.processPointId != null),
   error: message => { actionError.value = message; },
 });
 const gridTable = grid.table, gridInput = grid.input;
@@ -276,7 +256,7 @@ const menuItems = computed(() => {
       { key: "copy-row", label: "复制此行" },
       ...(grid.selectedRowIds.value.length ? [{ key: "copy-rows", label: "复制选中行" }] : []),
       ...(props.kind === "process" && props.allowForward ? [{ key: "forward", label: "转发配置" }] : []),
-      ...(props.kind !== "process" && props.signalId == null ? [{ key: "process", label: "关联处理点" }] : []),
+      ...(props.kind !== "process" && props.processPointId == null ? [{ key: "process", label: "关联处理点" }] : []),
     ];
   }
   const column = columns.value.find(c => c.key === menu.key)!;
@@ -320,7 +300,7 @@ function menuAction(action: string) {
     else if (action === "copy-row") void copyGrid(menu.row);
     else if (action === "copy-rows") void copyGrid();
     else if (action === "forward") openForward(menu.row);
-    else if (action === "process" && discard()) emit("process", menu.row.signal_id);
+    else if (action === "process" && discard()) emit("process", menu.row.process_point_id);
     return;
   }
   if (action === "columns") { columnSettings.value = true; return; }
@@ -339,18 +319,15 @@ function menuAction(action: string) {
   applyColumns(next);
   if (action === "hide") void nextTick(() => tableHead.value?.querySelector<HTMLElement>("th[data-column-key]")?.focus({ preventScroll: true }));
 }
-watch([data, page, pageSize, query, filter, displayColumns, busy, review], () => { tableMenu.value = null; });
+watch([data, page, pageSize, query, displayColumns, busy, review], () => { tableMenu.value = null; });
 function cellHint(row: Row, column: string) {
   const key = grid.field(column);
   if (["min_value", "max_value"].includes(column) && pointIsString(data.value!, grid.values(row), row)) return "字符串没有数值上下限，长度由字节数管理。";
   if (!props.canWrite) return "当前项目为只读权限，可选中和复制单元格。";
   if (!scopeEditable(row)) return "未获此板卡或协议的编辑权限，可以查看和复制；请联系管理员授权。";
   if (!key) return "关联或计算字段，随来源数据更新。";
-  if (key === "sig_id" && grid.values(row).sig_symbol) return "此 sigID 由公共符号解析；通过记录详情修改身份。";
   if (!grid.editable(row, column)) return "此字段在当前分组中锁定，可通过记录详情查看。";
-  const scopeHint = permissions.state.value?.edit_scope === "scoped" && props.kind === "process" && ["name", "enum_name", "sig_id", "sig_symbol", "internal_type", "data_item_id", "group_id"].includes(key)
-    ? "；若影响关联协议，保存时也需要该协议的编辑权限" : "";
-  return `${def.value!.fields[key].hint || "双击或按 Enter 编辑"}${def.value!.fields[key].nullable ? data.value?.storage === "native" ? "；留空表示未指定" : "；留空恢复继承" : ""}${scopeHint}`;
+  return `${def.value!.fields[key].hint || "双击或按 Enter 编辑"}${def.value!.fields[key].nullable ? "；留空表示未指定" : ""}`;
 }
 function discardGrid() {
   if (grid.dirty.value && !window.confirm("放弃这些尚未保存的单元格修改？")) return;
@@ -374,7 +351,7 @@ async function previewGrid(mode: "check" | "save") {
   busy.value = true;
   actionError.value = "";
   try {
-    review.value = await api(`/projects/${props.pid}/board-models/${props.modelId}/point-tables/${props.kind}/batch/preview`, "POST", {
+    review.value = await api(`/projects/${props.pid}/boards/${encodeURIComponent(props.boardKey)}/point-tables/${props.kind}/batch/preview`, "POST", {
       revision: data.value.revision, operation: "update", rows,
     });
   } catch (e) {
@@ -388,7 +365,7 @@ function previewConflict() {
     actionError.value = "其他成员修改了相同字段或关联数据，本次修改尚未保存。草稿已保留，可复制修改内容，或重新载入最新数据。";
   } else conflict();
 }
-watch([query, filter], () => {
+watch([query], () => {
   page.value = 1;
 });
 watch(pages, (n) => {
@@ -476,7 +453,7 @@ async function previewChange() {
   busy.value = true;
   actionError.value = "";
   try {
-    const base = `/projects/${props.pid}/board-models/${props.modelId}/point-tables/${props.kind}`;
+    const base = `/projects/${props.pid}/boards/${encodeURIComponent(props.boardKey)}/point-tables/${props.kind}`;
     review.value = await api(`${base}/reorder/preview`, "POST", {
       revision: data.value.revision,
       ids: orderDraft.value.ids,
@@ -523,24 +500,6 @@ function text(row: Row, key: string) {
           placeholder="搜索名称、sigID、地址或枚举…"
         />
       </div>
-      <select
-        v-if="kind !== 'process' && contextOptions.length > 1"
-        v-model="filter"
-        :disabled="busy || !!review || !!orderDraft || !!grid.editor.value"
-        class="point-filter"
-        aria-label="筛选逻辑设备"
-      >
-        <option value="">
-          全部逻辑设备
-        </option>
-        <option
-          v-for="o in contextOptions"
-          :key="o.id"
-          :value="o.id"
-        >
-          {{ o.name }} [{{ o.dev_id }}]
-        </option>
-      </select>
       <div class="inline">
         <button v-if="canEditTable" class="button small" :disabled="!grid.activeRow.value || !grid.active.value || !grid.editable(grid.activeRow.value, grid.active.value.column)" @click="grid.activeRow.value && grid.active.value && grid.start(grid.activeRow.value, grid.active.value.column)"><Pencil :size="14" />编辑单元格</button>
         <button class="icon-btn" aria-label="表格操作说明" title="表格操作说明" @click="showHelp = true"><CircleHelp :size="17" /></button>
@@ -612,22 +571,15 @@ function text(row: Row, key: string) {
                   @mousedown.stop @click.stop @dblclick.stop @keydown.stop="grid.editorKey" @change="grid.finish() && grid.focusActive()" @blur="grid.finish">
                   <template v-if="gridEditorDef.type === 'boolean'"><option value="true">是</option><option value="false">否</option></template>
                   <template v-else-if="gridEditorDef.reference"><option value="">请选择</option><option v-for="choice in grid.choices.value" :key="choice.id" :value="String(choice.id)">{{ choiceLabel(choice) }}</option></template>
-                  <template v-else><option v-if="gridEditorDef.nullable" value="">{{ data.storage === 'native' ? '未指定' : '跟随数据定义' }}</option><option v-for="option in gridEditorDef.options" :key="option" :value="option">{{ option }}</option></template>
+                  <template v-else><option v-if="gridEditorDef.nullable" value="">未指定</option><option v-for="option in gridEditorDef.options" :key="option" :value="option">{{ option }}</option></template>
                 </select>
                 <input v-else v-model="gridInput" class="point-cell-editor" type="text" :inputmode="gridEditorDef.type === 'number' ? 'decimal' : undefined" :disabled="!canWrite || !scopeEditable(row)"
-                  :aria-label="`编辑 ${gridEditorDef.label}`" :placeholder="gridEditorDef.nullable ? data.storage === 'native' ? '留空表示未指定' : '留空恢复继承' : ''"
+                  :aria-label="`编辑 ${gridEditorDef.label}`" :placeholder="gridEditorDef.nullable ? '留空表示未指定' : ''"
                   @mousedown.stop @click.stop @dblclick.stop @keydown.stop="grid.editorKey" @blur="grid.finish" />
               </template>
               <span
                 v-else class="point-cell-value" :class="{ 'record-name': column.key === def.columns[0], 'point-cell-boolean': typeof row[column.key] === 'boolean' }"
-                :title="
-                  data.storage !== 'native' && kind === 'process' &&
-                  ['default_value', 'min_value', 'max_value'].includes(column.key)
-                    ? grid.values(row)[column.key] == null
-                      ? '继承数据定义'
-                      : '处理点覆盖值'
-                    : undefined
-                "
+
                 >{{ text(row, column.key) }}</span
               >
             </td>
@@ -688,7 +640,7 @@ function text(row: Row, key: string) {
           <li>点击行号选行，按住 Shift 连选；也可选择矩形区域后复制。</li>
           <li>右键列头设置列；点击行号旁的 ⋯ 查看记录详情和关联操作。</li>
           <li>只读状态也可以选择并复制数据，计算列会随来源数据更新。</li>
-          <li>修改名称、sigID、类型或共享字段可能影响关联板卡和协议，保存时需要覆盖全部受影响范围的编辑权限。</li>
+          <li>修改内部点后会检查关联转发的类型、长度与转换规则，未通过校验不会提交。</li>
         </ul>
       </div>
     </Modal>
@@ -699,15 +651,12 @@ function text(row: Row, key: string) {
       v-if="editing"
       :key="selected?.id || 'new'"
       :pid="pid"
-      :model-id="modelId"
+      :board-key="boardKey"
       :data="scopedData!"
       :row="selected"
       :can-write="canWrite && scopeEditable(selected)"
-      :process-enabled="processEnabled"
-      :group-id="groupId"
       :group-key="groupKey"
-      :signal-id="signalId"
-      :context-id="kind !== 'process' && filter !== '' ? filter : undefined"
+      :process-point-id="processPointId"
       @dirty="editorDirty = $event"
       @error="emit('error', $event)"
       @conflict="conflict"
@@ -719,10 +668,10 @@ function text(row: Row, key: string) {
     />
     <Modal v-if="forwardSignal" :title="`${forwardSignal.name} · 转发配置`" wide @close="closeForward">
       <div class="modal-body point-forwarding">
-        <p class="notice">{{ data.storage === 'native' ? '此处与 DSP UPP 转发表共用配置，同一个内部点可以配置多条转发映射。' : '此处与转发点表共用配置。可为不同来源设备添加多条映射；AIDC 板卡的 VIR 服务随对外接口生成。' }}</p>
-        <PointTable :pid="pid" :model-id="modelId" kind="forward" :label="forwardLabel || '转发点表'"
-          :revision="revision" :can-write="canWrite" :process-enabled="processEnabled"
-          :group-id="forwardSignal.group_id" :group-key="data.storage === 'native' ? forwardSignal.group_key : undefined" :signal-id="forwardSignal.id"
+        <p class="notice">此处与转发表共用配置，同一个内部点可以配置多条转发映射。</p>
+        <PointTable :pid="pid" :board-key="boardKey" kind="forward" :label="forwardLabel || '转发点表'"
+          :revision="revision" :can-write="canWrite"
+          :group-key="forwardSignal.group_key" :process-point-id="forwardSignal.id"
           @done="emit('done', $event)" @conflict="forwardSignal = null; conflict()"
           @error="emit('error', $event)" @dirty="forwardDirty = $event" />
       </div>

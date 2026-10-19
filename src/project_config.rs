@@ -26,12 +26,21 @@ pub struct BoardType {
     pub point_storage: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub point_groups: Vec<PointGroup>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub point_endpoints: Vec<PointEndpoint>,
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PointGroup {
     pub code: String,
     pub name: String,
+}
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PointEndpoint {
+    pub code: String,
+    pub name: String,
+    pub protocol: String,
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -114,7 +123,7 @@ impl Config {
                 .is_some_and(|storage| storage != "native")
             {
                 return Err(AppError::bad(
-                    "point_storage 仅支持 native，省略时沿用已有存储",
+                    "point_storage 仅支持 native，省略时板卡仅用于拓扑预览",
                 ));
             }
             let mut groups = BTreeSet::new();
@@ -129,6 +138,20 @@ impl Config {
             {
                 return Err(AppError::bad(
                     "native 板卡须在 point_groups 中定义唯一、有效的点表分组",
+                ));
+            }
+            let mut endpoints = BTreeSet::new();
+            if t.point_endpoints.iter().any(|e| {
+                !model::identifier(&e.code)
+                    || e.code.len() > 80
+                    || e.name.trim().is_empty()
+                    || e.name.len() > 300
+                    || e.protocol != "UPP"
+                    || !endpoints.insert(&e.code)
+            }) || (t.point_storage.is_none() && !t.point_endpoints.is_empty())
+            {
+                return Err(AppError::bad(
+                    "point_endpoints 须为 native 板卡定义唯一、有效的 UPP 端点",
                 ));
             }
             if !model::identifier(&t.code)
@@ -267,30 +290,8 @@ pub async fn source(
 }
 pub async fn apply(tx: &mut Transaction<'_, Postgres>, pid: i64, value: &Value) -> Result<Value> {
     let config = Config::parse(value.clone())?;
-    let old: Option<Value> = sqlx::query_scalar("SELECT topology_config FROM projects WHERE id=$1")
-        .bind(pid)
-        .fetch_one(&mut **tx)
-        .await?;
-    if let Some(old) = old {
-        for t in Config::parse(old)?.board_types {
-            if !config
-                .board_types
-                .iter()
-                .any(|n| n.model_code == t.model_code)
-            {
-                let used:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM board_models m WHERE m.project_id=$1 AND m.code=$2 AND (EXISTS(SELECT 1 FROM signal_groups g WHERE g.model_id=m.id) OR EXISTS(SELECT 1 FROM endpoints e WHERE e.model_id=m.id)))").bind(pid).bind(&t.model_code).fetch_one(&mut **tx).await?;
-                if used {
-                    return Err(AppError::bad(format!(
-                        "{} 已有信号或协议配置，不能从项目移除",
-                        t.name
-                    )));
-                }
-            }
-        }
-    }
-    for t in &config.board_types {
-        sqlx::query("INSERT INTO board_models(project_id,code,name) VALUES($1,$2,$3) ON CONFLICT(project_id,code) DO NOTHING").bind(pid).bind(&t.model_code).bind(&t.name).execute(&mut **tx).await?;
-    }
+    let used = db::all_json(tx, "SELECT to_jsonb(ref) FROM (SELECT board_key,group_key,NULL::text AS endpoint_key FROM process_points WHERE project_id=$1 GROUP BY board_key,group_key UNION SELECT board_key,NULL,endpoint_key FROM transmit_points WHERE project_id=$1 GROUP BY board_key,endpoint_key UNION SELECT board_key,NULL,endpoint_key FROM project_member_grants WHERE project_id=$1 GROUP BY board_key,endpoint_key) ref", pid).await?;
+    validate_references(&config, &used)?;
     let value = serde_json::to_value(&config)?;
     sqlx::query("UPDATE projects SET topology_config=$2 WHERE id=$1")
         .bind(pid)
@@ -300,64 +301,38 @@ pub async fn apply(tx: &mut Transaction<'_, Postgres>, pid: i64, value: &Value) 
     Ok(json!({"id":pid,"config":value,"counts":config.counts()?}))
 }
 
-// A diagram's protocol must agree with the shared endpoint contract when one exists.
-pub fn relationship_issues(g: &Value) -> Vec<Value> {
-    use crate::topology::{find, num, rows, strv};
-    let Ok(config) = Config::parse(g["project_config"].clone()) else {
-        return vec![];
-    };
-    let mut issues = Vec::new();
-    for (index, m) in config.mounts.iter().enumerate() {
-        let model_id = |code: &str| {
-            config
-                .board_types
-                .iter()
-                .find(|t| t.code == code)
-                .and_then(|t| {
-                    rows(g, "board_models")
-                        .iter()
-                        .find(|b| b["code"] == t.model_code)
-                })
-                .map(|b| num(b, "id"))
-        };
-        let Some(parent) = model_id(&m.parent) else {
-            continue;
-        };
-        let Some(child) = model_id(&m.child) else {
-            continue;
-        };
-        let mut actual: BTreeMap<i64, BTreeSet<(&str, &str)>> = BTreeMap::new();
-        for ce in rows(g, "endpoints")
+/// Every live point and permission refers to stable keys in the applied JSON.
+/// History intentionally does not participate: it keeps its original snapshot.
+fn validate_references(config: &Config, used: &[Value]) -> Result<()> {
+    for reference in used {
+        let key = reference["board_key"].as_str().unwrap_or_default();
+        let board = config
+            .board_types
             .iter()
-            .filter(|e| num(e, "model_id") == parent)
-        {
-            for se in rows(g, "endpoints").iter().filter(|e| {
-                num(e, "model_id") == child
-                    && e["role"] != ce["role"]
-                    && e["contract_id"] == ce["contract_id"]
-            }) {
-                if let Some(contract) = find(g, "protocol_contracts", num(ce, "contract_id")) {
-                    let matches = actual.entry(num(contract, "id")).or_default();
-                    // A contract may also be served on unrelated interfaces. Compare
-                    // only the transports that these two types have in common.
-                    if ce["transport"] == se["transport"] {
-                        matches.insert((strv(contract, "protocol"), strv(ce, "transport")));
-                    }
-                }
+            .find(|b| b.code == key)
+            .ok_or_else(|| {
+                AppError::bad(format!("板卡 {key} 已有点表或成员授权，不能删除或修改代码"))
+            })?;
+        if let Some(group) = reference["group_key"].as_str() {
+            if board.point_storage.as_deref() != Some("native")
+                || !board.point_groups.iter().any(|g| g.code == group)
+            {
+                return Err(AppError::bad(format!(
+                    "板卡 {key} 的分组 {group} 已有内部数据，不能移除"
+                )));
             }
         }
-        if actual.values().any(|connections| {
-            connections.is_empty()
-                || connections.iter().any(|(p, t)| {
-                    !m.connections
-                        .iter()
-                        .any(|c| c.protocol == *p && c.transport == *t)
-                })
-        }) {
-            issues.push(json!({"key":format!("project_config:protocol:{index}"),"level":"error","entity":"project_config","id":0,"name":format!("{} ↔ {}",m.parent,m.child),"code":"protocol","message":"项目 JSON 的协议/传输方式与现有板卡端点契约不一致，请同步检查挂载关系和端点配置"}));
+        if let Some(endpoint) = reference["endpoint_key"].as_str() {
+            if board.point_storage.as_deref() != Some("native")
+                || !board.point_endpoints.iter().any(|e| e.code == endpoint)
+            {
+                return Err(AppError::bad(format!(
+                    "板卡 {key} 的端点 {endpoint} 已有转发数据或成员授权，不能移除"
+                )));
+            }
         }
     }
-    issues
+    Ok(())
 }
 
 #[cfg(test)]
@@ -440,30 +415,42 @@ mod tests {
         assert!(Config::parse(legacy).is_err());
     }
     #[test]
-    fn validates_both_canfd_protocols_against_shared_endpoints() {
-        let mut graph = json!({
-            "project_config": example(),
-            "board_models": [{"id":1,"code":"CSU"},{"id":2,"code":"UPM_ARM"}],
-            "protocol_contracts": [{"id":10,"protocol":"MODBUS"},{"id":20,"protocol":"UPP"}],
-            "endpoints": [
-                {"model_id":1,"contract_id":10,"role":"client","transport":"CANFD"},
-                {"model_id":2,"contract_id":10,"role":"server","transport":"CANFD"},
-                {"model_id":1,"contract_id":20,"role":"client","transport":"CANFD"},
-                {"model_id":2,"contract_id":20,"role":"server","transport":"CANFD"},
-                {"model_id":2,"contract_id":10,"role":"server","transport":"RS485"}
-            ]
-        });
-        assert!(relationship_issues(&graph).is_empty());
-        graph["project_config"]["mounts"][0]["connections"]
+    fn endpoint_keys_are_unique_and_upp_only() {
+        let mut config = example();
+        config["board_types"][2]["point_endpoints"] = json!([
+            {"code":"UPP_SERVICE","name":"DSP 转发","protocol":"UPP"}
+        ]);
+        assert!(Config::parse(config.clone()).is_ok());
+        let endpoint = config["board_types"][2]["point_endpoints"][0].clone();
+        config["board_types"][2]["point_endpoints"]
+            .as_array_mut()
+            .unwrap()
+            .push(endpoint);
+        assert!(Config::parse(config.clone()).is_err());
+        config["board_types"][2]["point_endpoints"]
             .as_array_mut()
             .unwrap()
             .pop();
-        assert_eq!(relationship_issues(&graph).len(), 1);
-        graph["project_config"] = example();
-        graph["endpoints"][0]["role"] = json!("server");
-        graph["endpoints"][1]["role"] = json!("client");
-        assert!(relationship_issues(&graph).is_empty());
-        graph["endpoints"][3]["transport"] = json!("CAN");
-        assert_eq!(relationship_issues(&graph).len(), 1);
+        config["board_types"][2]["point_endpoints"][0]["protocol"] = json!("MODBUS");
+        assert!(Config::parse(config).is_err());
+    }
+    #[test]
+    fn keeps_referenced_board_group_and_endpoint_keys() {
+        let mut value = example();
+        value["board_types"][2]["point_endpoints"] = json!([
+            {"code":"UPP_SERVICE","name":"DSP 转发","protocol":"UPP"}
+        ]);
+        let config = Config::parse(value.clone()).unwrap();
+        let references = vec![
+            json!({"board_key":"DSP","group_key":"LOCAL"}),
+            json!({"board_key":"DSP","endpoint_key":"UPP_SERVICE"}),
+        ];
+        assert!(validate_references(&config, &references).is_ok());
+        value["board_types"][2]["point_groups"][0]["code"] = json!("OTHER");
+        assert!(validate_references(&Config::parse(value.clone()).unwrap(), &references).is_err());
+        value["board_types"][2]["point_groups"][0]["code"] = json!("LOCAL");
+        value["board_types"][2]["point_endpoints"][0]["code"] = json!("OTHER");
+        assert!(validate_references(&Config::parse(value).unwrap(), &references).is_err());
+        assert!(validate_references(&config, &[json!({"board_key":"MISSING"})]).is_err());
     }
 }

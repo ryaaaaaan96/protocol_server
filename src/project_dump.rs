@@ -1,6 +1,5 @@
 //! Portable, project-scoped PostgreSQL custom archives. Uploaded SQL is never executed.
 use crate::{
-    db,
     error::{AppError, Result},
     topology,
 };
@@ -24,92 +23,20 @@ fn supported_migration_version() -> i64 {
         .max()
         .expect("application includes database migrations")
 }
-// Dependency order; platform signal_id is a protocol number, not a signals FK.
-const INSERT_ORDER: &[&str] = &[
-    "platform_signals",
-    "board_models",
-    "boards",
-    "data_items",
-    "signal_groups",
-    "signals",
-    "signal_ranges",
-    "device_contexts",
-    "protocol_contracts",
-    "protocol_fields",
-    "endpoints",
-    "signal_bindings",
-    "board_links",
-    "passthrough_routes",
-    "source_records",
-    "process_points",
-    "transmit_points",
-];
+// Restore processing rows before their forwarding references.
+const INSERT_ORDER: &[&str] = &["process_points", "transmit_points"];
 
 fn columns(table: &str) -> String {
-    let extra = match table {
-        "process_points" => {
-            return format!(
-                "id,project_id,board_key,{}",
-                crate::dsp_points::PROCESS_COLUMNS
-            );
-        }
-        "transmit_points" => {
-            return format!(
-                "id,project_id,board_key,{}",
-                crate::dsp_points::TRANSMIT_COLUMNS
-            );
-        }
-        "data_items" => {
-            "name,data_type,byte_length,unit,default_value,min_value,max_value,notes,source_sheet,source_row,raw_json"
-        }
-        "source_records" => "sheet,row_number,cells,classification",
-        "signals" => {
-            "group_id,data_item_id,name,enum_name,sig_id,sig_symbol,flags,callback,process_enabled,internal_type,display_order"
-        }
-        "signal_bindings" => {
-            "endpoint_id,context_id,field_id,signal_id,poll_interval,set_priority,scan_priority,display_order"
-        }
-        _ => topology::columns(table).expect("dump table allowlist"),
+    let fields = match table {
+        "process_points" => crate::dsp_points::PROCESS_COLUMNS,
+        "transmit_points" => crate::dsp_points::TRANSMIT_COLUMNS,
+        _ => unreachable!("dump table allowlist"),
     };
-    format!("id,project_id,{extra}")
+    format!("id,project_id,board_key,{fields}")
 }
-
 fn references(table: &str) -> &'static [(&'static str, &'static str)] {
     match table {
         "transmit_points" => &[("process_point_id", "process_points")],
-        "boards" | "signal_groups" => &[("model_id", "board_models")],
-        "signals" => &[
-            ("group_id", "signal_groups"),
-            ("data_item_id", "data_items"),
-        ],
-        "signal_ranges" => &[("signal_id", "signals")],
-        "device_contexts" => &[("model_id", "board_models"), ("group_id", "signal_groups")],
-        "protocol_fields" => &[
-            ("contract_id", "protocol_contracts"),
-            ("data_item_id", "data_items"),
-        ],
-        "endpoints" => &[
-            ("model_id", "board_models"),
-            ("contract_id", "protocol_contracts"),
-        ],
-        "signal_bindings" => &[
-            ("endpoint_id", "endpoints"),
-            ("context_id", "device_contexts"),
-            ("field_id", "protocol_fields"),
-            ("signal_id", "signals"),
-        ],
-        "board_links" => &[
-            ("client_board_id", "boards"),
-            ("server_board_id", "boards"),
-            ("client_endpoint_id", "endpoints"),
-            ("server_endpoint_id", "endpoints"),
-            ("client_context_id", "device_contexts"),
-        ],
-        "passthrough_routes" => &[
-            ("server_endpoint_id", "endpoints"),
-            ("client_endpoint_id", "endpoints"),
-            ("context_id", "device_contexts"),
-        ],
         _ => &[],
     }
 }
@@ -122,7 +49,7 @@ fn positive(value: &Value) -> Option<i64> {
 pub fn validate(payload: &Value, expected_key: &str) -> Result<()> {
     if payload["format"] != "protocol-studio-project"
         || payload["version"] != 1
-        || payload["schema_version"] != 2
+        || payload["schema_version"] != 3
         || payload["key"] != expected_key
         || positive(&payload["migration_version"]).is_none()
     {
@@ -174,31 +101,14 @@ pub fn validate(payload: &Value, expected_key: &str) -> Result<()> {
         }
         ids.insert(table, table_ids);
     }
-    let symbols: BTreeSet<_> = topology::rows(&payload["tables"], "platform_signals")
-        .iter()
-        .filter_map(|row| row["symbol"].as_str())
-        .collect();
     for &table in INSERT_ORDER {
         for row in topology::rows(&payload["tables"], table) {
             for &(column, target) in references(table) {
-                if table == "device_contexts" && column == "group_id" && row[column].is_null() {
-                    continue;
-                }
                 if !positive(&row[column]).is_some_and(|id| ids[target].contains(&id)) {
                     return Err(AppError::bad(format!(
                         "Dump {table}.{column} 引用了不存在的 {target} 记录"
                     )));
                 }
-            }
-            if table == "signals"
-                && !row["sig_symbol"].is_null()
-                && !row["sig_symbol"]
-                    .as_str()
-                    .is_some_and(|value| symbols.contains(value))
-            {
-                return Err(AppError::bad(
-                    "Dump signals.sig_symbol 引用了不存在的平台信号",
-                ));
             }
         }
     }
@@ -342,8 +252,8 @@ pub async fn replace(
             .fetch_one(&mut **tx)
             .await?;
     validate(payload, key.as_deref().unwrap_or_default())?;
-    if schema_version != 2 {
-        return Err(AppError::bad("请先将目标项目迁移到 v2，再导入 Dump"));
+    if schema_version != 3 {
+        return Err(AppError::bad("请先将目标项目迁移到 v3，再导入 Dump"));
     }
     // SQLx owns its migration ledger. The runtime role deliberately cannot read
     // that private table; the archive must match this application's embedded schema.
@@ -353,26 +263,6 @@ pub async fn replace(
             "Dump 迁移版本与当前程序支持版本 {migration} 不一致，请先统一版本再导出"
         )));
     }
-    let grants = db::all_json(tx, "SELECT to_jsonb(g) || jsonb_build_object('model_code',m.code,'contract_code',c.code) FROM project_member_grants g JOIN board_models m ON m.project_id=g.project_id AND m.id=g.model_id LEFT JOIN protocol_contracts c ON c.project_id=g.project_id AND c.id=g.contract_id WHERE g.project_id=$1", pid).await?;
-    for grant in &grants {
-        for (table, column) in [
-            ("board_models", "model_code"),
-            ("protocol_contracts", "contract_code"),
-        ] {
-            if grant[column].is_null() {
-                continue;
-            }
-            if !topology::rows(&payload["tables"], table)
-                .iter()
-                .any(|row| row["code"] == grant[column])
-            {
-                return Err(AppError::bad(format!(
-                    "Dump 缺少已有成员授权对应的 {}，请先调整成员权限",
-                    grant[column]
-                )));
-            }
-        }
-    }
     for table in INSERT_ORDER.iter().rev() {
         sqlx::query(&format!("DELETE FROM {table} WHERE project_id=$1"))
             .bind(pid)
@@ -381,7 +271,6 @@ pub async fn replace(
     }
     let mut mappings: BTreeMap<&str, BTreeMap<i64, i64>> = BTreeMap::new();
     let mut counts = serde_json::Map::new();
-    let mut imported_codes: BTreeMap<&str, BTreeMap<String, i64>> = BTreeMap::new();
     for &table in INSERT_ORDER {
         let rows = topology::rows(&payload["tables"], table);
         let allocated: Vec<i64> = sqlx::query_scalar(
@@ -397,7 +286,6 @@ pub async fn replace(
             .map(|(row, id)| (row["id"].as_i64().unwrap(), id))
             .collect();
         let mut remapped = Vec::with_capacity(rows.len());
-        let mut codes = BTreeMap::new();
         for row in rows {
             let mut next = row.clone();
             let id = mapping[&row["id"].as_i64().unwrap()];
@@ -408,9 +296,6 @@ pub async fn replace(
                     next[column] = json!(mappings[target][&old]);
                 }
             }
-            if let Some(code) = row["code"].as_str() {
-                codes.insert(code.to_owned(), id);
-            }
             remapped.push(next);
         }
         if !remapped.is_empty() {
@@ -419,18 +304,7 @@ pub async fn replace(
                 .bind(json!(remapped)).execute(&mut **tx).await?;
         }
         counts.insert(table.into(), json!(rows.len()));
-        imported_codes.insert(table, codes);
         mappings.insert(table, mapping);
-    }
-    // Preserve scoped member permissions using stable codes instead of imported IDs.
-    for grant in grants {
-        let model = imported_codes["board_models"][grant["model_code"].as_str().unwrap()];
-        let contract = grant["contract_code"]
-            .as_str()
-            .map(|code| imported_codes["protocol_contracts"][code]);
-        sqlx::query("INSERT INTO project_member_grants(project_id,user_id,model_id,scope,contract_id) VALUES($1,$2,$3,$4,$5)")
-            .bind(pid).bind(grant["user_id"].as_i64().unwrap()).bind(model).bind(grant["scope"].as_str().unwrap()).bind(contract)
-            .execute(&mut **tx).await?;
     }
     Ok(json!({"tables":counts,"source_revision":payload["source_revision"]}))
 }
@@ -443,7 +317,7 @@ mod tests {
             .iter()
             .map(|table| ((*table).into(), json!([])))
             .collect();
-        json!({"format":"protocol-studio-project","version":1,"schema_version":2,"migration_version":supported_migration_version(),"key":"example","tables":tables})
+        json!({"format":"protocol-studio-project","version":1,"schema_version":3,"migration_version":supported_migration_version(),"key":"example","tables":tables})
     }
     #[test]
     fn only_project_payload_is_accepted() {
@@ -464,13 +338,13 @@ mod tests {
     #[test]
     fn project_boundaries_and_foreign_keys_are_checked() {
         let mut data = empty();
-        data["tables"]["board_models"] = json!([{"id":1,"project_id":5,"code":"DSP"}]);
-        data["tables"]["boards"] = json!([{"id":2,"project_id":5,"model_id":1}]);
+        data["tables"]["process_points"] = json!([{"id":1,"project_id":5,"board_key":"DSP"}]);
+        data["tables"]["transmit_points"] = json!([{"id":2,"project_id":5,"process_point_id":1}]);
         assert!(validate(&data, "example").is_ok());
-        data["tables"]["boards"][0]["project_id"] = json!(6);
+        data["tables"]["transmit_points"][0]["project_id"] = json!(6);
         assert!(validate(&data, "example").is_err());
-        data["tables"]["boards"][0]["project_id"] = json!(5);
-        data["tables"]["boards"][0]["model_id"] = json!(9);
+        data["tables"]["transmit_points"][0]["project_id"] = json!(5);
+        data["tables"]["transmit_points"][0]["process_point_id"] = json!(9);
         assert!(validate(&data, "example").is_err());
     }
     #[test]

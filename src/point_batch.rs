@@ -42,7 +42,7 @@ fn create_operation() -> String {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Batch {
-    model_id: i64,
+    board_key: String,
     kind: String,
     rows: Vec<BatchRow>,
 }
@@ -50,7 +50,7 @@ struct Batch {
 pub async fn preview(
     State(s): State<AppState>,
     u: User,
-    Path((pid, mid, kind)): Path<(i64, i64, String)>,
+    Path((pid, board_key, kind)): Path<(i64, String, String)>,
     Json(request): Json<BatchRequest>,
 ) -> Result<Json<Value>> {
     point_tables::entity(&kind)?;
@@ -64,7 +64,7 @@ pub async fn preview(
             operation: request.operation,
             id: None,
             expected: Value::Null,
-            values: json!({"model_id":mid,"kind":kind,"rows":request.rows}),
+            values: json!({"board_key":board_key,"kind":kind,"rows":request.rows}),
         }),
     )
     .await
@@ -76,7 +76,7 @@ fn decode(c: &Change) -> Result<Batch> {
     }
     let batch: Batch = serde_json::from_value(c.values.clone())?;
     point_tables::entity(&batch.kind)?;
-    if batch.model_id <= 0 || batch.rows.is_empty() || batch.rows.len() > MAX_ROWS {
+    if batch.board_key.trim().is_empty() || batch.rows.is_empty() || batch.rows.len() > MAX_ROWS {
         return Err(AppError::bad("请选择板卡，每批操作 1～200 行"));
     }
     let mut seen = BTreeSet::new();
@@ -116,15 +116,11 @@ fn failure(errors: Vec<Value>) -> AppError {
     error
 }
 
-fn check_fields(batch: &Batch, operation: &str, native: bool) -> Result<()> {
+fn check_fields(batch: &Batch, operation: &str) -> Result<()> {
     let allowed = point_tables::writable(&batch.kind);
-    // Native rows use the same defaults as a single point edit. They must not
-    // require the unrelated legacy data-item/group/endpoint foreign keys.
-    let required: &[&str] = match (native, batch.kind.as_str()) {
-        (true, "process") => &["name", "enum_name"],
-        (true, "forward") => &["process_point_id", "name"],
-        (_, "process") => &["group_id", "data_item_id", "name", "enum_name"],
-        _ => &["endpoint_id", "context_id", "signal_id", "field_id"],
+    let required: &[&str] = match batch.kind.as_str() {
+        "process" => &["name", "enum_name"],
+        _ => &["process_point_id", "name"],
     };
     let mut errors = Vec::new();
     for row in &batch.rows {
@@ -148,43 +144,25 @@ fn check_fields(batch: &Batch, operation: &str, native: bool) -> Result<()> {
                 add(key, "字段不属于当前点表或只读");
                 continue;
             }
-            let nullable = if native {
-                &[
-                    "sig_id",
-                    "unit",
-                    "default_value",
-                    "min_value",
-                    "max_value",
-                    "notes",
-                ][..]
-            } else {
-                &[
-                    "sig_id",
-                    "sig_symbol",
-                    "internal_type",
-                    "default_value",
-                    "min_value",
-                    "max_value",
-                ][..]
-            };
+            let nullable = &[
+                "sig_id",
+                "unit",
+                "default_value",
+                "min_value",
+                "max_value",
+                "notes",
+            ];
             if value.is_null() && nullable.contains(&key.as_str()) {
                 continue;
             }
             let valid = match key.as_str() {
-                "group_id" | "data_item_id" | "endpoint_id" | "context_id" | "signal_id"
-                | "field_id" => value.as_i64().is_some_and(|v| v > 0),
-                "sig_id" | "poll_interval" | "set_priority" | "scan_priority" => {
+                "process_point_id" => value.as_i64().is_some_and(|v| v > 0),
+                "sig_id" | "element_count" | "byte_length" | "upp_model" | "address"
+                | "wire_length" | "byte_order" => {
                     value.as_i64().is_some_and(|v| i32::try_from(v).is_ok())
                 }
-                "process_point_id" if native => value.as_i64().is_some_and(|v| v > 0),
-                "element_count" | "byte_length" | "upp_model" | "address" | "wire_length"
-                | "byte_order"
-                    if native =>
-                {
-                    value.as_i64().is_some_and(|v| i32::try_from(v).is_ok())
-                }
-                "scale" if native => value.as_f64().is_some_and(|v| v.is_finite() && v > 0.),
-                "enabled" if native => value.is_boolean(),
+                "scale" => value.as_f64().is_some_and(|v| v.is_finite() && v > 0.),
+                "enabled" => value.is_boolean(),
                 "process_enabled" | "boot_restore" | "manual_restore" => value.is_boolean(),
                 _ => value.as_str().is_some_and(|s| s.len() <= 4096),
             };
@@ -202,15 +180,18 @@ fn check_fields(batch: &Batch, operation: &str, native: bool) -> Result<()> {
 
 pub async fn apply(tx: &mut Transaction<'_, Postgres>, pid: i64, c: &Change) -> Result<Value> {
     let batch = decode(c)?;
-    let native = crate::dsp_points::native_board(tx, pid, batch.model_id)
+    if crate::dsp_points::native_board(tx, pid, &batch.board_key)
         .await?
-        .is_some();
-    check_fields(&batch, &c.operation, native)?;
+        .is_none()
+    {
+        return Err(AppError::bad("此板卡尚未启用点表存储"));
+    }
+    check_fields(&batch, &c.operation)?;
     let mut records = Vec::new();
     let mut errors = Vec::new();
     for row in batch.rows {
         // Keep successful rows in the outer transaction to detect within-batch duplicates.
-        // Every row savepoint also undoes a signal if its range insert fails.
+        // A failed row is fully rolled back before collecting its errors.
         let mut proposed = tx.begin().await?;
         let result = point_tables::apply(
             &mut proposed,
@@ -221,7 +202,7 @@ pub async fn apply(tx: &mut Transaction<'_, Postgres>, pid: i64, c: &Change) -> 
                 operation: c.operation.clone(),
                 id: row.id,
                 expected: row.expected,
-                values: json!({"model_id":batch.model_id,"fields":row.values}),
+                values: json!({"board_key":batch.board_key,"fields":row.values}),
             },
         )
         .await;
@@ -249,7 +230,7 @@ pub async fn apply(tx: &mut Transaction<'_, Postgres>, pid: i64, c: &Change) -> 
     if !errors.is_empty() {
         return Err(failure(errors));
     }
-    Ok(json!({"id":batch.model_id,"kind":batch.kind,"count":records.len(),"rows":records}))
+    Ok(json!({"board_key":batch.board_key,"kind":batch.kind,"count":records.len(),"rows":records}))
 }
 
 /// Rebase a stale draft only when every edited cell still has its original value.
@@ -262,9 +243,9 @@ pub async fn can_preview(
 ) -> Result<bool> {
     let batch = decode(c)?;
     let definition =
-        point_tables::board_definition(tx, pid, batch.model_id, &batch.kind, &s.project_files)
+        point_tables::board_definition(tx, pid, &batch.board_key, &batch.kind, &s.project_files)
             .await?;
-    let current = point_tables::table_rows(tx, pid, batch.model_id, &batch.kind).await?;
+    let current = point_tables::table_rows(tx, pid, &batch.board_key, &batch.kind).await?;
     Ok(batch.rows.iter().all(|change| {
         current
             .iter()
@@ -290,10 +271,10 @@ pub fn audit_before(graph: &Value, c: &Change) -> Option<Value> {
         .rows
         .iter()
         .map(|row| {
-            json!({"row":row.row,"record":point_tables::audit_before(graph,entity,row.id.unwrap(),batch.model_id)})
+            json!({"row":row.row,"record":point_tables::audit_before(graph,entity,row.id.unwrap(),&batch.board_key)})
         })
         .collect();
-    Some(json!({"id":batch.model_id,"kind":batch.kind,"count":rows.len(),"rows":rows}))
+    Some(json!({"board_key":batch.board_key,"kind":batch.kind,"count":rows.len(),"rows":rows}))
 }
 
 /// Attach source row numbers to domain errors (including conflicts with older records).
@@ -302,8 +283,8 @@ pub fn annotate(errors: &mut [Value], applied: &Value) {
         let row = topology::rows(applied, "rows").iter().find(|r| {
             let id = &r["record"]["id"];
             let matches = match error["entity"].as_str() {
-                Some("signals" | "process_points") => applied["kind"] == "process",
-                Some("signal_bindings" | "transmit_points") => applied["kind"] != "process",
+                Some("process_points") => applied["kind"] == "process",
+                Some("transmit_points") => applied["kind"] != "process",
                 _ => false,
             };
             matches && (error["id"] == *id || error["related_id"] == *id)
@@ -318,60 +299,13 @@ pub fn annotate(errors: &mut [Value], applied: &Value) {
 /// instead of trying to apply an insertion patch containing the preview's sequence IDs.
 fn dependencies(doc: &Value, c: &Change) -> Result<Value> {
     let batch = decode(c)?;
-    let mut refs = BTreeSet::new();
-    refs.insert(("board_models", batch.model_id.to_string()));
-    let mut groups = BTreeSet::new();
-    let mut contracts = BTreeSet::new();
+    let mut result = json!({"board": doc["project_config"]["board_types"].as_array()
+        .and_then(|boards| boards.iter().find(|board| board["code"] == batch.board_key))});
     for row in batch.rows {
-        let v = Value::Object(row.values);
-        if let Some(id) = v["process_point_id"].as_i64() {
-            refs.insert(("process_points", id.to_string()));
+        if let Some(id) = row.values.get("process_point_id").and_then(Value::as_i64) {
+            let key = id.to_string();
+            result[format!("process_points/{id}")] = doc["process_points"][&key].clone();
         }
-        if batch.kind == "process" {
-            groups.insert(v["group_id"].to_string());
-            refs.insert(("data_items", v["data_item_id"].to_string()));
-            if let Some(symbol) = v["sig_symbol"].as_str() {
-                refs.insert(("platform_signals", symbol.to_owned()));
-            }
-        } else {
-            for (table, key) in [
-                ("endpoints", "endpoint_id"),
-                ("device_contexts", "context_id"),
-                ("signals", "signal_id"),
-                ("v_signals", "signal_id"),
-                ("protocol_fields", "field_id"),
-            ] {
-                refs.insert((table, v[key].to_string()));
-            }
-            let endpoint = &doc["endpoints"][v["endpoint_id"].to_string()];
-            contracts.insert(endpoint["contract_id"].to_string());
-            let signal = &doc["signals"][v["signal_id"].to_string()];
-            groups.insert(signal["group_id"].to_string());
-            refs.insert(("data_items", signal["data_item_id"].to_string()));
-        }
-    }
-    for id in &groups {
-        refs.insert(("signal_groups", id.clone()));
-    }
-    for id in &contracts {
-        refs.insert(("protocol_contracts", id.clone()));
-    }
-    // Context additions/removals change which devices receive the added processing data;
-    // protocol layout changes can change addresses of a new binding.
-    for (table, key, ids) in [
-        ("device_contexts", "group_id", &groups),
-        ("v_protocol_fields", "contract_id", &contracts),
-    ] {
-        for (id, row) in doc[table].as_object().into_iter().flatten() {
-            if ids.contains(&row[key].to_string()) {
-                refs.insert((table, id.clone()));
-            }
-        }
-    }
-    let mut result = json!({});
-    result["project_config"] = doc["project_config"].clone();
-    for (table, id) in refs {
-        result[format!("{table}/{id}")] = doc[table][&id].clone();
     }
     Ok(result)
 }
@@ -390,47 +324,38 @@ pub fn guard(base: &Value, current: &Value, c: &Change, revision: i32) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
-
     fn batch(kind: &str, values: Value) -> Batch {
-        serde_json::from_value(json!({
-            "model_id": 1, "kind": kind, "rows": [{"row": 1, "values": values}]
-        }))
+        serde_json::from_value(
+            json!({"board_key":"DSP","kind":kind,"rows":[{"row":1,"values":values}]}),
+        )
         .unwrap()
     }
-
     #[test]
-    fn native_creation_uses_point_defaults_without_legacy_foreign_keys() {
-        let process = batch(
-            "process",
-            json!({"name":"DSP 点","enum_name":"DSP_POINT","internal_type":"U16",
-                "element_count":2,"byte_length":4,"group_key":"LOCAL"}),
-        );
-        assert!(check_fields(&process, "create", true).is_ok());
-        assert!(check_fields(&process, "create", false).is_err());
-        let defaults = batch("process", json!({"name":"DSP 点","enum_name":"DSP_POINT"}));
-        assert!(check_fields(&defaults, "create", true).is_ok());
-        assert!(check_fields(&batch("process", json!({"name":"DSP 点"})), "create", true).is_err());
-        let forward = batch(
-            "forward",
-            json!({"name":"DSP 转发","process_point_id":9,"upp_model":103,"address":2000,
-                "wire_type":"S32","wire_length":4,"scale":0.1,"byte_order":1,
-                "conversion":"fixed_point","enabled":true}),
-        );
-        assert!(check_fields(&forward, "create", true).is_ok());
-        assert!(check_fields(&forward, "create", false).is_err());
+    fn creation_uses_point_defaults_and_rejects_legacy_fields() {
         assert!(
             check_fields(
-                &batch("forward", json!({"name":"DSP 转发"})),
-                "create",
-                true
+                &batch("process", json!({"name":"DSP 点","enum_name":"DSP_POINT"})),
+                "create"
             )
-            .is_err()
+            .is_ok()
         );
+        assert!(
+            check_fields(
+                &batch(
+                    "forward",
+                    json!({"name":"DSP 转发","process_point_id":9,"scale":0.1})
+                ),
+                "create"
+            )
+            .is_ok()
+        );
+        assert!(check_fields(&batch("process", json!({"name":"DSP 点"})), "create").is_err());
+        assert!(check_fields(&batch("process", json!({"group_id":1})), "update").is_err());
+        assert!(check_fields(&batch("forward", json!({"name":"DSP 转发"})), "create").is_err());
     }
-
     #[test]
-    fn native_updates_validate_numeric_boolean_and_nullable_fields() {
-        for (kind, valid) in [
+    fn validates_numeric_boolean_and_nullable_fields() {
+        for (kind, values) in [
             (
                 "process",
                 json!({"element_count":1,"byte_length":4,"internal_type":"F32","sig_id":null,"notes":null}),
@@ -440,9 +365,9 @@ mod tests {
                 json!({"process_point_id":4,"upp_model":2,"address":42,"wire_length":4,"scale":0.01,"byte_order":2,"enabled":false}),
             ),
         ] {
-            assert!(check_fields(&batch(kind, valid), "update", true).is_ok());
+            assert!(check_fields(&batch(kind, values), "update").is_ok());
         }
-        for (kind, invalid) in [
+        for (kind, values) in [
             ("process", json!({"element_count":"2"})),
             ("process", json!({"byte_length":2.5})),
             ("process", json!({"internal_type":null})),
@@ -451,15 +376,24 @@ mod tests {
             ("forward", json!({"scale":0})),
             ("forward", json!({"enabled":"false"})),
         ] {
-            assert!(check_fields(&batch(kind, invalid), "update", true).is_err());
+            assert!(check_fields(&batch(kind, values), "update").is_err());
         }
-        assert!(
-            check_fields(
-                &batch("process", json!({"internal_type":null})),
-                "update",
-                false
-            )
-            .is_ok()
-        );
+    }
+    #[test]
+    fn dependencies_follow_json_board_and_referenced_process_point() {
+        let change = Change {
+            revision: 1,
+            entity: "point_batch".into(),
+            operation: "create".into(),
+            id: None,
+            expected: Value::Null,
+            values: json!({"board_key":"DSP","kind":"forward","rows":[{"row":1,"values":{"name":"out","process_point_id":7}}]}),
+        };
+        let base = json!({"project_config":{"board_types":[{"code":"DSP","point_groups":[{"code":"LOCAL"}]}]},"process_points":{"7":{"id":7,"name":"input"},"8":{"id":8,"name":"other"}}});
+        let mut current = base.clone();
+        current["process_points"]["8"]["name"] = json!("unrelated");
+        assert!(guard(&base, &current, &change, 2).is_ok());
+        current["process_points"]["7"]["name"] = json!("changed");
+        assert!(guard(&base, &current, &change, 2).is_err());
     }
 }

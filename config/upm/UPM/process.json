@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "enabled": true,
+  "enabled": false,
   "label": "处理点表",
   "description": "统一维护内部信号、默认值、上下限及恢复策略；采集与转发通过固定记录 ID 引用。",
   "columns": [

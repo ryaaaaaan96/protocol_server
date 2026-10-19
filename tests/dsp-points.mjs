@@ -47,9 +47,9 @@ export async function checkDspPoints({ client, engineer, viewer, engineerId, vie
     }
     const graph = () => client.call(`${url}/topology`);
     const initial = await graph();
-    const model = initial.board_models.find(row => row.code === "DSP");
-    ok(model, "DSP board model is registered from project JSON");
-    const table = `${url}/board-models/${model.id}/point-tables`;
+    const board = initial.project_config.board_types.find(row => row.code === "DSP");
+    ok(board, "DSP organization is defined only by project JSON");
+    const table = `${url}/boards/DSP/point-tables`;
     const read = (kind = "process", who = client) => who.call(`${table}/${kind}`);
     const commit = (proposal, who = client) => who.call(`${url}/changes/${proposal.id}/commit`, "POST", {});
     const preview = async (kind, values, id = null, who = client, extra = {}) => who.call(`${table}/${kind}/preview`, "POST", {
@@ -76,8 +76,8 @@ export async function checkDspPoints({ client, engineer, viewer, engineerId, vie
     equal(forwarded.rows.length, 445);
     equal(initial.process_points.length, 552);
     equal(initial.transmit_points.length, 445);
-    equal(initial.signals.length, 0);
-    equal(initial.signal_bindings.length, 0);
+    ok(!Object.hasOwn(initial,"signals"));
+    ok(!Object.hasOwn(initial,"board_models"));
     for (const who of [client, engineer, viewer]) {
       const listed = await who.call("/projects");
       equal(listed.find(row => row.id === project.id).point_count, 552);
@@ -110,15 +110,90 @@ export async function checkDspPoints({ client, engineer, viewer, engineerId, vie
     ok(!Object.hasOwn(frequencyMapping, "poll_interval"));
     equal((await read("process", viewer)).rows.length, 552);
 
+    // JSON organization and endpoint keys are the only ownership catalog.
+    equal(internal.board_key, "DSP");
+    ok(!Object.hasOwn(internal, "model_id"));
+    equal(internal.options.native_groups[0].code, "LOCAL");
+    equal(internal.options.endpoints[0].code, "UPP_SERVICE");
+    equal(internal.options.process_points.length, 552);
+    equal((await client.raw(`${url}/boards/UPM/point-tables/process`)).status, 400);
+    equal((await client.raw(`${table}/collect`)).status, 400);
+    equal((await client.raw(`${url}/board-models/1/point-tables/process`)).status, 404);
+    await rejectEdit("forward", frequencyMapping.id, { endpoint_key: "MISSING" });
+    await rejectEdit("process", frequency.id, { group_key: "MISSING" });
+    await rejectEdit("process", frequency.id, { group_id: 1 });
+    const permissions = await engineer.call(`${url}/permissions`);
+    equal(permissions.catalog.find(entry => entry.board_key === "DSP").endpoints[0].endpoint_key, "UPP_SERVICE");
+    const scoped = grants => client.call(`${url}/members`, "PUT", {
+      user_id: engineerId, role: "engineer", edit_scope: "scoped", grants,
+    });
+    const accessFailure = async (kind, id, values) => {
+      const response = await engineer.raw(`${table}/${kind}/preview`, "POST", {
+        revision: (await graph()).revision, operation: "update", id, values,
+      });
+      equal(response.status, 403);
+    };
+    await scoped([{board_key:"DSP",scope:"internal"}]);
+    ok((await preview("process", {notes:"internal permitted preview"}, frequency.id, engineer)).allowed);
+    await accessFailure("forward", frequencyMapping.id, {name:"protocol forbidden"});
+    ok((await read("process",engineer)).rows.every(row=>row.can_edit));
+    ok((await read("forward",engineer)).rows.every(row=>!row.can_edit));
+    await scoped([{board_key:"DSP",scope:"protocol",endpoint_key:"UPP_SERVICE"}]);
+    ok((await preview("forward", {name:"protocol permitted preview"}, frequencyMapping.id, engineer)).allowed);
+    await accessFailure("process",frequency.id,{notes:"internal forbidden"});
+    ok((await read("forward",engineer)).rows.every(row=>row.can_edit));
+    const deniedConfig = await engineer.raw(`${url}/changes/preview`,"POST",{
+      revision:(await graph()).revision,entity:"project_config",operation:"update",values:initial.project_config,
+    });
+    equal(deniedConfig.status,403);
+    for(const grants of [
+      [{board_key:"MISSING",scope:"board"}],
+      [{board_key:"DSP",scope:"protocol",endpoint_key:"MISSING"}],
+      [{board_key:"DSP",scope:"internal",endpoint_key:"UPP_SERVICE"}],
+      [{board_key:"DSP",scope:"board"},{board_key:"DSP",scope:"board"}],
+    ]) equal((await client.raw(`${url}/members`,"PUT",{user_id:engineerId,role:"engineer",edit_scope:"scoped",grants})).status,400);
+    await scoped([{board_key:"DSP",scope:"board"}]);
+    ok((await read("process",engineer)).rows.every(row=>row.can_edit));
+    ok((await read("forward",engineer)).rows.every(row=>row.can_edit));
+
+    // Scoped editors must hold a real project lease; viewers and empty scopes cannot acquire one.
+    equal((await engineer.rawUnlocked(`${table}/process/preview`,"POST",{
+      revision:(await graph()).revision,operation:"update",id:frequency.id,values:{name:"missing lease"},
+    })).status,423);
+    equal((await viewer.rawUnlocked(`${url}/edit-lock/acquire`,"POST",{})).status,403);
+    const lease=await engineer.rawUnlocked(`${url}/edit-lock/acquire`,"POST",{});
+    equal(lease.status,200);equal(lease.data.owned,true);
+    equal((await engineer.rawUnlocked(`${url}/edit-lock/renew`,"POST",{})).status,200);
+    equal((await client.rawUnlocked(`${url}/edit-lock/acquire`,"POST",{})).status,423);
+    equal((await client.rawUnlocked(`${url}/edit-lock/release`,"POST",{})).status,423);
+    equal((await engineer.rawUnlocked(`${url}/edit-lock/release`,"POST",{})).status,200);
+    await scoped([]);
+    equal((await engineer.rawUnlocked(`${url}/edit-lock/acquire`,"POST",{})).status,403);
+    await client.call(`${url}/members`,"PUT",{user_id:engineerId,role:"engineer",edit_scope:"all",grants:[]});
+
+    // The SQL workspace is read-only, bounded, and contains only the new business tables.
+    equal((await viewer.call(`${url}/sql`,"POST",{sql:"SELECT count(*) AS count FROM process_points"})).rows[0].count,552);
+    const sqlRows=await viewer.call(`${url}/sql`,"POST",{sql:"SELECT id FROM process_points ORDER BY id"});
+    equal(sqlRows.rows.length,500);equal(sqlRows.truncated,true);
+    for(const sql of ["DELETE FROM process_points","SELECT * FROM users","SELECT * FROM signals",
+      "SELECT set_config('app.is_admin','true',true)","SELECT * FROM process_points FOR UPDATE",
+      "SELECT 1; DELETE FROM process_points"]){
+      equal((await viewer.raw(`${url}/sql`,"POST",{sql})).status,400);
+    }
+    const beforeConfig=JSON.stringify(await graph());
+    const missingGroup=structuredClone(initial.project_config);
+    missingGroup.board_types.find(board=>board.code==="DSP").point_groups=[{code:"OTHER",name:"Other"}];
+    reject(await client.raw(`${url}/changes/preview`,"POST",{revision:(await graph()).revision,entity:"project_config",operation:"update",values:missingGroup}));
+    equal(JSON.stringify(await graph()),beforeConfig);
+
     // A preview runs a rollback-only simulation. Neither business rows nor the
     // append-only history are written until the real commit succeeds.
     const baselineCount = await historyCount();
-    const hiddenLegacyGroup = await client.call(`${url}/changes/preview`, "POST", {
+    const hiddenLegacyGroup = await client.raw(`${url}/changes/preview`, "POST", {
       revision: (await graph()).revision, entity: "signal_groups", operation: "create",
-      values: { model_id: model.id, name: "Must not create hidden legacy points", code: "LEGACY_SHADOW" },
+      values: { board_key: "DSP", name: "Removed legacy entity", code: "SHADOW" },
     });
-    equal(hiddenLegacyGroup.allowed, false);
-    equal((await graph()).signal_groups.length, initial.signal_groups.length);
+    reject(hiddenLegacyGroup);
     equal(await historyCount(), baselineCount);
     const rename = await preview("process", { name: "电网频率：DSP 原生点" }, frequency.id);
     ok(rename.allowed, JSON.stringify(rename.errors));
@@ -267,7 +342,7 @@ export async function checkDspPoints({ client, engineer, viewer, engineerId, vie
     // Table drag changes display order, never the explicitly imported offsets.
     const beforeOrder = await read("forward");
     equal(beforeOrder.definition.ordering.mode, "display");
-    const groupKey = row => JSON.stringify(beforeOrder.definition.ordering.group_by.map(key => Number(row[key]) || 0));
+    const groupKey = row => JSON.stringify(beforeOrder.definition.ordering.group_by.map(key => row[key]));
     const selected = beforeOrder.rows.find(row => row.id === frequencyMapping.id);
     const group = beforeOrder.rows.filter(row => groupKey(row) === groupKey(selected));
     ok(group.length >= 2);
@@ -306,8 +381,7 @@ export async function checkDspPoints({ client, engineer, viewer, engineerId, vie
     const otherProject = await client.call("/projects", "POST", { config_key: "dsp_native_other", name: "DSP isolated" });
     const otherUrl = `/projects/${otherProject.id}`;
     const otherGraph = await client.call(`${otherUrl}/topology`);
-    const otherModel = otherGraph.board_models.find(row => row.code === "DSP");
-    const otherTable = `${otherUrl}/board-models/${otherModel.id}/point-tables/process`;
+    const otherTable = `${otherUrl}/boards/DSP/point-tables/process`;
     const foreignProposal = await client.call(`${otherTable}/preview`, "POST", {
       revision: otherGraph.revision, operation: "create", values: {
         name: "Other project's internal point", enum_name: "ISOLATED_POINT", group_key: "LOCAL",
@@ -362,6 +436,20 @@ export async function checkDspPoints({ client, engineer, viewer, engineerId, vie
     ok(generatedProcess.points.some(point => point.enum_name === "GRID_FREQUENCY_RENAMED"));
     ok(!names.some(name => name.includes("UPM/") && /(?:process|collect|transmit)\.c$/.test(name)), "DSP import must not manufacture UPM firmware point tables");
 
+    const release = await client.call(`${url}/releases`,"POST",{name:"DSP native snapshot",revision:(await graph()).revision});
+    ok(release.id && release.sha256);
+    equal((await viewer.call(`${url}/releases`))[0].id,release.id);
+    const releaseBefore=(await inspection.query("SELECT snapshot,files FROM releases WHERE id=$1",[release.id])).rows[0];
+    equal(releaseBefore.snapshot.process_points.length,552);
+    ok(!Object.hasOwn(releaseBefore.snapshot,"board_models"));
+    for(const sql of ["UPDATE releases SET name='forged' WHERE id=$1","DELETE FROM releases WHERE id=$1"]){
+      await runtime.query("BEGIN");
+      try{
+        await runtime.query("SELECT set_config('app.user_id',$1,true),set_config('app.project_id',$2,true)",[String(engineerId),String(project.id)]);
+        let denied=false;try{await runtime.query(sql,[release.id]);}catch{denied=true;}ok(denied,"Release is immutable");
+      }finally{await runtime.query("ROLLBACK");}
+    }
+
     // The ordinary XLSX upload must select the native DSP path, rather than
     // running the legacy whole-project importer and creating UPM proxy data.
     const beforeReimport = await graph();
@@ -379,13 +467,14 @@ export async function checkDspPoints({ client, engineer, viewer, engineerId, vie
     equal(reimported.process_points.length, 552);
     equal(reimported.transmit_points.length, 445);
     ok(reimported.process_points.every(row => row.sig_id === null && row.board_key === "DSP"));
-    for (const key of ["project_config", "board_models", "boards", "signal_groups", "signals", "data_items", "protocol_contracts", "protocol_fields", "signal_bindings", "endpoints", "device_contexts", "source_records"]) {
+    for (const key of ["project_config"]) {
       equal(JSON.stringify(reimported[key]), JSON.stringify(beforeReimport[key]));
     }
     const retained = new Set((await history()).map(row => String(row.id)));
     ok([...oldHistoryIds].every(id => retained.has(id)), "Reimport preserves prior point history");
     ok(await historyCount() > beforeReimportHistory);
     equal((await client.call(`${otherUrl}/topology`)).process_points.length, 1);
+    equal(JSON.stringify((await inspection.query("SELECT snapshot,files FROM releases WHERE id=$1",[release.id])).rows[0]),JSON.stringify(releaseBefore));
 
     // Export to a separate temporary directory. Upload without the archive
     // preserves current rows; upload with it restores only the named project.
@@ -461,9 +550,6 @@ export async function checkDspPoints({ client, engineer, viewer, engineerId, vie
         equal(mapping.scale, oldMapping.scale);
         equal(mapping.project_id, project.id);
         equal(point.project_id, project.id);
-      }
-      for (const key of ["signal_groups", "signals", "data_items", "protocol_contracts", "protocol_fields", "signal_bindings", "endpoints", "device_contexts", "source_records"]) {
-        equal(JSON.stringify(current[key]), JSON.stringify(exportedGraph[key]));
       }
       const historyAfterRestore = new Set((await history()).map(row => String(row.id)));
       ok([...historyBeforeRestore].every(id => historyAfterRestore.has(id)), "Dump replacement retains all previous point history");

@@ -29,11 +29,11 @@ function set(event: Event) {
       <option v-for="row in choices" :key="row.id" :value="row.id">{{ choiceLabel(row) }}</option>
     </select>
     <select v-else-if="field.options" :disabled="disabled" :aria-label="field.label" :value="values[fieldKey] ?? ''" @change="set">
-      <option v-if="field.nullable" value="">{{ data.storage === 'native' ? '未指定' : '继承数据定义' }}</option>
+      <option v-if="field.nullable" value="">未指定</option>
       <option v-for="option in field.options" :key="option" :value="option">{{ option }}</option>
     </select>
     <input v-else-if="field.type === 'boolean'" :disabled="disabled" type="checkbox" :aria-label="field.label" :checked="!!values[fieldKey]" @change="set" />
-    <input v-else :disabled="disabled" :type="field.type === 'number' ? 'number' : 'text'" :aria-label="field.label" :value="values[fieldKey] ?? ''" :placeholder="field.nullable ? data.storage === 'native' ? '留空表示未指定' : '留空继承 / 未指定' : ''" @input="set" />
+    <input v-else :disabled="disabled" :type="field.type === 'number' ? 'number' : 'text'" :step="field.type === 'number' ? 'any' : undefined" :aria-label="field.label" :value="values[fieldKey] ?? ''" :placeholder="field.nullable ? '留空表示未指定' : ''" @input="set" />
     <small v-if="field.hint">{{ field.hint }}</small>
   </div>
 </template>

@@ -60,8 +60,8 @@ const nav = [
 ];
 const descriptions: Record<string, string> = {
   overview: "按板卡类型展示项目组成、挂载数量与通信协议。",
-  board: "选择板卡类型，维护内部信号、采集、转发及协议配置。",
-  devices: "管理项目共享的板卡模板、协议、数据定义和来源。",
+  board: "选择板卡类型，维护内部数据与转发表。",
+  devices: "查看项目文件，并导入服务器上的配置或项目文件夹。",
   sql: "用 SQL 查看数据关系，替代复杂的表格公式。",
   validation: "在配置进入工程之前，发现并定位数据问题。",
   releases: "从同一份数据生成配置，冻结每次交付的版本。",
@@ -76,7 +76,7 @@ const user = ref<Row | null>(null),
   tab = ref("overview"),
   overview = ref<Row | null>(null),
   graph = ref<Row | null>(null),
-  boardId = ref(0),
+  boardKey = ref(""),
   sheetLabel = ref("内部信号表"),
   overviewError = ref(""),
   tick = ref(0),
@@ -91,7 +91,7 @@ const project = computed(() => projects.value.find((p) => p.id === pid.value)),
   report = computed(() => overview.value?.validation),
   types = computed(() => boardTypes(graph.value)),
   selectedBoard = computed(() =>
-    types.value.find((b: Row) => b.id === boardId.value),
+    types.value.find((b: Row) => b.code === boardKey.value),
   ),
   pageTitle = computed(
     () => nav.find((n) => n.id === tab.value)?.label || "账号管理",
@@ -122,7 +122,7 @@ const canWrite = computed(() => editLock.owned.value && !editLock.pending.value)
 const canManageWrite = computed(() => canWrite.value && permissions.canManage.value);
 const canStartHere = computed(() => canEditProject.value && (
   tab.value === "board" && selectedBoard.value
-    ? allowsBoard(permissions.state.value, selectedBoard.value.model_id)
+    ? allowsBoard(permissions.state.value, selectedBoard.value.code)
     : tab.value === "releases" ? permissions.canManage.value : true
 ));
 const editStatusMessage = computed(() => {
@@ -169,18 +169,14 @@ function navigate(page: string) {
   menu.value = false;
   return true;
 }
-function openSharedData() {
-  if (!navigate("devices")) return;
-  focus.value = { entity: "data_items", id: null };
-}
-function enterBoard(id: number) {
-  if (tab.value === "board" && boardId.value === id) return;
+function enterBoard(key: string) {
+  if (tab.value === "board" && boardKey.value === key) return;
   if (!leaveWorkspace()) return;
-  boardId.value = id;
+  boardKey.value = key;
   navigate("board");
 }
 watch(pid, () => {
-  boardId.value = 0;
+  boardKey.value = "";
   focus.value = null;
 });
 function expired() {
@@ -237,14 +233,14 @@ watch([pid, tick, user], ([id, _, currentUser], __, onCleanup) => {
       if (cancelled) return;
       overview.value = data;
       graph.value = topology;
-      if (!boardTypes(topology).some((t) => t.id === boardId.value))
-        boardId.value =
-          boardTypes(topology).find((t) => t.code === "UPM")?.id ||
-          boardTypes(topology)[0]?.id ||
-          0;
+      if (!boardTypes(topology).some((t) => t.code === boardKey.value))
+        boardKey.value =
+          boardTypes(topology).find((t) => t.point_storage === "native")?.code ||
+          boardTypes(topology)[0]?.code ||
+          "";
       if (
         tab.value === "board" &&
-        !boardTypes(topology).some((b: Row) => b.id === boardId.value)
+        !boardTypes(topology).some((b: Row) => b.code === boardKey.value)
       )
         navigate("overview");
     })
@@ -267,16 +263,14 @@ function openIssue(issue: Row) {
     (b: Row) => row && belongsToBoard(graph.value!, b, issue.entity, row),
   );
   const board =
-    candidates.find((b: Row) => b.id === boardId.value) || candidates[0];
-  if (
-    board &&
-    !["board_models", "platform_signals", "protocol_contracts"].includes(
-      issue.entity,
-    )
-  ) {
-    boardId.value = board.id;
+    candidates.find((b: Row) => b.code === boardKey.value) || candidates[0];
+  if (board) {
+    boardKey.value = board.code;
     tab.value = "board";
-  } else tab.value = "devices";
+  } else {
+    navigate("devices");
+    modal.value = "config";
+  }
   focus.value = { entity: issue.entity, id: issue.id };
 }
 
@@ -390,15 +384,15 @@ function userCreated() {
           >
             <button
               v-for="board in types"
-              :key="board.id"
+              :key="board.code"
               :class="[
                 'board-nav-item',
-                { active: tab === 'board' && boardId === board.id },
+                { active: tab === 'board' && boardKey === board.code },
               ]"
               :aria-current="
-                tab === 'board' && boardId === board.id ? 'page' : undefined
+                tab === 'board' && boardKey === board.code ? 'page' : undefined
               "
-              @click="enterBoard(board.id)"
+              @click="enterBoard(board.code)"
             >
               <Box :size="16" /><span>{{ board.name }}</span
               ><small>{{ board.code }}</small>
@@ -493,7 +487,7 @@ function userCreated() {
                 项目拓扑配置
               </button>
               <button
-                v-if="['board', 'devices'].includes(tab) && canManageWrite"
+                v-if="['board', 'devices'].includes(tab) && canManageWrite && types.some(type => type.code === 'DSP' && type.point_storage === 'native')"
                 class="button"
                 @click="modal = 'import'"
               >
@@ -538,23 +532,27 @@ function userCreated() {
             @board="enterBoard"
           />
           <TopologyWorkspace
-            v-else-if="['board', 'devices'].includes(tab)"
+            v-else-if="tab === 'board'"
             :key="`${pid}:${tab}`"
             :pid="pid"
             :graph="graph"
             :can-write="canWrite"
-            :mode="tab === 'board' ? 'board' : 'settings'"
-            :board-id="boardId"
+            :board-key="boardKey"
             :focus="focus"
             @done="topologyDone"
             @conflict="topologyConflict"
             @error="fail"
             @board="enterBoard"
-            @settings="openSharedData"
             @configuration="modal = 'config'"
             @sheet="sheetLabel = $event"
             @dirty="workspaceDirty = $event"
           />
+          <section v-else-if="tab === 'devices' && graph" class="panel padded">
+            <h2>{{ project?.name }} · 项目配置</h2>
+            <p>项目板卡、分组与通信拓扑通过服务器 project.json 维护。修改文件后检查并导入，或直接导入完整项目文件夹。</p>
+            <p class="notice">文件夹包含 Dump 时替换点表数据；不包含 Dump 时保留现有点表。板卡内部数据继续在点表页面编辑。</p>
+            <button class="button" @click="modal = 'config'">查看与导入项目配置</button>
+          </section>
           <SqlWorkspace
             v-else-if="tab === 'sql'"
             :key="pid"
@@ -625,8 +623,6 @@ function userCreated() {
       v-if="modal === 'import'"
       :pid="pid"
       :can-write="canManageWrite"
-      :has-points="!!overview?.has_configuration || !!graph?.process_points?.length || !!graph?.transmit_points?.length"
-      :dsp-only="!!graph?.project_config?.board_types?.some((board: Row) => board.model_code === 'DSP' && board.point_storage === 'native')"
       @close="modal = null"
       @done="importDone"
     />

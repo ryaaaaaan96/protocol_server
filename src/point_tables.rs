@@ -15,6 +15,8 @@ use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
 use std::collections::BTreeSet;
 
+// Inactive board definitions may retain descriptive fields for future tables.
+// Runtime writes use the native whitelist below and never these former relations.
 const PROCESS: &str = "group_id,data_item_id,name,enum_name,sig_id,sig_symbol,internal_type,flags,callback,process_enabled";
 const RANGE: &str = "default_value,min_value,max_value,boot_restore,manual_restore";
 const BINDING: &str = "endpoint_id,context_id,field_id,signal_id";
@@ -25,21 +27,18 @@ const NATIVE_FORWARD: &str = "process_point_id,endpoint_key,name,upp_model,addre
 pub fn entity(kind: &str) -> Result<&'static str> {
     match kind {
         "process" => Ok("process_points"),
-        "collect" => Ok("collect_points"),
-        "forward" => Ok("forward_points"),
+        "collect" => Err(AppError::bad("此板卡尚未启用采集点表")),
+        "forward" => Ok("transmit_points"),
         _ => Err(AppError::not_found()),
     }
 }
 pub fn is_point_entity(entity: &str) -> bool {
-    matches!(
-        entity,
-        "process_points" | "collect_points" | "forward_points"
-    )
+    matches!(entity, "process_points" | "transmit_points")
 }
 fn keys(csv: &str) -> BTreeSet<&str> {
     csv.split(',').collect()
 }
-pub(crate) fn writable(kind: &str) -> BTreeSet<&str> {
+fn schema_writable(kind: &str) -> BTreeSet<&str> {
     match kind {
         "process" => keys(PROCESS)
             .union(&keys(RANGE))
@@ -55,9 +54,22 @@ pub(crate) fn writable(kind: &str) -> BTreeSet<&str> {
             .collect(),
     }
 }
+pub(crate) fn writable(kind: &str) -> BTreeSet<&str> {
+    match kind {
+        "process" => keys("name,enum_name,sig_id,internal_type,flags,callback,process_enabled")
+            .union(&keys(RANGE))
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .union(&keys(NATIVE_PROCESS))
+            .copied()
+            .collect(),
+        "forward" => keys(NATIVE_FORWARD),
+        _ => BTreeSet::new(),
+    }
+}
 fn readable(kind: &str) -> BTreeSet<&str> {
     let common = keys(
-        "id,model_id,unit,data_type,byte_length,resolved_sig_id,enum_name,group_key,group_name,metadata",
+        "id,board_key,unit,data_type,byte_length,resolved_sig_id,enum_name,group_key,group_name,metadata",
     );
     let extra = if kind == "process" {
         keys("group_name,contexts,collection_count,forward_count,range_inherited")
@@ -66,7 +78,7 @@ fn readable(kind: &str) -> BTreeSet<&str> {
             "signal_name,field_name,context_name,dev_id,endpoint_name,protocol,transport,port,upp_model,effective_address,address_length,effective_type,effective_length,register_type,access,scale,byte_order,default_value,min_value,max_value",
         )
     };
-    writable(kind)
+    schema_writable(kind)
         .union(&common)
         .copied()
         .collect::<BTreeSet<_>>()
@@ -144,7 +156,9 @@ pub fn validate_definition(v: &Value) -> Result<()> {
 
 /// Each project owns complete table definitions; no inherited field metadata.
 pub(crate) fn validate_table_file(kind: &str, table: &Value) -> Result<()> {
-    entity(kind)?;
+    if !["process", "collect", "forward"].contains(&kind) {
+        return Err(AppError::not_found());
+    }
     let object = table
         .as_object()
         .ok_or(AppError::bad("单表配置必须为对象"))?;
@@ -215,7 +229,7 @@ fn validate_table(
             if !fields.contains_key(key)
                 || !seen.insert(key)
                 || !readable(kind).contains(key)
-                || (section == "editor" && !writable(kind).contains(key))
+                || (section == "editor" && !schema_writable(kind).contains(key))
             {
                 return Err(AppError::bad(format!(
                     "{kind}.{section} 的字段不存在、重复或不可编辑：{key}"
@@ -259,7 +273,7 @@ fn validate_interaction(kind: &str, table: &Value) -> Result<()> {
             );
             if (alias != field && !native_alias)
                 || !readable(kind).contains(column.as_str())
-                || !writable(kind).contains(field)
+                || !schema_writable(kind).contains(field)
                 || !table["editor"]
                     .as_array()
                     .is_some_and(|a| a.contains(&json!(field)))
@@ -305,27 +319,20 @@ fn definition(config: &Value, kind: &str, code: &str) -> Result<Value> {
 pub(crate) async fn board_definition(
     tx: &mut Transaction<'_, Postgres>,
     pid: i64,
-    mid: i64,
+    board_key: &str,
     kind: &str,
     files: &crate::project_files::ProjectFiles,
 ) -> Result<Value> {
     entity(kind)?;
-    let model = board(tx, pid, mid).await?;
-    let (key, topology): (Option<String>, Option<Value>) =
-        sqlx::query_as("SELECT config_key,topology_config FROM projects WHERE id=$1")
-            .bind(pid)
-            .fetch_one(&mut **tx)
-            .await?;
-    let code = topology
-        .as_ref()
-        .and_then(|v| v["board_types"].as_array())
-        .and_then(|types| types.iter().find(|t| t["model_code"] == model["code"]))
-        .and_then(|t| t["code"].as_str())
-        .unwrap_or(model["code"].as_str().unwrap_or(""));
+    board(tx, pid, board_key).await?;
+    let key: Option<String> = sqlx::query_scalar("SELECT config_key FROM projects WHERE id=$1")
+        .bind(pid)
+        .fetch_one(&mut **tx)
+        .await?;
     let config = files
         .definition(key.as_deref())
         .map_err(|e| AppError::bad(e.to_string()))?;
-    definition(&config, kind, code)
+    definition(&config, kind, board_key)
 }
 pub async fn project_schema(
     State(s): State<AppState>,
@@ -344,96 +351,44 @@ pub async fn project_schema(
             .clone(),
     ))
 }
-async fn board(tx: &mut Transaction<'_, Postgres>, pid: i64, mid: i64) -> Result<Value> {
-    Ok(
-        sqlx::query_scalar("SELECT to_jsonb(m) FROM board_models m WHERE project_id=$1 AND id=$2")
-            .bind(pid)
-            .bind(mid)
-            .fetch_optional(&mut **tx)
-            .await?
-            .ok_or(AppError::not_found())?,
-    )
+async fn board(tx: &mut Transaction<'_, Postgres>, pid: i64, board_key: &str) -> Result<Value> {
+    crate::dsp_points::native_board(tx, pid, board_key)
+        .await?
+        .ok_or(AppError::bad("此板卡尚未启用点表存储"))
 }
 pub async fn read(
     State(s): State<AppState>,
     u: User,
-    Path((pid, mid, kind)): Path<(i64, i64, String)>,
+    Path((pid, board_key, kind)): Path<(i64, String, String)>,
 ) -> Result<Json<Value>> {
     entity(&kind)?;
     let mut tx = db::read_snapshot_context(&s.pool, &u, pid).await?;
-    // Repeatable-read also works for viewers, unlike row locks under UPDATE RLS.
     let revision: i32 = sqlx::query_scalar("SELECT revision FROM projects WHERE id=$1")
         .bind(pid)
         .fetch_one(&mut *tx)
         .await?;
-    board(&mut tx, pid, mid).await?;
-    let definition = board_definition(&mut tx, pid, mid, &kind, &s.project_files).await?;
-    let native = crate::dsp_points::native_board(&mut tx, pid, mid).await?;
-    let mut data = table_rows(&mut tx, pid, mid, &kind).await?;
+    let board = board(&mut tx, pid, &board_key).await?;
+    let definition = board_definition(&mut tx, pid, &board_key, &kind, &s.project_files).await?;
+    let mut data = table_rows(&mut tx, pid, &board_key, &kind).await?;
     crate::point_order::sort_rows(&mut data, &definition["ordering"]);
-    let mut options = json!({});
-    for (key, sql) in [
-        (
-            "groups",
-            "SELECT to_jsonb(t) FROM signal_groups t WHERE project_id=$1 AND model_id=$2 ORDER BY id",
-        ),
-        (
-            "contexts",
-            "SELECT to_jsonb(t) FROM device_contexts t WHERE project_id=$1 AND model_id=$2 ORDER BY id",
-        ),
-        (
-            "endpoints",
-            "SELECT to_jsonb(t) FROM endpoints t WHERE project_id=$1 AND model_id=$2 ORDER BY id",
-        ),
-        (
-            "signals",
-            "SELECT jsonb_build_object('id',id,'name',name,'group_id',group_id,'sig_id',resolved_sig_id) FROM v_signals WHERE project_id=$1 AND model_id=$2 ORDER BY id",
-        ),
-        (
-            "fields",
-            "SELECT to_jsonb(f) FROM v_protocol_fields f WHERE project_id=$1 AND contract_id IN (SELECT contract_id FROM endpoints WHERE project_id=$1 AND model_id=$2) ORDER BY id",
-        ),
-    ] {
-        let values: Vec<Value> = sqlx::query_scalar(sql)
-            .bind(pid)
-            .bind(mid)
-            .fetch_all(&mut *tx)
-            .await?;
-        options[key] = json!(values);
-    }
-    // Definitions may be shared with another board; offer names/types, never source workbook blobs.
-    options["data"] = json!(db::all_json(&mut tx,
-        "SELECT jsonb_build_object('id',id,'name',name,'data_type',data_type,'byte_length',byte_length,'default_value',default_value,'min_value',min_value,'max_value',max_value) FROM data_items WHERE project_id=$1 ORDER BY id", pid).await?);
-    if let Some(config) = &native {
-        options["native_groups"] = config["point_groups"].clone();
-        options["signals"] =
-            json!(crate::dsp_points::table_rows(&mut tx, pid, mid, "process").await?);
-        for key in ["groups", "contexts", "data", "fields"] {
-            options[key] = json!([]);
-        }
-    }
-    let mut graph = crate::permissions::catalog(&mut tx, pid).await?;
-    graph["signal_groups"] = options["groups"].clone();
+    let options = json!({
+        "native_groups": board["point_groups"],
+        "endpoints": board["point_endpoints"],
+        "process_points": table_rows(&mut tx, pid, &board_key, "process").await?,
+    });
+    let graph = crate::permissions::catalog(&mut tx, pid).await?;
     let access = crate::permissions::load(&mut tx, pid).await?;
     for row in &mut data {
         row["can_edit"] = json!(crate::permissions::can_edit_row(
             &access,
             &graph,
-            if native.is_some() && kind == "process" {
-                "process_points"
-            } else if native.is_some() {
-                "transmit_points"
-            } else if kind == "process" {
-                "signals"
-            } else {
-                "signal_bindings"
-            },
+            entity(&kind)?,
             row
         ));
     }
     let permissions = access.value(&graph);
     Ok(Json(
-        json!({"version":1,"revision":revision,"model_id":mid,"kind":kind,"storage":if native.is_some(){"native"}else{"legacy"},
+        json!({"version":1,"revision":revision,"board_key":board_key,"kind":kind,"storage":"native",
         "definition":definition,"rows":data,"options":options,"permissions":permissions}),
     ))
 }
@@ -441,56 +396,11 @@ pub async fn read(
 pub(crate) async fn table_rows(
     tx: &mut Transaction<'_, Postgres>,
     pid: i64,
-    mid: i64,
+    board_key: &str,
     kind: &str,
 ) -> Result<Vec<Value>> {
-    if crate::dsp_points::native_board(tx, pid, mid)
-        .await?
-        .is_some()
-    {
-        return crate::dsp_points::table_rows(tx, pid, mid, kind).await;
-    }
-    let data: Vec<Value> = if kind == "process" {
-        sqlx::query_scalar(r#"
-            SELECT to_jsonb(v) || jsonb_build_object(
-                'display_order',s.display_order, 'contexts', COALESCE(c.names,''),
-                'collection_count', COALESCE(b.collected,0), 'forward_count', COALESCE(b.forwarded,0),
-                'range_inherited', concat_ws('、', CASE WHEN r.default_value IS NULL THEN '默认值' END,
-                    CASE WHEN v.data_type<>'STRING' AND r.min_value IS NULL THEN '下限' END,
-                    CASE WHEN v.data_type<>'STRING' AND r.max_value IS NULL THEN '上限' END),
-                'edit_values', to_jsonb(s) || COALESCE(to_jsonb(r)-'id'-'project_id'-'signal_id','{}'::jsonb))
-            FROM v_signals v JOIN signals s ON s.id=v.id
-            LEFT JOIN signal_ranges r ON r.signal_id=v.id
-            LEFT JOIN (SELECT sb.signal_id, count(*) FILTER(WHERE e.role='client') collected,
-                count(*) FILTER(WHERE e.role='server') forwarded
-                FROM signal_bindings sb JOIN endpoints e ON e.id=sb.endpoint_id
-                WHERE sb.project_id=$1 AND e.model_id=$2 GROUP BY sb.signal_id) b ON b.signal_id=v.id
-            LEFT JOIN (SELECT group_id, string_agg(name || ' [' || dev_id || ']', '、' ORDER BY dev_id) names
-                FROM device_contexts WHERE project_id=$1 AND model_id=$2 GROUP BY group_id) c ON c.group_id=v.group_id
-            WHERE v.project_id=$1 AND v.model_id=$2 ORDER BY v.id
-        "#).bind(pid).bind(mid).fetch_all(&mut **tx).await?
-    } else {
-        sqlx::query_scalar(
-            r#"
-            SELECT to_jsonb(b) || jsonb_build_object('enum_name',s.enum_name,'unit',s.unit,
-                'display_order',raw.display_order,'field_ordinal',f.ordinal,'bank',CASE WHEN b.protocol='UPP' THEN 0 ELSE b.register_type END,'default_value',s.default_value,'min_value',s.min_value,'max_value',s.max_value,
-                'edit_values',to_jsonb(raw))
-            FROM v_bindings b JOIN v_signals s ON s.id=b.signal_id
-            JOIN signal_bindings raw ON raw.id=b.id JOIN protocol_fields f ON f.id=b.field_id
-            WHERE b.project_id=$1 AND b.model_id=$2 AND b.role=$3 ORDER BY b.id
-        "#,
-        )
-        .bind(pid)
-        .bind(mid)
-        .bind(if kind == "collect" {
-            "client"
-        } else {
-            "server"
-        })
-        .fetch_all(&mut **tx)
-        .await?
-    };
-    Ok(data)
+    entity(kind)?;
+    crate::dsp_points::table_rows(tx, pid, board_key, kind).await
 }
 
 #[derive(Deserialize)]
@@ -507,7 +417,7 @@ pub struct PointChange {
 pub async fn preview(
     State(s): State<AppState>,
     u: User,
-    Path((pid, mid, kind)): Path<(i64, i64, String)>,
+    Path((pid, board_key, kind)): Path<(i64, String, String)>,
     Json(c): Json<PointChange>,
 ) -> Result<Json<Value>> {
     let c = Change {
@@ -515,251 +425,37 @@ pub async fn preview(
         entity: entity(&kind)?.into(),
         operation: c.operation,
         id: c.id,
-        values: json!({"model_id":mid,"fields":c.values}),
+        values: json!({"board_key":board_key,"fields":c.values}),
         expected: c.expected,
     };
     topology::preview(State(s), u, Path(pid), Json(c)).await
 }
-async fn record(
-    tx: &mut Transaction<'_, Postgres>,
-    pid: i64,
-    table: &str,
-    id: Option<i64>,
-) -> Result<Value> {
-    Ok(sqlx::query_scalar(&format!(
-        "SELECT to_jsonb(t) FROM {table} t WHERE project_id=$1 AND id=$2"
-    ))
-    .bind(pid)
-    .bind(id)
-    .fetch_optional(&mut **tx)
-    .await?
-    .ok_or(AppError::not_found())?)
-}
-fn subset(v: &Value, allowed: &str) -> Value {
-    let allowed = keys(allowed);
-    Value::Object(
-        v.as_object()
-            .unwrap()
-            .iter()
-            .filter(|(k, _)| allowed.contains(k.as_str()))
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect(),
-    )
-}
-async fn write(
-    tx: &mut Transaction<'_, Postgres>,
-    pid: i64,
-    c: &Change,
-    entity: &str,
-    id: Option<i64>,
-    values: Value,
-    operation: &str,
-) -> Result<Value> {
-    topology::apply(
-        tx,
-        pid,
-        &Change {
-            entity: entity.into(),
-            id,
-            values,
-            operation: operation.into(),
-            revision: c.revision,
-            expected: Value::Null,
-        },
-    )
-    .await
-}
 pub async fn apply(tx: &mut Transaction<'_, Postgres>, pid: i64, c: &Change) -> Result<Value> {
     let kind = match c.entity.as_str() {
         "process_points" => "process",
-        "collect_points" => "collect",
-        _ => "forward",
+        "transmit_points" => "forward",
+        _ => return Err(AppError::bad("未启用的点表类型")),
     };
-    let mid = c.values["model_id"]
-        .as_i64()
-        .ok_or(AppError::bad("缺少板卡类型"))?;
-    board(tx, pid, mid).await?;
-    if crate::dsp_points::native_board(tx, pid, mid)
-        .await?
-        .is_some()
-    {
-        return crate::dsp_points::apply(tx, pid, mid, kind, c).await;
-    }
-    let values = &c.values["fields"];
-    let fields = values
+    let board_key = c.values["board_key"]
+        .as_str()
+        .filter(|key| !key.trim().is_empty())
+        .ok_or(AppError::bad("缺少板卡标识"))?;
+    board(tx, pid, board_key).await?;
+    let fields = c.values["fields"]
         .as_object()
         .ok_or(AppError::bad("点表字段必须为对象"))?;
-    if !["create", "update", "delete"].contains(&c.operation.as_str()) {
-        return Err(AppError::bad("点表操作无效"));
-    }
     if c.operation != "delete" && fields.is_empty() {
         return Err(AppError::bad("未提供修改字段"));
     }
-    for key in fields.keys() {
-        let legacy = match kind {
-            "process" => keys(PROCESS).union(&keys(RANGE)).copied().collect(),
-            "collect" => keys(BINDING).union(&keys(COLLECTION)).copied().collect(),
-            _ => keys(BINDING),
-        };
-        if !legacy.contains(key.as_str()) {
-            return Err(AppError::bad(format!("{key} 是只读字段或不属于当前点表")));
-        }
-    }
-    let table = if kind == "process" {
-        "signals"
-    } else {
-        "signal_bindings"
-    };
-    let old = if c.operation == "create" {
-        json!({})
-    } else {
-        record(tx, pid, table, c.id).await?
-    };
-    // Validate the old owner as well as the new owner: a foreign ID cannot be moved into this board.
-    if c.operation != "create" {
-        let parent = record(
-            tx,
-            pid,
-            if kind == "process" {
-                "signal_groups"
-            } else {
-                "endpoints"
-            },
-            old[if kind == "process" {
-                "group_id"
-            } else {
-                "endpoint_id"
-            }]
-            .as_i64(),
-        )
-        .await?;
-        if parent["model_id"] != mid
-            || (kind != "process"
-                && parent["role"]
-                    != if kind == "collect" {
-                        "client"
-                    } else {
-                        "server"
-                    })
-        {
-            return Err(AppError::bad("记录不属于当前板卡或点表"));
-        }
-    }
-    if c.operation == "delete" {
-        if kind == "process" {
-            // Both removals live in the same preview/commit transaction. Bindings still restrict deletion.
-            sqlx::query("DELETE FROM signal_ranges WHERE project_id=$1 AND signal_id=$2")
-                .bind(pid)
-                .bind(c.id)
-                .execute(&mut **tx)
-                .await?;
-        }
-        return write(tx, pid, c, table, c.id, json!({}), "delete").await;
-    }
-    let mut merged = old.clone();
-    merged.as_object_mut().unwrap().extend(fields.clone());
-    if kind == "process" {
-        let group = record(tx, pid, "signal_groups", merged["group_id"].as_i64()).await?;
-        if group["model_id"] != mid {
-            return Err(AppError::bad("信号组不属于当前板卡"));
-        }
-        let signal_values = subset(values, PROCESS);
-        let signal = if c.operation == "update" && signal_values.as_object().unwrap().is_empty() {
-            old
-        } else {
-            write(tx, pid, c, "signals", c.id, signal_values, &c.operation).await?
-        };
-        let sid = signal["id"].as_i64().unwrap();
-        let mut range_values = subset(values, RANGE);
-        if !range_values.as_object().unwrap().is_empty() {
-            let rid: Option<i64> = sqlx::query_scalar(
-                "SELECT id FROM signal_ranges WHERE project_id=$1 AND signal_id=$2",
-            )
-            .bind(pid)
-            .bind(sid)
-            .fetch_optional(&mut **tx)
-            .await?;
-            if rid.is_none() {
-                range_values["signal_id"] = json!(sid);
-            }
-            write(
-                tx,
-                pid,
-                c,
-                "signal_ranges",
-                rid,
-                range_values,
-                if rid.is_some() { "update" } else { "create" },
-            )
-            .await?;
-        }
-        let range: Option<Value> = sqlx::query_scalar(
-            "SELECT to_jsonb(r) FROM signal_ranges r WHERE project_id=$1 AND signal_id=$2",
-        )
-        .bind(pid)
-        .bind(sid)
-        .fetch_optional(&mut **tx)
-        .await?;
-        let mut result = signal;
-        result["range"] = json!(range);
-        Ok(result)
-    } else {
-        let endpoint = record(tx, pid, "endpoints", merged["endpoint_id"].as_i64()).await?;
-        let context = record(tx, pid, "device_contexts", merged["context_id"].as_i64()).await?;
-        let signal = record(tx, pid, "signals", merged["signal_id"].as_i64()).await?;
-        let field = record(tx, pid, "protocol_fields", merged["field_id"].as_i64()).await?;
-        if endpoint["model_id"] != mid
-            || context["model_id"] != mid
-            || endpoint["role"]
-                != if kind == "collect" {
-                    "client"
-                } else {
-                    "server"
-                }
-            || context["group_id"].is_null()
-            || context["group_id"] != signal["group_id"]
-            || endpoint["contract_id"] != field["contract_id"]
-        {
-            return Err(AppError::bad(
-                "端点、逻辑设备、处理点与协议字段的关联不匹配",
-            ));
-        }
-        write(
-            tx,
-            pid,
-            c,
-            "signal_bindings",
-            c.id,
-            values.clone(),
-            &c.operation,
-        )
-        .await
-    }
+    crate::dsp_points::apply(tx, pid, board_key, kind, c).await
 }
-pub fn audit_before(g: &Value, entity: &str, id: i64, mid: i64) -> Option<Value> {
-    if crate::dsp_points::is_native_model(g, mid) {
-        return topology::find(
-            g,
-            if entity == "process_points" {
-                "process_points"
-            } else {
-                "transmit_points"
-            },
-            id,
-        )
-        .cloned();
+pub fn audit_before(g: &Value, entity: &str, id: i64, board_key: &str) -> Option<Value> {
+    if !is_point_entity(entity) {
+        return None;
     }
-    if entity == "process_points" {
-        let mut signal = topology::find(g, "signals", id)?.clone();
-        signal["range"] = topology::rows(g, "signal_ranges")
-            .iter()
-            .find(|r| r["signal_id"] == id)
-            .cloned()
-            .unwrap_or(Value::Null);
-        Some(signal)
-    } else {
-        topology::find(g, "signal_bindings", id).cloned()
-    }
+    topology::find(g, entity, id)
+        .filter(|row| row["board_key"] == board_key)
+        .cloned()
 }
 
 #[cfg(test)]
@@ -833,5 +529,20 @@ mod tests {
             .remove("inline");
         assert!(validate_definition(&v).is_err());
         assert!(entity("unknown").is_err());
+        assert!(entity("collect").is_err());
+        assert_eq!(entity("forward").unwrap(), "transmit_points");
+        assert!(!writable("process").contains("group_id"));
+        assert!(!writable("forward").contains("field_id"));
+        assert!(!is_point_entity("forward_points"));
+    }
+    #[test]
+    fn audit_identity_includes_the_json_board_key() {
+        let graph = json!({"process_points":[{"id":5,"board_key":"DSP","name":"point"}]});
+        assert_eq!(
+            audit_before(&graph, "process_points", 5, "DSP").unwrap()["name"],
+            "point"
+        );
+        assert!(audit_before(&graph, "process_points", 5, "UPM").is_none());
+        assert!(audit_before(&graph, "transmit_points", 5, "DSP").is_none());
     }
 }

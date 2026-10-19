@@ -57,7 +57,7 @@
     },
     "process_point_id": {
       "label": "DSP 内部点",
-      "reference": "signals",
+      "reference": "process_points",
       "type": "number",
       "hint": "通过固定记录 ID 关联，sigID 和枚举随内部点更新。"
     },
@@ -70,9 +70,7 @@
     "endpoint_key": {
       "label": "输出接口",
       "default": "UPP_SERVICE",
-      "options": [
-        "UPP_SERVICE"
-      ]
+      "reference": "endpoints"
     },
     "name": {
       "label": "转发字段名称"

@@ -16,11 +16,11 @@ async function fixture(t, headers, rows) {
   await book.xlsx.writeFile(file);
   return { file, book, sheet };
 }
-const headers = ["group_id", "data_item_id", "name", "enum_name", "sig_id"];
+const headers = ["group_key", "internal_type", "name", "enum_name", "sig_id"];
 test("column keys, row numbers, booleans, ranges and blanks survive Excel", async t => {
   const { file } = await fixture(t, [...headers, "boot_restore", "min_value", "flags"], [
-    ["1", 2, "电压", "VOLTAGE", "0x10", "否", 0, 0], [],
-    [1, 2, "电流", "CURRENT", 17, "true", "MIN_CURRENT"],
+    ["LOCAL", "U16", "电压", "VOLTAGE", "0x10", "否", 0, 0], [],
+    ["LOCAL", "U16", "电流", "CURRENT", 17, "true", "MIN_CURRENT"],
   ]);
   const rows = await readRows(file, "process");
   assert.deepEqual(rows.map(r => r.row), [2, 4]);
@@ -33,10 +33,10 @@ test("column keys, row numbers, booleans, ranges and blanks survive Excel", asyn
 });
 test("formulas, invalid booleans, missing fields and unsafe numbers identify row", async t => {
   for (const extra of [{ formula: "1+1", result: 2 }, "perhaps", Number.MAX_SAFE_INTEGER + 1]) {
-    const { file } = await fixture(t, [...headers, "boot_restore"], [[1, 2, "V", "VOLTAGE", 1, extra]]);
+    const { file } = await fixture(t, [...headers, "boot_restore"], [["LOCAL", "U16", "V", "VOLTAGE", 1, extra]]);
     await assert.rejects(readRows(file, "process"), /第 2 行/);
   }
-  const { file } = await fixture(t, headers, [[1, 2, null, "VOLTAGE", 1]]);
+  const { file } = await fixture(t, headers, [["LOCAL", "U16", null, "VOLTAGE", 1]]);
   await assert.rejects(readRows(file, "process"), /name：缺少必填值/);
 });
 test("rejects unknown, duplicate and missing headers, unlabeled cells and oversized batches", async t => {
@@ -44,19 +44,33 @@ test("rejects unknown, duplicate and missing headers, unlabeled cells and oversi
     const { file } = await fixture(t, bad, []);
     await assert.rejects(readRows(file, "process"), /表头/);
   }
-  const { file } = await fixture(t, headers, [[1, 2, "V", "VOLTAGE", 1, "orphan"]]);
+  const { file } = await fixture(t, headers, [["LOCAL", "U16", "V", "VOLTAGE", 1, "orphan"]]);
   await assert.rejects(readRows(file, "process"), /没有表头/);
-  const large = await fixture(t, headers, Array.from({ length: 201 }, (_, i) => [1, 2, "V", `V_${i}`, i + 1]));
+  const large = await fixture(t, headers, Array.from({ length: 201 }, (_, i) => ["LOCAL", "U16", "V", `V_${i}`, i + 1]));
   await assert.rejects(readRows(large.file, "process"), /201 行/);
 });
 test("templates cover each table without overwriting existing files", async t => {
   const dir = await mkdtemp(join(tmpdir(), "point-template-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
-  for (const kind of ["process", "collect", "forward"]) {
+  for (const kind of ["process", "forward"]) {
     const file = join(dir, `${kind}.xlsx`);
     await writeTemplate(file, kind);
     await assert.rejects(writeTemplate(file, kind), { code: "EEXIST" });
     await assert.rejects(readRows(file, kind), /当前 0 行/);
     await assert.rejects(readRows(file, kind, "missing"), /找不到工作表/);
   }
+});
+
+test("native forwarding keeps stable references and fractional scale", async t => {
+  const { file, book, sheet } = await fixture(t,
+    ["process_point_id", "endpoint_key", "name", "upp_model", "address", "wire_type", "wire_length", "scale", "conversion", "access"],
+    [[11, "UPP_SERVICE", "电压转发", 1, 14, "S32", 4, 0.01, "fixed_point", "RO"]]);
+  sheet.name = "forward";
+  await book.xlsx.writeFile(file);
+  const [row] = await readRows(file, "forward");
+  assert.equal(row.values.process_point_id, 11);
+  assert.equal(row.values.endpoint_key, "UPP_SERVICE");
+  assert.equal(row.values.scale, 0.01);
+  assert.equal(row.values.address, 14);
+  assert.equal(row.values.access, "RO");
 });

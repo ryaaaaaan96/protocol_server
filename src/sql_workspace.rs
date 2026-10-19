@@ -17,31 +17,7 @@ use sqlparser::{
 };
 use std::{collections::BTreeSet, ops::ControlFlow};
 
-const RELATIONS: &[&str] = &[
-    "board_models",
-    "boards",
-    "data_items",
-    "signal_groups",
-    "signals",
-    "process_points",
-    "transmit_points",
-    "point_history",
-    "signal_ranges",
-    "device_contexts",
-    "protocol_contracts",
-    "protocol_fields",
-    "endpoints",
-    "signal_bindings",
-    "board_links",
-    "passthrough_routes",
-    "platform_signals",
-    "source_records",
-    "v_signals",
-    "v_protocol_fields",
-    "v_bindings",
-    "v_passthrough_fields",
-    "v_topology_links",
-];
+const RELATIONS: &[&str] = &["process_points", "transmit_points", "point_history"];
 const FUNCTIONS: &[&str] = &[
     "count",
     "sum",
@@ -231,11 +207,10 @@ pub async fn execute(
 }
 pub async fn definitions(_user: User) -> Json<Value> {
     Json(
-        json!({"sql":include_str!("../migrations/0005_topology.sql"),"relations":RELATIONS,"examples":[
-        {"name":"板卡协议连接","sql":"SELECT client_board,server_board,protocol,transport,remote_address,context_code FROM v_topology_links ORDER BY id"},
-        {"name":"内部信号与协议绑定","sql":"SELECT endpoint_name,context_code,resolved_sig_id,signal_name,protocol,effective_address,effective_length FROM v_bindings ORDER BY endpoint_id,context_id,effective_address"},
-        {"name":"透传地址展开","sql":"SELECT route_name,name,upp_model,upp_offset,register_address,register_length FROM v_passthrough_fields ORDER BY route_id,register_address"},
-        {"name":"信号范围和来源","sql":"SELECT group_name,name,resolved_sig_id,default_value,min_value,max_value,source_sheet,source_row FROM v_signals ORDER BY group_id,id"}
+        json!({"sql": include_str!("../migrations/0014_dsp_point_tables.sql"), "relations": RELATIONS, "examples": [
+            {"name":"DSP 内部数据", "sql":"SELECT board_key,group_key,name,enum_name,sig_id,internal_type FROM process_points ORDER BY board_key,display_order,id"},
+            {"name":"DSP 转发映射", "sql":"SELECT t.name,t.endpoint_key,t.address,t.wire_type,p.enum_name FROM transmit_points t JOIN process_points p ON p.id=t.process_point_id ORDER BY t.endpoint_key,t.address"},
+            {"name":"点表历史", "sql":"SELECT * FROM point_history ORDER BY id DESC LIMIT 100"}
         ]}),
     )
 }
@@ -263,9 +238,9 @@ mod tests {
     #[test]
     fn accepts_project_analytics() {
         for sql in [
-            "SELECT group_id,count(*) FROM v_signals GROUP BY group_id",
-            "WITH x AS (SELECT * FROM v_protocol_fields) SELECT name FROM x",
-            "SELECT name, row_number() OVER (ORDER BY ordinal) FROM protocol_fields",
+            "SELECT group_key,count(*) FROM process_points GROUP BY group_key",
+            "WITH x AS (SELECT * FROM transmit_points) SELECT name FROM x",
+            "SELECT name, row_number() OVER (ORDER BY display_order) FROM process_points",
         ] {
             assert!(check(sql).is_ok(), "{sql}");
         }

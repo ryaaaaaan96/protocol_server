@@ -7,7 +7,6 @@ mod dsp_points;
 mod dsp_workbook;
 mod edit_lock;
 mod error;
-mod importer;
 mod model;
 mod permissions;
 mod point_batch;
@@ -20,10 +19,7 @@ mod project_folders;
 mod sql_workspace;
 mod topology;
 mod topology_codegen;
-mod topology_import;
 mod topology_validation;
-mod value_ranges;
-mod virtual_service;
 
 use anyhow::Context;
 use axum::{
@@ -86,7 +82,6 @@ async fn main() -> anyhow::Result<()> {
             .connect(&url)
             .await?;
         sqlx::migrate!().run(&pool).await?;
-        topology_import::migrate_legacy(&pool).await?;
         tracing::info!("PostgreSQL migrations applied");
         return Ok(());
     }
@@ -105,7 +100,7 @@ async fn main() -> anyhow::Result<()> {
         "DATABASE_URL must use a non-superuser role without BYPASSRLS; run migrations using MIGRATION_DATABASE_URL separately"
     );
     let schema_ready: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='projects' AND column_name='config_key') AND to_regclass('public.project_edit_locks') IS NOT NULL AND to_regclass('public.project_member_grants') IS NOT NULL AND to_regclass('public.process_points') IS NOT NULL AND to_regclass('public.transmit_points') IS NOT NULL AND to_regclass('public.point_history') IS NOT NULL",
+        "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='projects' AND column_name='config_key') AND to_regclass('public.project_edit_locks') IS NOT NULL AND to_regclass('public.project_member_grants') IS NOT NULL AND to_regclass('public.process_points') IS NOT NULL AND to_regclass('public.transmit_points') IS NOT NULL AND to_regclass('public.point_history') IS NOT NULL AND to_regclass('public.board_models') IS NULL AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='project_member_grants' AND column_name='board_key')",
     ).fetch_one(&pool).await?;
     anyhow::ensure!(
         schema_ready,
@@ -148,15 +143,15 @@ async fn main() -> anyhow::Result<()> {
             get(point_tables::project_schema),
         )
         .route(
-            "/projects/{pid}/board-models/{mid}/point-tables/{kind}",
+            "/projects/{pid}/boards/{board_key}/point-tables/{kind}",
             get(point_tables::read),
         )
         .route(
-            "/projects/{pid}/board-models/{mid}/point-tables/{kind}/preview",
+            "/projects/{pid}/boards/{board_key}/point-tables/{kind}/preview",
             post(point_tables::preview),
         )
         .route(
-            "/projects/{pid}/board-models/{mid}/point-tables/{kind}/batch/preview",
+            "/projects/{pid}/boards/{board_key}/point-tables/{kind}/batch/preview",
             post(point_batch::preview),
         )
         .route("/project-templates", get(project_config::templates))
@@ -166,7 +161,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/project-folders/commit", post(project_folders::commit))
         .route(
-            "/projects/{pid}/board-models/{mid}/point-tables/{kind}/reorder/preview",
+            "/projects/{pid}/boards/{board_key}/point-tables/{kind}/reorder/preview",
             post(point_order::preview),
         )
         .route("/projects/{pid}/configuration", get(project_config::read))
@@ -187,7 +182,6 @@ async fn main() -> anyhow::Result<()> {
             post(edit_lock::release),
         )
         .route("/projects/{pid}/topology", get(topology::read))
-        .route("/projects/{pid}/sources/{id}", get(topology::source))
         .route("/projects/{pid}/permissions", get(permissions::read))
         .route("/projects/{pid}/changes/preview", post(topology::preview))
         .route(
@@ -242,36 +236,4 @@ async fn main() -> anyhow::Result<()> {
         })
         .await?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn imports_real_workbook_without_formula_cache() {
-        let bytes =
-            std::fs::read("config/upm/sources/UPM项目测点数据表.xlsx").expect("reference workbook");
-        let imported = crate::importer::parse(bytes).expect("parse source workbook");
-        assert_eq!(
-            imported.points.iter().filter(|p| p.scope == "DSP").count(),
-            445
-        );
-        assert_eq!(
-            imported
-                .points
-                .iter()
-                .filter(|p| p.scope == "LOCAL")
-                .count(),
-            167
-        );
-        assert_eq!(imported.devices.len(), 9);
-        assert_eq!(
-            imported
-                .points
-                .iter()
-                .find(|p| p.enum_name == "PARAM_PRODUCT_TYPE")
-                .unwrap()
-                .upp_offset,
-            Some(48)
-        );
-    }
 }

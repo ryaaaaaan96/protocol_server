@@ -1,7 +1,7 @@
 {
   "version": 1,
   "key": "upm",
-  "name": "UPM 协议配置",
+  "name": "DC-UPS",
   "description": "AIDC · 本地控制器与 DSP 点表的统一数据空间",
   "workbook": "sources/UPM项目测点数据表.xlsx",
   "topology": {
@@ -29,6 +29,13 @@
           {
             "code": "LOCAL",
             "name": "DSP 内部数据"
+          }
+        ],
+        "point_endpoints": [
+          {
+            "code": "UPP_SERVICE",
+            "name": "UPP 转发表",
+            "protocol": "UPP"
           }
         ]
       },
@@ -103,34 +110,10 @@
   "workspace": {
     "boards": {
       "CSU": {
-        "tables": [
-          "process",
-          "collect",
-          "transmit",
-          "fields",
-          "data",
-          "routes",
-          "expansion",
-          "links",
-          "endpoints",
-          "contexts",
-          "groups"
-        ]
+        "tables": []
       },
       "UPM": {
-        "tables": [
-          "process",
-          "collect",
-          "transmit",
-          "fields",
-          "data",
-          "routes",
-          "expansion",
-          "links",
-          "endpoints",
-          "contexts",
-          "groups"
-        ]
+        "tables": []
       },
       "DSP": {
         "tables": [
@@ -139,34 +122,10 @@
         ]
       },
       "IDU_T": {
-        "tables": [
-          "process",
-          "collect",
-          "transmit",
-          "fields",
-          "data",
-          "routes",
-          "expansion",
-          "links",
-          "endpoints",
-          "contexts",
-          "groups"
-        ]
+        "tables": []
       },
       "IDU_R": {
-        "tables": [
-          "process",
-          "collect",
-          "transmit",
-          "fields",
-          "data",
-          "routes",
-          "expansion",
-          "links",
-          "endpoints",
-          "contexts",
-          "groups"
-        ]
+        "tables": []
       }
     }
   },

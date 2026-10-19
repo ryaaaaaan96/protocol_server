@@ -3,7 +3,7 @@ use crate::{
     dsp_workbook::DspImport,
     error::{AppError, Result},
     model::{flag_expression, identifier},
-    topology::{self, Change, num, rows, strv},
+    topology::{Change, num, rows, strv},
 };
 use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
@@ -21,35 +21,22 @@ fn board_definition<'a>(g: &'a Value, key: &str) -> Option<&'a Value> {
         .find(|b| b["code"] == key && b["point_storage"] == "native")
 }
 
-pub fn is_native_model(g: &Value, mid: i64) -> bool {
-    let Some(model) = topology::find(g, "board_models", mid) else {
-        return false;
-    };
-    g["project_config"]["board_types"]
-        .as_array()
-        .is_some_and(|bs| {
-            bs.iter()
-                .any(|b| b["model_code"] == model["code"] && b["point_storage"] == "native")
-        })
-}
-
 pub async fn native_board(
     tx: &mut Transaction<'_, Postgres>,
     pid: i64,
-    mid: i64,
+    board_key: &str,
 ) -> Result<Option<Value>> {
-    let pair: Option<Value> = sqlx::query_scalar(
-        "SELECT jsonb_build_object('config',p.topology_config,'model_code',m.code) FROM projects p JOIN board_models m ON m.project_id=p.id WHERE p.id=$1 AND m.id=$2",
-    )
-    .bind(pid)
-    .bind(mid)
-    .fetch_optional(&mut **tx)
-    .await?;
-    Ok(pair.and_then(|p| {
-        p["config"]["board_types"]
+    let config: Option<Value> =
+        sqlx::query_scalar("SELECT topology_config FROM projects WHERE id=$1")
+            .bind(pid)
+            .fetch_optional(&mut **tx)
+            .await?
+            .flatten();
+    Ok(config.and_then(|config| {
+        config["board_types"]
             .as_array()?
             .iter()
-            .find(|b| b["model_code"] == p["model_code"] && b["point_storage"] == "native")
+            .find(|board| board["code"] == board_key && board["point_storage"] == "native")
             .cloned()
     }))
 }
@@ -57,9 +44,8 @@ pub async fn native_board(
 fn groups(board: &Value) -> Vec<Value> {
     board["point_groups"]
         .as_array()
-        .filter(|v| !v.is_empty())
         .cloned()
-        .unwrap_or_else(|| vec![json!({"code":"LOCAL","name":"本地内部数据"})])
+        .unwrap_or_default()
 }
 
 fn table(kind: &str) -> Result<&'static str> {
@@ -136,12 +122,12 @@ async fn insert(
 pub async fn apply(
     tx: &mut Transaction<'_, Postgres>,
     pid: i64,
-    mid: i64,
+    board_key: &str,
     kind: &str,
     c: &Change,
 ) -> Result<Value> {
     let table = table(kind)?;
-    let board = native_board(tx, pid, mid)
+    let board = native_board(tx, pid, board_key)
         .await?
         .ok_or(AppError::not_found())?;
     let board_key = strv(&board, "code");
@@ -210,6 +196,16 @@ pub async fn apply(
             return Err(AppError::bad("点表分组不在已应用的板卡 JSON 配置中"));
         }
     } else {
+        if !board["point_endpoints"]
+            .as_array()
+            .is_some_and(|endpoints| {
+                endpoints.iter().any(|endpoint| {
+                    endpoint["code"] == merged["endpoint_key"] && endpoint["protocol"] == "UPP"
+                })
+            })
+        {
+            return Err(AppError::bad("转发端点不在已应用 JSON 的 UPP 端点配置中"));
+        }
         let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM process_points WHERE project_id=$1 AND board_key=$2 AND id=$3)")
             .bind(pid).bind(board_key).bind(merged["process_point_id"].as_i64()).fetch_one(&mut **tx).await?;
         if !exists {
@@ -234,37 +230,46 @@ pub async fn apply(
 pub async fn table_rows(
     tx: &mut Transaction<'_, Postgres>,
     pid: i64,
-    mid: i64,
+    board_key: &str,
     kind: &str,
 ) -> Result<Vec<Value>> {
-    let board = native_board(tx, pid, mid)
+    let board = native_board(tx, pid, board_key)
         .await?
         .ok_or(AppError::not_found())?;
     let board_key = strv(&board, "code");
     table(kind)?;
     let mut result: Vec<Value> = if kind == "process" {
         sqlx::query_scalar(r#"SELECT to_jsonb(p) || jsonb_build_object(
-            'edit_values',to_jsonb(p),'model_id',$3::bigint,'data_type',p.internal_type,
-            'resolved_sig_id',p.sig_id,'collection_count',0,
-            'forward_count',(SELECT count(*) FROM transmit_points t WHERE t.project_id=p.project_id AND t.process_point_id=p.id),
-            'contexts','','range_inherited','')
+            'edit_values',to_jsonb(p),'data_type',p.internal_type,
+            'resolved_sig_id',p.sig_id,
+            'forward_count',(SELECT count(*) FROM transmit_points t WHERE t.project_id=p.project_id AND t.process_point_id=p.id))
             FROM process_points p WHERE p.project_id=$1 AND p.board_key=$2 ORDER BY p.display_order,p.id"#)
-            .bind(pid).bind(board_key).bind(mid).fetch_all(&mut **tx).await?
+            .bind(pid).bind(board_key).fetch_all(&mut **tx).await?
     } else {
         sqlx::query_scalar(r#"SELECT to_jsonb(t) || jsonb_build_object(
-            'edit_values',to_jsonb(t),'model_id',$3::bigint,'signal_id',p.id,'signal_name',p.name,
+            'edit_values',to_jsonb(t),'signal_name',p.name,
             'enum_name',p.enum_name,'resolved_sig_id',p.sig_id,'data_type',p.internal_type,
             'byte_length',p.byte_length,'element_count',p.element_count,'unit',p.unit,
             'group_key',p.group_key,'default_value',p.default_value,'min_value',p.min_value,'max_value',p.max_value,
             'field_name',t.name,'effective_address',t.address,'effective_type',t.wire_type,
             'effective_length',t.wire_length,'address_length',t.wire_length,
-            'endpoint_name',t.endpoint_key,'protocol','UPP','transport','CAN','context_name',p.group_key)
+            'endpoint_name',t.endpoint_key,'protocol','UPP')
             FROM transmit_points t JOIN process_points p ON p.project_id=t.project_id AND p.board_key=t.board_key AND p.id=t.process_point_id
             WHERE t.project_id=$1 AND t.board_key=$2 ORDER BY t.display_order,t.id"#)
-            .bind(pid).bind(board_key).bind(mid).fetch_all(&mut **tx).await?
+            .bind(pid).bind(board_key).fetch_all(&mut **tx).await?
     };
     let groups = groups(&board);
     for row in &mut result {
+        if kind != "process" {
+            if let Some(endpoint) = board["point_endpoints"].as_array().and_then(|endpoints| {
+                endpoints
+                    .iter()
+                    .find(|endpoint| endpoint["code"] == row["endpoint_key"])
+            }) {
+                row["endpoint_name"] = endpoint["name"].clone();
+                row["protocol"] = endpoint["protocol"].clone();
+            }
+        }
         row["group_name"] = groups
             .iter()
             .find(|g| g["code"] == row["group_key"])
@@ -285,7 +290,7 @@ pub async fn import(tx: &mut Transaction<'_, Postgres>, pid: i64, data: &DspImpo
         .and_then(|v| v["board_types"].as_array())
         .and_then(|bs| {
             bs.iter()
-                .find(|b| b["point_storage"] == "native" && b["model_code"] == "DSP")
+                .find(|b| b["point_storage"] == "native" && b["code"] == "DSP")
         })
     else {
         return Err(AppError::bad("DSP 工作簿导入需要已应用的 DSP 原生板卡配置"));
@@ -473,30 +478,6 @@ fn numeric_range(out: &mut Vec<Value>, row: &Value) {
 
 pub fn validate(g: &Value) -> Vec<Value> {
     let mut out = vec![];
-    // Native boards have exactly one point authority. Endpoints may still
-    // describe topology/permissions, but their legacy point rows must not be
-    // silently hidden by the native grid or omitted from generated output.
-    for entity in ["signal_groups", "device_contexts", "signal_bindings"] {
-        for row in rows(g, entity) {
-            let mid = if entity == "signal_bindings" {
-                topology::find(g, "endpoints", num(row, "endpoint_id"))
-                    .map(|endpoint| num(endpoint, "model_id"))
-                    .unwrap_or(0)
-            } else {
-                num(row, "model_id")
-            };
-            if is_native_model(g, mid) {
-                issue(
-                    &mut out,
-                    entity,
-                    row,
-                    "native_storage",
-                    "原生板卡的分组由 JSON 定义，点数据须使用内部数据表和转发表，不能混入旧格式点数据",
-                    mid,
-                );
-            }
-        }
-    }
     for point in rows(g, "process_points") {
         let entity = "process_points";
         if let Some(board) = board_definition(g, strv(point, "board_key")) {
@@ -567,6 +548,23 @@ pub fn validate(g: &Value) -> Vec<Value> {
     }
     for t in rows(g, "transmit_points") {
         let entity = "transmit_points";
+        if !board_definition(g, strv(t, "board_key"))
+            .and_then(|board| board["point_endpoints"].as_array())
+            .is_some_and(|endpoints| {
+                endpoints.iter().any(|endpoint| {
+                    endpoint["code"] == t["endpoint_key"] && endpoint["protocol"] == "UPP"
+                })
+            })
+        {
+            issue(
+                &mut out,
+                entity,
+                t,
+                "endpoint",
+                "转发端点不在已应用 JSON 的 UPP 端点配置中",
+                0,
+            );
+        }
         let Some(p) = rows(g, "process_points").iter().find(|p| {
             p["id"] == t["process_point_id"]
                 && p["project_id"] == t["project_id"]
@@ -769,7 +767,13 @@ pub fn generate(g: &Value) -> BTreeMap<String, String> {
             .unwrap(),
         );
         files.insert(format!("board_types/{code}/transmit.json"),serde_json::to_string_pretty(&json!({"version":1,"board_key":code,"protocol":"UPP","conversion_rules":{"identity":"wire = internal","fixed_point":"wire = round(internal / scale); internal = wire * scale","array_bytes":"preserve the declared element representation and total byte length"},"points":transmit})).unwrap());
-        let mut endpoints: BTreeMap<String, BTreeMap<i64, Vec<&Value>>> = BTreeMap::new();
+        let mut endpoints: BTreeMap<String, BTreeMap<i64, Vec<&Value>>> = board["point_endpoints"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|endpoint| endpoint["protocol"] == "UPP")
+            .map(|endpoint| (strv(endpoint, "code").to_owned(), BTreeMap::new()))
+            .collect();
         for point in &transmit {
             if point["enabled"] == true {
                 endpoints
@@ -779,10 +783,6 @@ pub fn generate(g: &Value) -> BTreeMap<String, String> {
                     .or_default()
                     .push(point);
             }
-        }
-        // An empty service is still exported so the project contains a complete DSP contract.
-        if endpoints.is_empty() {
-            endpoints.insert("UPP_SERVICE".into(), BTreeMap::new());
         }
         for (endpoint, models) in endpoints {
             let mut xml = String::from(
@@ -840,9 +840,9 @@ mod tests {
             .unwrap()
             .clone(),
         );
-        json!({"project_config":{"board_types":[{"code":"DSP","model_code":"DSP","point_storage":"native",
-            "point_groups":[{"code":"LOCAL","name":"本地数据"}]}]},
-            "board_models":[{"id":1,"code":"DSP"}],"process_points":[point],"transmit_points":[transmit]})
+        json!({"project_config":{"board_types":[{"code":"DSP","point_storage":"native",
+            "point_groups":[{"code":"LOCAL","name":"本地数据"}],
+            "point_endpoints":[{"code":"UPP_SERVICE","name":"DSP UPP服务","protocol":"UPP"}]}]},"process_points":[point],"transmit_points":[transmit]})
     }
 
     #[test]
@@ -867,32 +867,14 @@ mod tests {
     }
 
     #[test]
-    fn native_board_rejects_hidden_legacy_points_but_keeps_other_boards() {
+    fn forwarding_requires_an_applied_upp_endpoint() {
         let mut g = graph();
-        g["board_models"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!({"id":2,"code":"UPM"}));
-        g["signal_groups"] = json!([{"id":10,"model_id":2,"name":"UPM"}]);
         assert!(validate(&g).is_empty());
-        g["signal_groups"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!({"id":11,"model_id":1,"name":"hidden DSP"}));
-        assert!(
-            validate(&g)
-                .iter()
-                .any(|i| i["entity"] == "signal_groups" && i["code"] == "native_storage")
-        );
-        g["signal_groups"] = json!([]);
-        g["endpoints"] = json!([{"id":20,"model_id":1}]);
-        assert!(validate(&g).is_empty());
-        g["signal_bindings"] = json!([{"id":30,"endpoint_id":20}]);
-        assert!(
-            validate(&g)
-                .iter()
-                .any(|i| i["entity"] == "signal_bindings" && i["code"] == "native_storage")
-        );
+        g["transmit_points"][0]["endpoint_key"] = json!("MISSING");
+        assert!(validate(&g).iter().any(|issue| issue["code"] == "endpoint"));
+        g["transmit_points"][0]["endpoint_key"] = json!("UPP_SERVICE");
+        g["project_config"]["board_types"][0]["point_endpoints"][0]["protocol"] = json!("MODBUS");
+        assert!(validate(&g).iter().any(|issue| issue["code"] == "endpoint"));
     }
 
     #[test]
@@ -920,8 +902,8 @@ mod tests {
     #[test]
     fn native_definitions_accept_unknown_ids_and_require_applied_groups() {
         let mut g = graph();
-        assert!(is_native_model(&g, 1));
-        assert!(!is_native_model(&g, 2));
+        assert!(board_definition(&g, "DSP").is_some());
+        assert!(board_definition(&g, "UPM").is_none());
         g["process_points"][0]["process_enabled"] = json!(true);
         assert!(validate(&g).is_empty());
         g["process_points"][0]["sig_id"] = json!(100);

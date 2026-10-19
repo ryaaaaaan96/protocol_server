@@ -11,26 +11,14 @@ use sqlx::{Postgres, Transaction};
 /// Stable identity keys prevent an unrelated row insertion from shifting array paths.
 pub fn document(graph: &Value) -> Value {
     let mut result = json!({"project_config":graph["project_config"]});
-    for &table in topology::TABLES.iter().chain(topology::VIEWS) {
-        if table == "source_records" {
-            continue;
-        }
+    for &table in topology::TABLES {
         let mut records = serde_json::Map::new();
         for row in topology::rows(graph, table) {
-            let key = match table {
-                "signal_ranges" => row["signal_id"].to_string(),
-                "platform_signals" => row["symbol"].as_str().unwrap_or("").to_owned(),
-                "v_passthrough_fields" => format!("{}:{}", row["route_id"], row["field_id"]),
-                _ => row["id"].to_string(),
-            };
+            let key = row["id"].to_string();
             let mut row = row.clone();
             let fields = row.as_object_mut().unwrap();
             for field in ["created_at", "updated_at", "raw_json"] {
                 fields.remove(field);
-            }
-            // An upserted range gets a different sequence ID after preview rollback.
-            if table == "signal_ranges" {
-                fields.remove("id");
             }
             records.insert(key, row);
         }
@@ -68,17 +56,18 @@ pub async fn can_preview(
         return Ok(false);
     }
     if c.entity == "point_order" || point_tables::is_point_entity(&c.entity) {
-        let mid = topology::num(&c.values, "model_id");
+        let board_key = c.values["board_key"]
+            .as_str()
+            .ok_or(AppError::bad("缺少板卡标识"))?;
         let kind = match c.entity.as_str() {
             "point_order" => c.values["kind"].as_str().unwrap_or(""),
             "process_points" => "process",
-            "collect_points" => "collect",
             _ => "forward",
         };
         point_tables::entity(kind)?;
         let definition =
-            point_tables::board_definition(tx, pid, mid, kind, &s.project_files).await?;
-        let mut rows = point_tables::table_rows(tx, pid, mid, kind).await?;
+            point_tables::board_definition(tx, pid, board_key, kind, &s.project_files).await?;
+        let mut rows = point_tables::table_rows(tx, pid, board_key, kind).await?;
         if c.entity == "point_order" {
             point_order::sort_rows(&mut rows, &definition["ordering"]);
             let Some(first) = rows.iter().find(|r| r["id"] == c.values["ids"][0]) else {
@@ -130,25 +119,12 @@ fn overlap(a: &str, b: &str) -> bool {
         || b.strip_prefix(a).is_some_and(|rest| rest.starts_with('/'))
 }
 
-/// Merge documents key table rows by ID, unlike the array-based topology graph.
-/// Resolve storage from the applied board configuration, never from an ID that
-/// may also exist in a legacy table's independent sequence.
-fn reorder_table(document: &Value, c: &Change) -> &'static str {
-    let model = &document["board_models"][c.values["model_id"].to_string()];
-    let native = model.is_object()
-        && document["project_config"]["board_types"]
-            .as_array()
-            .is_some_and(|boards| {
-                boards.iter().any(|board| {
-                    board["model_code"] == model["code"] && board["point_storage"] == "native"
-                })
-            });
-    match (native, c.values["kind"].as_str()) {
-        (true, Some("process")) => "process_points",
-        (true, _) => "transmit_points",
-        (false, Some("process")) => "signals",
-        (false, _) => "signal_bindings",
-    }
+fn board_config<'a>(document: &'a Value, c: &Change) -> Option<&'a Value> {
+    let key = c.values["board_key"].as_str()?;
+    document["project_config"]["board_types"]
+        .as_array()?
+        .iter()
+        .find(|board| board["code"] == key && board["point_storage"] == "native")
 }
 
 /// Produce the only acceptable combined state. Domain replay must match it exactly.
@@ -176,8 +152,12 @@ pub fn rebase(
         return Err(error);
     }
     if c.entity == "point_order" {
-        let table = reorder_table(base, c);
-        if reorder_table(current, c) != table {
+        let table = match c.values["kind"].as_str() {
+            Some("process") => "process_points",
+            Some("forward") => "transmit_points",
+            _ => return Err(conflict(c, revision, "未启用的点表排序")),
+        };
+        if board_config(base, c).is_none() || board_config(base, c) != board_config(current, c) {
             return Err(conflict(
                 c,
                 revision,
@@ -194,13 +174,7 @@ pub fn rebase(
                 "upp_model",
                 "process_point_id",
             ],
-            _ => &[
-                "display_order",
-                "group_id",
-                "endpoint_id",
-                "context_id",
-                "field_id",
-            ],
+            _ => unreachable!(),
         };
         for id in c.values["ids"].as_array().into_iter().flatten() {
             let key = id.to_string();
@@ -216,18 +190,6 @@ pub fn rebase(
                     "同组顺序或分组归属已被修改，无法自动合并排序",
                 ));
             }
-            if table == "signal_bindings" {
-                let field = old["field_id"].to_string();
-                if base["protocol_fields"][&field]["ordinal"]
-                    != current["protocol_fields"][&field]["ordinal"]
-                {
-                    return Err(conflict(
-                        c,
-                        revision,
-                        "同组协议顺序已被修改，无法自动合并排序",
-                    ));
-                }
-            }
         }
     }
     let mut merged = current.clone();
@@ -242,7 +204,7 @@ mod tests {
     fn change() -> Change {
         Change {
             revision: 1,
-            entity: "signals".into(),
+            entity: "process_points".into(),
             operation: "update".into(),
             id: Some(1),
             values: json!({"name":"new"}),
@@ -250,53 +212,51 @@ mod tests {
         }
     }
     #[test]
-    fn identities_survive_insertion_and_symbol_tables_have_distinct_keys() {
-        let a = document(
-            &json!({"signals":[{"id":2,"name":"two"}],"platform_signals":[{"symbol":"A","signal_id":1},{"symbol":"B","signal_id":2}]}),
-        );
-        let b = document(
-            &json!({"signals":[{"id":1,"name":"one"},{"id":2,"name":"two"}],"platform_signals":[{"symbol":"B","signal_id":2},{"symbol":"A","signal_id":1}]}),
-        );
-        assert_eq!(paths(&json_patch::diff(&a, &b)), vec!["/signals/1"]);
-        assert_eq!(a["platform_signals"].as_object().unwrap().len(), 2);
+    fn identities_survive_insertion() {
+        let a = document(&json!({"process_points":[{"id":2,"name":"two"}]}));
+        let b = document(&json!({"process_points":[{"id":1,"name":"one"},{"id":2,"name":"two"}]}));
+        assert_eq!(paths(&json_patch::diff(&a, &b)), vec!["/process_points/1"]);
     }
     #[test]
     fn disjoint_fields_merge_but_same_field_and_deletion_conflict() {
-        let base = json!({"signals":{"1":{"name":"old","flags":"0"},"11":{"name":"other"}}});
+        let base = json!({"process_points":{"1":{"name":"old","flags":"0"},"11":{"name":"other"}}});
         let mut edited = base.clone();
-        edited["signals"]["1"]["name"] = json!("new");
+        edited["process_points"]["1"]["name"] = json!("new");
         let patch = json_patch::diff(&base, &edited);
         let mut current = base.clone();
-        current["signals"]["1"]["flags"] = json!("1");
-        current["signals"]["11"]["name"] = json!("renamed");
+        current["process_points"]["1"]["flags"] = json!("1");
+        current["process_points"]["11"]["name"] = json!("renamed");
         let merged = rebase(&base, &patch, &current, &change(), 2).unwrap();
-        assert_eq!(merged["signals"]["1"], json!({"name":"new","flags":"1"}));
-        assert_eq!(merged["signals"]["11"]["name"], "renamed");
-        current["signals"]["1"]["name"] = json!("competing");
+        assert_eq!(
+            merged["process_points"]["1"],
+            json!({"name":"new","flags":"1"})
+        );
+        assert_eq!(merged["process_points"]["11"]["name"], "renamed");
+        current["process_points"]["1"]["name"] = json!("competing");
         assert!(rebase(&base, &patch, &current, &change(), 2).is_err());
-        current["signals"].as_object_mut().unwrap().remove("1");
+        current["process_points"]
+            .as_object_mut()
+            .unwrap()
+            .remove("1");
         assert!(rebase(&base, &patch, &current, &change(), 2).is_err());
     }
 
     fn native_order(kind: &str) -> (Value, Change, json_patch::Patch) {
         let graph = json!({
-            "project_config":{"board_types":[{"code":"DSP","model_code":"DSP","point_storage":"native"}]},
-            "board_models":[{"id":7,"code":"DSP"}],
+            "project_config":{"board_types":[{"code":"DSP","point_storage":"native"}]},
             "process_points":[
                 {"id":1,"project_id":1,"board_key":"DSP","group_key":"LOCAL","name":"one","display_order":1},
                 {"id":2,"project_id":1,"board_key":"DSP","group_key":"LOCAL","name":"two","display_order":2}],
             "transmit_points":[
                 {"id":1,"project_id":1,"board_key":"DSP","endpoint_key":"UPP_SERVICE","upp_model":99,"process_point_id":1,"name":"first output","display_order":1},
-                {"id":2,"project_id":1,"board_key":"DSP","endpoint_key":"UPP_SERVICE","upp_model":99,"process_point_id":2,"name":"second output","display_order":2}],
-            "signals":[{"id":1,"group_id":200,"display_order":90}],
-            "signal_bindings":[{"id":1,"endpoint_id":200,"display_order":90}]
+                {"id":2,"project_id":1,"board_key":"DSP","endpoint_key":"UPP_SERVICE","upp_model":99,"process_point_id":2,"name":"second output","display_order":2}]
         });
         let c = Change {
             revision: 8,
             entity: "point_order".into(),
             operation: "reorder".into(),
-            id: Some(7),
-            values: json!({"model_id":7,"kind":kind,"ids":[2,1]}),
+            id: None,
+            values: json!({"board_key":"DSP","kind":kind,"ids":[2,1]}),
             expected: json!([1, 2]),
         };
         let base = document(&graph);
@@ -326,13 +286,9 @@ mod tests {
             assert_eq!(merged[table]["2"]["display_order"], 1);
             let mut current = base.clone();
             current[table]["1"]["name"] = json!("renamed while ordering");
-            // Legacy IDs overlap native IDs but belong to independent records.
-            current["signals"]["1"]["display_order"] = json!(91);
-            current["signal_bindings"]["1"]["endpoint_id"] = json!(201);
             let merged = rebase(&base, &patch, &current, &c, 9).unwrap();
             assert_eq!(merged[table]["1"]["name"], "renamed while ordering");
             assert_eq!(merged[table]["1"]["display_order"], 2);
-            assert_eq!(merged["signals"]["1"]["display_order"], 91);
         }
     }
 
@@ -367,31 +323,5 @@ mod tests {
                 .remove("point_storage");
             assert!(rebase(&base, &patch, &current, &c, 9).is_err());
         }
-    }
-
-    #[test]
-    fn legacy_reorder_keeps_protocol_ordinal_conflict_checks() {
-        let base = document(&json!({
-            "signal_bindings":[
-                {"id":1,"field_id":11,"display_order":1},
-                {"id":2,"field_id":12,"display_order":2}],
-            "protocol_fields":[{"id":11,"ordinal":0},{"id":12,"ordinal":1}]
-        }));
-        let mut edited = base.clone();
-        edited["signal_bindings"]["1"]["display_order"] = json!(2);
-        edited["signal_bindings"]["2"]["display_order"] = json!(1);
-        let patch = json_patch::diff(&base, &edited);
-        let c = Change {
-            revision: 1,
-            entity: "point_order".into(),
-            operation: "reorder".into(),
-            id: Some(7),
-            values: json!({"model_id":7,"kind":"forward","ids":[2,1]}),
-            expected: json!([1, 2]),
-        };
-        assert!(rebase(&base, &patch, &base, &c, 1).is_ok());
-        let mut current = base.clone();
-        current["protocol_fields"]["11"]["ordinal"] = json!(10);
-        assert!(rebase(&base, &patch, &current, &c, 2).is_err());
     }
 }

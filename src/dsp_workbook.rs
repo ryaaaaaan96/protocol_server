@@ -108,6 +108,10 @@ fn column_name(mut index: u32) -> String {
 
 /// A DSP-only import must not parse or validate unrelated UPM worksheets.
 pub fn parse_workbook(bytes: Vec<u8>) -> Result<DspImport> {
+    parse(&workbook_rows(bytes)?)
+}
+
+fn workbook_rows(bytes: Vec<u8>) -> Result<Vec<Value>> {
     let mut archive = zip::ZipArchive::new(Cursor::new(&bytes))
         .map_err(|_| AppError::bad("请上传有效的 .xlsx 工作簿"))?;
     let mut expanded = 0u64;
@@ -173,7 +177,7 @@ pub fn parse_workbook(bytes: Vec<u8>) -> Result<DspImport> {
             }));
         }
     }
-    parse(&rows)
+    Ok(rows)
 }
 
 pub fn parse(rows: &[Value]) -> Result<DspImport> {
@@ -365,11 +369,8 @@ mod tests {
     fn fixture() -> Vec<Value> {
         static ROWS: OnceLock<Vec<Value>> = OnceLock::new();
         ROWS.get_or_init(|| {
-            crate::importer::parse(
-                include_bytes!("../config/upm/sources/UPM项目测点数据表.xlsx").to_vec(),
-            )
-            .unwrap()
-            .source_rows
+            workbook_rows(include_bytes!("../config/upm/sources/UPM项目测点数据表.xlsx").to_vec())
+                .unwrap()
         })
         .clone()
     }
@@ -634,7 +635,6 @@ mod tests {
             }
         }
         let bytes = writer.finish().unwrap().into_inner();
-        assert!(crate::importer::parse(bytes.clone()).is_err());
         let data = parse_workbook(bytes).unwrap();
         assert_eq!(data.process.len(), 552);
         assert_eq!(data.transmit.len(), 445);
