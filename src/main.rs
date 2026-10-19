@@ -87,6 +87,14 @@ async fn main() -> anyhow::Result<()> {
     let pool = PgPoolOptions::new()
         .max_connections(10)
         .acquire_timeout(std::time::Duration::from_secs(5))
+        .after_connect(|conn, _| {
+            Box::pin(async move {
+                sqlx::query("SET search_path TO pg_catalog,auth,meta,history,public,pg_temp")
+                    .execute(conn)
+                    .await?;
+                Ok(())
+            })
+        })
         .connect(&runtime_url)
         .await.context("无法连接数据库。首次使用请运行 ./scripts/init-db.sh；已初始化的本地数据库请运行 node scripts/local-db.mjs start；外部数据库请检查其服务和连接配置")?;
     let unsafe_role: bool = sqlx::query_scalar(
@@ -99,13 +107,13 @@ async fn main() -> anyhow::Result<()> {
         "DATABASE_URL must use a non-superuser role without BYPASSRLS; run migrations using MIGRATION_DATABASE_URL separately"
     );
     let schema_ready: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='projects' AND column_name='database_name') AND to_regclass('public.users') IS NOT NULL AND to_regclass('public.process_points') IS NULL",
+        "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='meta' AND table_name='projects' AND column_name='database_name') AND to_regclass('auth.users') IS NOT NULL AND to_regclass('auth.sessions') IS NOT NULL AND to_regclass('auth.login_attempts') IS NOT NULL AND to_regclass('meta.project_members') IS NOT NULL AND to_regclass('meta.project_member_grants') IS NOT NULL AND to_regclass('history.audit_logs') IS NOT NULL AND to_regclass('public.process_points') IS NULL AND to_regclass('meta.project_state') IS NULL",
     ).fetch_one(&pool).await?;
     anyhow::ensure!(
         schema_ready,
-        "平台数据库尚未初始化或仍为旧共享库。新环境运行 ./scripts/init-db.sh；旧库先运行 scripts/split-databases.mjs 完成拆分。启动服务不会自动建表。"
+        "平台数据库尚未初始化或升级。新环境运行 ./scripts/init-db.sh；已拆分的平台库运行 cargo run -- migrate；旧共享库先运行 scripts/split-databases.mjs。启动服务不会自动建表。"
     );
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM users")
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM auth.users")
         .fetch_one(&pool)
         .await?;
     if count == 0 {
@@ -115,7 +123,7 @@ async fn main() -> anyhow::Result<()> {
         let hash = auth::hash_password(password)
             .await
             .map_err(|e| anyhow::anyhow!(e.1))?;
-        sqlx::query("INSERT INTO users(username,display_name,password_hash,is_admin) VALUES($1,'系统管理员',$2,true) ON CONFLICT(username) DO NOTHING").bind(std::env::var("ADMIN_USERNAME").unwrap_or("admin".into())).bind(hash).execute(&pool).await?;
+        sqlx::query("INSERT INTO auth.users(username,display_name,password_hash,is_admin) VALUES($1,'系统管理员',$2,true) ON CONFLICT(username) DO NOTHING").bind(std::env::var("ADMIN_USERNAME").unwrap_or("admin".into())).bind(hash).execute(&pool).await?;
     }
     let pool = database::DatabaseRouter::new(
         pool,

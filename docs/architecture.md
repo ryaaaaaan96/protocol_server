@@ -6,10 +6,10 @@
 
 | 数据库 | 表 | 职责 |
 | --- | --- | --- |
-| `protocol_platform` | `users` / `sessions` / `login_attempts` | 登录账号、会话与限流 |
-| 平台库 | `projects` | 项目 ID、不可变 UUID、config_key、名称、数据库名和创建状态 |
-| 平台库 | `project_members` / `project_member_grants` | 项目成员及板卡、端点编辑范围 |
-| 平台库 | `audit_logs` | 成员与权限操作审计 |
+| `protocol_platform` | `auth.users` / `auth.sessions` / `auth.login_attempts` | 登录账号、会话与限流 |
+| 平台库 | `meta.projects` | 项目 ID、不可变 UUID、config_key、名称、数据库名和创建状态 |
+| 平台库 | `meta.project_members` / `meta.project_member_grants` | 项目成员及板卡、端点编辑范围 |
+| 平台库 | `history.audit_logs` | 账号、成员与权限操作审计 |
 | 每项目业务库 | `points.process_points` / `points.transmit_points` | 当前 DSP 内部数据及 UPP 转发映射 |
 | 项目库 | `history.events` | 追加式点修改、项目审计和导入事件 |
 | 项目库 | `history.releases` | 不可变发布快照及生成文件 |
@@ -17,7 +17,9 @@
 | 项目库 | `meta.previews` | 待确认的修改或工作簿导入 |
 | 每个库 | `public._sqlx_migrations` | 各自的迁移版本和校验和 |
 
-平台库共 8 张表，每个项目库共 7 张表（包含迁移记录表）。`points`、`history`、`meta` 是同一数据库中的 Schema；在 DBeaver 中按 Schema 展开即可查看。它们共用事务和外键，板卡不单独建库。业务库不保存账号密码或权限副本；历史保存操作者 ID 和名称快照，不跨数据库建用户外键。
+平台库共 8 张表，每个项目库共 7 张表（包含迁移记录表）。平台按 `auth`、`meta`、`history` 分组，项目按 `points`、`history`、`meta` 分组，各自保留 `public._sqlx_migrations`。Schema 是库内分组，在 DBeaver 刷新数据库后展开即可查看；同一库的表仍共用事务并可建立外键，板卡不单独建库。业务库不保存账号密码或权限副本；历史保存操作者 ID 和名称快照，不跨数据库建用户外键。
+
+平台保留独立成员授权表，继续用复合外键、范围检查和唯一约束防止无效或重复授权。会话支持多设备和独立过期；登录尝试也要记录不存在的用户名，因此这两类记录不合入账号表。平台审计只追加，与可更新的账号、权限和项目状态分别保存。
 
 `config/dc-ups/project.json` 是可编辑来源，业务库 `meta.project_state.topology_config` 是校验导入后的生效快照。平台登记仅负责定位项目，不能用 JSON 中任意数据库地址替换路由。路由同时核验项目 ID、key 和 UUID，避免同名数据库被误用。
 
@@ -74,7 +76,7 @@ erDiagram
 
 公共字段包括 `id`、`project_id`、`actor_id`、`actor_name`、`created_at`。同次点修改使用同一个 `batch_id`；删除点仍保留历史，相同值不产生点变化事件。发布快照保存在独立的 `history.releases`，避免混入每次编辑的差异记录。
 
-旧 `point_history`、项目 `audit_logs`、`imports` 完整迁入统一事件表，`legacy_source` / `legacy_id` 保存原表名和原 ID；点历史 ID 保持不变，旧审计和导入获得新的事件 ID。旧审计和导入没有记录项目版本，迁移后 `project_revision` 保持空值；新事件记录实际提交版本。平台库的 `audit_logs` 仍独立保留。
+旧 `point_history`、项目 `audit_logs`、`imports` 完整迁入统一事件表，`legacy_source` / `legacy_id` 保存原表名和原 ID；点历史 ID 保持不变，旧审计和导入获得新的事件 ID。旧审计和导入没有记录项目版本，迁移后 `project_revision` 保持空值；新事件记录实际提交版本。平台库的 `history.audit_logs` 仍独立保留。
 
 ```sql
 SELECT * FROM history.events WHERE kind = 'point' ORDER BY id DESC LIMIT 100;
@@ -89,9 +91,11 @@ SELECT metadata FROM history.events WHERE kind = 'import' ORDER BY id DESC;
 
 预览在事务内试写后回滚。提交再次校验编辑权、revision、字段冲突、关联和权限，业务修改、历史、审计及 revision 在同一事务提交。`json-patch` 比较基线与最新状态，无关字段可合并；同字段或依赖冲突不覆盖。项目编辑租约降低同时修改概率，版本检查处理过期草稿。
 
-PostgreSQL 的事务/MVCC 不替代这些应用历史记录。运行角色不能修改或删除既有事件和发布记录；RLS 校验当前项目与事务内权限。服务器先在平台库锁定账号及项目权限，再把授权快照设置到业务事务；直到业务提交完成才释放平台锁。撤权与提交按锁顺序执行，数据库不使用跨库用户查询。`project_member_grants` 使用稳定 `board_key` / `endpoint_key`，全板卡授权覆盖内部点与该板卡协议授权。
+PostgreSQL 的事务/MVCC 不替代这些应用历史记录。运行角色不能修改或删除既有事件和发布记录；RLS 校验当前项目与事务内权限。服务器先在平台库锁定账号及项目权限，再把授权快照设置到业务事务；直到业务提交完成才释放平台锁。撤权与提交按锁顺序执行，数据库不使用跨库用户查询。`meta.project_member_grants` 使用稳定 `board_key` / `endpoint_key`，全板卡授权覆盖内部点与该板卡协议授权。
 
 ## 升级与项目归档
+
+平台迁移 `migrations/platform/0002_grouped_platform.sql` 将七张业务/运行表从 `public` 移入对应 Schema，表数、记录、ID、序列、外键、权限范围约束及登录会话保留。它将平台库的 `public._sqlx_migrations` 更新到版本 2，不改动项目库的七张表、`schema_version=5` 或业务 `revision`；两类版本各自管理。代码与手写 SQL 使用 Schema 限定名，安全函数和运行角色授权同步适配。
 
 项目迁移 `0002_grouped_project.sql` 将现有库整理为 7 张表，完整保留点数据、历史、发布和已有编辑权。旧预览全部失效，现有项目 `revision` 增加 1，`schema_version` 更新为 5。刷新客户端后重新检查待提交草稿；不要删除 `_sqlx_migrations` 或修改已应用的迁移文件。
 

@@ -170,7 +170,9 @@ export async function exportProject(key, destination, overrides = {}) {
     }
     await platformDb.connect();
     await platformDb.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
-    const { rows: registrations } = await platformDb.query("SELECT id,project_uid,database_name FROM projects WHERE config_key=$1 AND status='ready'", [key]);
+    const { rows: platformSchema } = await platformDb.query("SELECT to_regclass('meta.projects') IS NOT NULL AS ready");
+    if (!platformSchema[0].ready) throw new Error("请先运行 cargo run -- migrate，将平台数据库迁移到分组结构、项目数据库迁移到 v5 后导出。");
+    const { rows: registrations } = await platformDb.query("SELECT id,project_uid,database_name FROM meta.projects WHERE config_key=$1 AND status='ready'", [key]);
     if (registrations.length !== 1) throw new Error("平台数据库中未找到唯一的就绪项目。");
     const registry = registrations[0];
     if (!/^protocol_project_[a-z][a-z0-9_]{0,39}$/.test(registry.database_name)) throw new Error("平台登记的项目数据库名称无效。");

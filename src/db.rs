@@ -100,7 +100,7 @@ async fn begin_context(
     };
     // All platform writers acquire users before registry, as does this guard.
     let actor: Option<(bool, String, String)> = sqlx::query_as(
-        "SELECT is_admin,display_name,username FROM users WHERE id=$1 AND active FOR SHARE",
+        "SELECT is_admin,display_name,username FROM auth.users WHERE id=$1 AND active FOR SHARE",
     )
     .bind(user.id)
     .fetch_optional(&mut *authorization)
@@ -118,7 +118,7 @@ async fn begin_context(
         return Err(AppError::forbidden());
     }
     let member: Option<(String, String)> = sqlx::query_as(
-        "SELECT role,edit_scope FROM project_members WHERE project_id=$1 AND user_id=$2",
+        "SELECT role,edit_scope FROM meta.project_members WHERE project_id=$1 AND user_id=$2",
     )
     .bind(pid)
     .bind(user.id)
@@ -129,7 +129,7 @@ async fn begin_context(
     } else {
         member.ok_or_else(AppError::forbidden)?
     };
-    let grants: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('board_key',board_key,'scope',scope,'endpoint_key',endpoint_key) FROM project_member_grants WHERE project_id=$1 AND user_id=$2 ORDER BY board_key,scope,endpoint_key")
+    let grants: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('board_key',board_key,'scope',scope,'endpoint_key',endpoint_key) FROM meta.project_member_grants WHERE project_id=$1 AND user_id=$2 ORDER BY board_key,scope,endpoint_key")
         .bind(pid).bind(user.id).fetch_all(&mut *authorization).await?;
     if write
         && role != "admin"
@@ -137,9 +137,9 @@ async fn begin_context(
     {
         return Err(AppError::forbidden());
     }
-    let all_grants: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(g) FROM project_member_grants g WHERE project_id=$1 ORDER BY user_id,board_key,scope,endpoint_key")
+    let all_grants: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(g) FROM meta.project_member_grants g WHERE project_id=$1 ORDER BY user_id,board_key,scope,endpoint_key")
         .bind(pid).fetch_all(&mut *authorization).await?;
-    let editors: Vec<i64> = sqlx::query_scalar("SELECT u.id FROM users u WHERE u.active AND (u.is_admin OR EXISTS(SELECT 1 FROM project_members m WHERE m.project_id=$1 AND m.user_id=u.id AND m.role='engineer' AND (m.edit_scope='all' OR EXISTS(SELECT 1 FROM project_member_grants g WHERE g.project_id=m.project_id AND g.user_id=m.user_id))))")
+    let editors: Vec<i64> = sqlx::query_scalar("SELECT u.id FROM auth.users u WHERE u.active AND (u.is_admin OR EXISTS(SELECT 1 FROM meta.project_members m WHERE m.project_id=$1 AND m.user_id=u.id AND m.role='engineer' AND (m.edit_scope='all' OR EXISTS(SELECT 1 FROM meta.project_member_grants g WHERE g.project_id=m.project_id AND g.user_id=m.user_id))))")
         .bind(pid).fetch_all(&mut *authorization).await?;
     let pool = router.pool_for_registry(&registry, creating).await?;
     let mut transaction = pool.begin().await?;
@@ -179,7 +179,7 @@ pub async fn audit(
         sqlx::query("INSERT INTO history.events(project_id,kind,actor_id,actor_name,action,entity,before_data,after_data,project_revision) SELECT $1,'audit',$2,COALESCE(current_setting('app.actor_name',true),''),$3,$4,$5,$6,revision FROM meta.project_state WHERE id=$1")
             .bind(pid).bind(user).bind(action).bind(entity).bind(before).bind(after).execute(tx).await?;
     } else {
-        sqlx::query("INSERT INTO public.audit_logs(project_id,user_id,actor_name,action,entity,before_data,after_data) VALUES($1,$2,COALESCE(current_setting('app.actor_name',true),''),$3,$4,$5,$6)")
+        sqlx::query("INSERT INTO history.audit_logs(project_id,user_id,actor_name,action,entity,before_data,after_data) VALUES($1,$2,COALESCE(current_setting('app.actor_name',true),''),$3,$4,$5,$6)")
             .bind(project).bind(user).bind(action).bind(entity).bind(before).bind(after).execute(tx).await?;
     }
     Ok(())

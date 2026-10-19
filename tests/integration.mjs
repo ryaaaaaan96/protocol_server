@@ -132,6 +132,15 @@ async function runIntegration(){
   const e=new Client(),v=new Client();
   await e.call("/auth/login","POST",{username:"engineer",password});
   await v.call("/auth/login","POST",{username:"viewer",password});
+  const secondViewer = new Client();
+  await secondViewer.call("/auth/login","POST",{username:"viewer",password});
+  equal((await secondViewer.call("/auth/me")).id, viewer.id);
+  await secondViewer.call("/auth/logout","POST",{});
+  equal((await secondViewer.raw("/auth/me")).status,401);
+  equal((await v.call("/auth/me")).id,viewer.id);
+  const unknown = new Client();
+  for(let attempt=0;attempt<10;attempt++) equal((await unknown.raw("/auth/login","POST",{username:"nonexistent",password})).status,401);
+  equal((await unknown.raw("/auth/login","POST",{username:"nonexistent",password})).status,429);
   equal((await e.raw("/projects","POST",{config_key:fixtureKey("dsp_native")})).status,403);
   if (!process.argv.some(arg=>["--folders","--excel","--databases"].includes(arg))) await checkDspPoints({client,engineer:e,viewer:v,engineerId:engineer.id,viewerId:viewer.id,equal,ok,
     migrationUrl:migration.toString(),appUrl:appUrl.toString(),testEnv,projectConfigs,fixtureKey});
@@ -142,7 +151,11 @@ async function runIntegration(){
     migrationUrl:migration.toString(),testEnv,projectConfigs,fixtureSource,fixtureKey,equal,ok});
   const inspection=new pg.Client({connectionString:migration.toString()});await inspection.connect();
   try{
-    const rows=(await inspection.query("SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename")).rows.map(row=>row.tablename);
+    const rows=(await inspection.query("SELECT tablename FROM pg_tables WHERE schemaname IN ('public','auth','meta','history') ORDER BY tablename")).rows.map(row=>row.tablename);
+    const platformTables=(await inspection.query("SELECT schemaname||'.'||tablename AS name FROM pg_tables WHERE schemaname IN ('public','auth','meta','history') ORDER BY 1")).rows.map(row=>row.name);
+    equal(platformTables.length,8);
+    for(const name of ["auth.users","auth.sessions","auth.login_attempts","meta.projects","meta.project_members","meta.project_member_grants","history.audit_logs","public._sqlx_migrations"])
+      ok(platformTables.includes(name),`platform contains ${name}`);
     for(const removed of ["board_models","boards","signal_groups","signals","data_items","signal_bindings","protocol_fields","protocol_contracts","endpoints","device_contexts","signal_ranges","source_records"]){
       ok(!rows.includes(removed),`obsolete table removed: ${removed}`);
     }
@@ -151,7 +164,7 @@ async function runIntegration(){
     }
     for(const absent of ["process_points","transmit_points","point_history","releases","project_state"])
       ok(!rows.includes(absent),`platform contains no business table: ${absent}`);
-    const registry=(await inspection.query("SELECT id,config_key,database_name,project_uid,status FROM projects")).rows;
+    const registry=(await inspection.query("SELECT id,config_key,database_name,project_uid,status FROM meta.projects")).rows;
     ok(registry.length >= 2,"multiple independently routed projects");
     equal(new Set(registry.map(row=>row.database_name)).size,registry.length);
     for(const entry of registry){
@@ -176,8 +189,8 @@ try{await runIntegration();}finally{
   const platform=new pg.Client({connectionString:migration.toString()});
   try{
     await platform.connect();
-    const exists=(await platform.query("SELECT to_regclass('public.projects') IS NOT NULL AS present")).rows[0].present;
-    if(exists)for(const entry of (await platform.query("SELECT database_name,project_uid FROM projects")).rows){
+    const exists=(await platform.query("SELECT to_regclass('meta.projects') IS NOT NULL AS present")).rows[0].present;
+    if(exists)for(const entry of (await platform.query("SELECT database_name,project_uid FROM meta.projects")).rows){
       const marker=(await adminDb.query("SELECT shobj_description(oid,'pg_database') AS owner FROM pg_database WHERE datname=$1",[entry.database_name])).rows[0]?.owner;
       if(marker===`protocol-project:${entry.project_uid}`){
         const quoted='"'+entry.database_name.replaceAll('"','""')+'"';

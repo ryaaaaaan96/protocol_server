@@ -10,6 +10,7 @@ import pg from "../.runtime/db-tools/node_modules/pg/lib/index.js";
 import { splitDatabases, environment, projectDatabaseName } from "../scripts/split-databases.mjs";
 import { exportProject } from "../scripts/export-project.mjs";
 import { checkGroupedSchema } from "./grouped-schema.mjs";
+import { preparePlatformSchema } from "./platform-schema.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const env = environment();
@@ -144,8 +145,18 @@ try {
     const migrated = spawnSync(path.join(root, "target/debug/protocol-server"), ["migrate"], { cwd: root, env: { ...env, DATABASE_URL: runtimeUrl(platformName), MIGRATION_DATABASE_URL: connection(platformName) }, encoding: "utf8", timeout: 120_000 });
     assert.equal(migrated.status, 0, migrated.stderr || "SQLx rejected split-created databases");
   };
+  const verifyPlatformSchema = await preparePlatformSchema({ platform, runtimeUrl: runtimeUrl(platformName), runtimeRole: decodeURIComponent(runtime.username) });
   await checkGroupedSchema({ first, second, runtimeUrl: runtimeUrl(projectNames[0]), runtimeRole: decodeURIComponent(runtime.username), migrate });
-  assert.equal((await splitDatabases({ ...options, journalPath })).alreadyComplete, true, "completed split journals remain verifiable after grouping the project schema");
+  await verifyPlatformSchema(migrate);
+  assert.equal((await splitDatabases({ ...options, journalPath })).alreadyComplete, true, "completed split journals remain verifiable after grouping both platform and project schemas");
+  // An interrupted old copy must not reinterpret already upgraded targets.
+  await source.end();
+  const incompleteJournal = path.join(options.backupDirectory, "incomplete-grouped.json");
+  const incomplete = JSON.parse(fs.readFileSync(journalPath, "utf8"));
+  incomplete.status = "backed_up";
+  fs.writeFileSync(incompleteJournal, JSON.stringify(incomplete), { mode: 0o600 });
+  await assert.rejects(splitDatabases({ ...options, journalPath: incompleteJournal }), /未完成拆分.*已升级/, "unfinished v1 copy refuses a grouped v2 target without overwriting it");
+  assert.equal((await admin.query("SELECT datconnlimit FROM pg_database WHERE datname=$1", [sourceName])).rows[0].datconnlimit, -1, "failed resume restores source connection access");
   const exported = await exportProject(keys[1], path.join(temporary, "export"), { ...env, PROJECT_CONFIG_DIR: configRoot, MIGRATION_DATABASE_URL: connection(platformName) });
   assert.equal(exported.rows, 1);
   assert.equal(exported.migrationVersion, 2);
@@ -158,7 +169,7 @@ try {
   await assert.rejects(exportProject(keys[0], path.join(temporary, "unsafe-export"), { ...env, PROJECT_CONFIG_DIR: configRoot, MIGRATION_DATABASE_URL: connection(platformName) }), /安全整数/);
   assert.equal((await first.query("SELECT revision FROM meta.project_state")).rows[0].revision, 8);
   assert.equal((await first.query("SELECT count(*)::int AS n FROM history.events WHERE kind='point'")).rows[0].n, 1);
-  console.log("PASS: v15 splits through reproducible v1 into grouped project v2; exact IDs/JSON/timestamps, permissions, locks and history survive; concurrent connections, foreign targets and backup failures are rejected; failed copy resumes safely; source retained; v5 exports and repeat SQLx migrations pass.");
+  console.log("PASS: v15 splits through reproducible v1 into grouped platform/project v2; exact IDs/JSON/timestamps, permissions, locks and history survive; concurrent connections, foreign targets and backup failures are rejected; failed copy resumes safely; source retained; v5 exports and repeat SQLx migrations pass.");
 } finally {
   pg.Client.prototype.query = originalQuery;
   await Promise.allSettled(opened.map(db => db.end()));

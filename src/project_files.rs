@@ -655,7 +655,7 @@ impl ProjectFiles {
         project_config::validate_directory(self, Some(key), config)?;
         let mut registry_tx = db::context(router, user, None, true).await?;
         let administrator: Option<i64> = sqlx::query_scalar(
-            "SELECT id FROM users WHERE id=$1 AND active AND is_admin FOR SHARE",
+            "SELECT id FROM auth.users WHERE id=$1 AND active AND is_admin FOR SHARE",
         )
         .bind(user.id)
         .fetch_optional(&mut *registry_tx)
@@ -710,17 +710,18 @@ impl ProjectFiles {
         let m = &project.manifest;
         let username = std::env::var("ADMIN_USERNAME").unwrap_or_else(|_| "admin".into());
         let user: User = sqlx::query_as(
-            "SELECT id,username,display_name,is_admin FROM users WHERE username=$1 AND is_admin AND active",
+            "SELECT id,username,display_name,is_admin FROM auth.users WHERE username=$1 AND is_admin AND active",
         ).bind(username).fetch_optional(&router.platform).await?
             .context("ADMIN_USERNAME 必须对应一个启用的管理员账号")?;
         let mut registry_tx = db::context(router, &user, None, false)
             .await
             .map_err(|e| anyhow!(e.1))?;
-        let existing: Option<i64> =
-            sqlx::query_scalar("SELECT id FROM projects WHERE config_key=$1 AND status='ready'")
-                .bind(key)
-                .fetch_optional(&mut *registry_tx)
-                .await?;
+        let existing: Option<i64> = sqlx::query_scalar(
+            "SELECT id FROM meta.projects WHERE config_key=$1 AND status='ready'",
+        )
+        .bind(key)
+        .fetch_optional(&mut *registry_tx)
+        .await?;
         registry_tx.rollback().await.map_err(|e| anyhow!(e.1))?;
         if let Some(pid) = existing {
             println!("项目 {key} 已存在（ID {pid}），未覆盖任何数据。");

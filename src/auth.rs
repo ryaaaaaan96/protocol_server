@@ -39,7 +39,7 @@ impl FromRequestParts<AppState> for User {
             return Err(AppError::new(StatusCode::UNAUTHORIZED, "请先登录"));
         }
         let hash = hex::encode(Sha256::digest(token.as_bytes()));
-        sqlx::query_as("SELECT u.id,u.username,u.display_name,u.is_admin FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.expires_at>now() AND u.active")
+        sqlx::query_as("SELECT u.id,u.username,u.display_name,u.is_admin FROM auth.sessions s JOIN auth.users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.expires_at>now() AND u.active")
             .bind(hash).fetch_optional(&state.pool.platform).await?.ok_or(AppError::new(StatusCode::UNAUTHORIZED,"登录已过期，请重新登录"))
     }
 }
@@ -77,7 +77,7 @@ pub async fn login(
     if input.username.len() > 80 || input.password.len() > 256 {
         return Err(AppError::bad("账号或密码格式不正确"));
     }
-    let failures:i32=sqlx::query_scalar("INSERT INTO login_attempts(username,failures) VALUES($1,1) ON CONFLICT(username) DO UPDATE SET failures=CASE WHEN login_attempts.updated_at<now()-interval '15 minutes' THEN 1 ELSE login_attempts.failures+1 END,updated_at=CASE WHEN login_attempts.updated_at<now()-interval '15 minutes' THEN now() ELSE login_attempts.updated_at END RETURNING failures")
+    let failures:i32=sqlx::query_scalar("INSERT INTO auth.login_attempts(username,failures) VALUES($1,1) ON CONFLICT(username) DO UPDATE SET failures=CASE WHEN login_attempts.updated_at<now()-interval '15 minutes' THEN 1 ELSE login_attempts.failures+1 END,updated_at=CASE WHEN login_attempts.updated_at<now()-interval '15 minutes' THEN now() ELSE login_attempts.updated_at END RETURNING failures")
         .bind(&input.username).fetch_one(&state.pool.platform).await?;
     if failures > 10 {
         return Err(AppError::new(
@@ -86,7 +86,7 @@ pub async fn login(
         ));
     }
     let record: Option<(i64, String)> =
-        sqlx::query_as("SELECT id,password_hash FROM users WHERE username=$1 AND active")
+        sqlx::query_as("SELECT id,password_hash FROM auth.users WHERE username=$1 AND active")
             .bind(&input.username)
             .fetch_optional(&state.pool.platform)
             .await?;
@@ -111,21 +111,21 @@ pub async fn login(
     rand::thread_rng().fill_bytes(&mut bytes);
     let token = hex::encode(bytes);
     let mut tx = state.pool.platform.begin().await?;
-    sqlx::query("DELETE FROM login_attempts WHERE username=$1")
+    sqlx::query("DELETE FROM auth.login_attempts WHERE username=$1")
         .bind(input.username)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("DELETE FROM sessions WHERE expires_at<now()")
+    sqlx::query("DELETE FROM auth.sessions WHERE expires_at<now()")
         .execute(&mut *tx)
         .await?;
-    sqlx::query("INSERT INTO sessions(token_hash,user_id) VALUES($1,$2)")
+    sqlx::query("INSERT INTO auth.sessions(token_hash,user_id) VALUES($1,$2)")
         .bind(hex::encode(Sha256::digest(token.as_bytes())))
         .bind(uid)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
     let user: User =
-        sqlx::query_as("SELECT id,username,display_name,is_admin FROM users WHERE id=$1")
+        sqlx::query_as("SELECT id,username,display_name,is_admin FROM auth.users WHERE id=$1")
             .bind(uid)
             .fetch_one(&state.pool.platform)
             .await?;
@@ -156,7 +156,7 @@ pub async fn logout(
                 .find_map(|p| p.trim().strip_prefix("protocol_session="))
         })
     {
-        sqlx::query("DELETE FROM sessions WHERE token_hash=$1")
+        sqlx::query("DELETE FROM auth.sessions WHERE token_hash=$1")
             .bind(hex::encode(Sha256::digest(token.as_bytes())))
             .execute(&state.pool.platform)
             .await?;

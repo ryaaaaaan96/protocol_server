@@ -102,8 +102,8 @@ export async function checkProjectDatabases({
     equal(databaseName(firstKey), databaseName(secondKey));
     const first = await client.call("/projects", "POST", { config_key: firstKey });
     equal((await client.raw("/projects", "POST", { config_key: secondKey })).status, 409);
-    equal((await platform.query("SELECT count(*)::int AS count FROM projects WHERE config_key=$1", [secondKey])).rows[0].count, 0);
-    const registry = (await platform.query("SELECT * FROM projects WHERE id=$1", [first.id])).rows[0];
+    equal((await platform.query("SELECT count(*)::int AS count FROM meta.projects WHERE config_key=$1", [secondKey])).rows[0].count, 0);
+    const registry = (await platform.query("SELECT * FROM meta.projects WHERE id=$1", [first.id])).rows[0];
     const isolated = await openBusiness(registry.database_name);
     businessConnections.push(isolated);
     const topologyUrl = `/projects/${first.id}/topology`;
@@ -111,7 +111,7 @@ export async function checkProjectDatabases({
 
     // Warm the route cache, alter each side's immutable identity independently,
     // and require rejection even though the same id, key and database still exist.
-    for (const [connection, table] of [[platform, "projects"], [isolated, "meta.project_state"]]) {
+    for (const [connection, table] of [[platform, "meta.projects"], [isolated, "meta.project_state"]]) {
       try {
         await connection.query(`UPDATE ${table} SET project_uid=$2 WHERE id=$1`, [first.id, randomUUID()]);
         equal((await client.raw(topologyUrl)).status, 409);

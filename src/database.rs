@@ -55,7 +55,7 @@ pub async fn grant_runtime(pool: &PgPool, role: &str, platform: bool) -> Result<
     let role = identifier(role);
     let grants = if platform {
         format!(
-            "GRANT USAGE ON SCHEMA public TO {role}; GRANT SELECT,INSERT,UPDATE,DELETE ON public.users,public.sessions,public.login_attempts,public.project_members,public.project_member_grants TO {role}; GRANT SELECT,INSERT ON public.audit_logs TO {role}; REVOKE UPDATE,DELETE,TRUNCATE ON public.audit_logs FROM {role}; GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA public TO {role}; GRANT SELECT,INSERT,UPDATE ON public.projects TO {role};"
+            "GRANT USAGE ON SCHEMA public,auth,meta,history TO {role}; REVOKE CREATE ON SCHEMA public,auth,meta,history FROM {role}; GRANT SELECT,INSERT,UPDATE,DELETE ON auth.users,auth.sessions,auth.login_attempts,meta.project_members,meta.project_member_grants TO {role}; GRANT SELECT,INSERT ON history.audit_logs TO {role}; REVOKE UPDATE,DELETE,TRUNCATE ON history.audit_logs FROM {role}; GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA auth,meta,history TO {role}; GRANT SELECT,INSERT,UPDATE ON meta.projects TO {role};"
         )
     } else {
         format!(
@@ -102,7 +102,7 @@ impl DatabaseRouter {
         }
     }
     pub async fn registry(&self, pid: i64) -> Result<Registry> {
-        sqlx::query_as("SELECT id,project_uid::text AS project_uid,config_key,name,description,database_name,status FROM app_project_registry($1)")
+        sqlx::query_as("SELECT id,project_uid::text AS project_uid,config_key,name,description,database_name,status FROM public.app_project_registry($1)")
             .bind(pid).fetch_optional(&self.platform).await?.ok_or_else(AppError::not_found)
     }
     pub async fn reserve_project(
@@ -114,13 +114,13 @@ impl DatabaseRouter {
         creator: i64,
     ) -> Result<Registry> {
         let database_name = project_database_name(key)?;
-        let existing: Option<Registry> = sqlx::query_as("SELECT id,project_uid::text AS project_uid,config_key,name,description,database_name,status FROM projects WHERE config_key=$1 FOR UPDATE")
+        let existing: Option<Registry> = sqlx::query_as("SELECT id,project_uid::text AS project_uid,config_key,name,description,database_name,status FROM meta.projects WHERE config_key=$1 FOR UPDATE")
             .bind(key).fetch_optional(&mut *tx).await?;
         if let Some(existing) = existing {
             return Ok(existing);
         }
         let collision: bool =
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM projects WHERE database_name=$1)")
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM meta.projects WHERE database_name=$1)")
                 .bind(&database_name)
                 .fetch_one(&mut *tx)
                 .await?;
@@ -129,7 +129,7 @@ impl DatabaseRouter {
                 "项目标识转换后与已有项目数据库重名，请使用不同的项目标识",
             ));
         }
-        Ok(sqlx::query_as("INSERT INTO projects(config_key,name,description,database_name,created_by) VALUES($1,$2,$3,$4,$5) RETURNING id,project_uid::text AS project_uid,config_key,name,description,database_name,status")
+        Ok(sqlx::query_as("INSERT INTO meta.projects(config_key,name,description,database_name,created_by) VALUES($1,$2,$3,$4,$5) RETURNING id,project_uid::text AS project_uid,config_key,name,description,database_name,status")
             .bind(key).bind(name).bind(description).bind(database_name).bind(creator).fetch_one(tx).await?)
     }
     pub async fn project_pool(&self, pid: i64) -> Result<PgPool> {
@@ -347,7 +347,7 @@ impl DatabaseRouter {
             let row: Option<(String,String)> = sqlx::query_as("SELECT name,description FROM meta.project_state WHERE id=$1 AND config_key=$2 AND project_uid=$3::text::uuid AND topology_config IS NOT NULL AND EXISTS(SELECT 1 FROM history.events WHERE project_id=$1 AND kind='audit' AND action='project.create')")
                 .bind(pid).bind(&registry.config_key).bind(&registry.project_uid).fetch_optional(&project).await?;
             let (name,description) = row.ok_or_else(|| AppError::conflict("项目创建事务尚未完成，数据库保持未就绪状态"))?;
-            let updated=sqlx::query("UPDATE projects SET name=$2,description=$3,status='ready',updated_at=now() WHERE id=$1 AND project_uid=$4::text::uuid AND config_key=$5")
+            let updated=sqlx::query("UPDATE meta.projects SET name=$2,description=$3,status='ready',updated_at=now() WHERE id=$1 AND project_uid=$4::text::uuid AND config_key=$5")
                 .bind(pid).bind(name).bind(description).bind(&registry.project_uid).bind(&registry.config_key).execute(&admin).await?;
             if updated.rows_affected()!=1 { return Err(AppError::conflict("平台项目身份已改变，未更新项目登记")); }
             Ok(())
@@ -369,7 +369,7 @@ impl DatabaseRouter {
             .await?;
         let result = async {
             let (name,description): (String,String) = sqlx::query_as("SELECT name,description FROM meta.project_state WHERE id=$1 AND config_key=$2 AND project_uid=$3::text::uuid").bind(pid).bind(&registry.config_key).bind(&registry.project_uid).fetch_one(&project).await?;
-            let updated=sqlx::query("UPDATE projects SET name=$2,description=$3,updated_at=now() WHERE id=$1 AND project_uid=$4::text::uuid AND config_key=$5").bind(pid).bind(name).bind(description).bind(&registry.project_uid).bind(&registry.config_key).execute(&admin).await?;
+            let updated=sqlx::query("UPDATE meta.projects SET name=$2,description=$3,updated_at=now() WHERE id=$1 AND project_uid=$4::text::uuid AND config_key=$5").bind(pid).bind(name).bind(description).bind(&registry.project_uid).bind(&registry.config_key).execute(&admin).await?;
             if updated.rows_affected()!=1 { return Err(AppError::conflict("平台项目身份已改变，未更新项目登记")); }
             Ok(())
         }.await;
@@ -381,7 +381,7 @@ impl DatabaseRouter {
         let registry = self.registry(pid).await?;
         let admin = self.admin_pool().await?;
         let result = sqlx::query(
-            "UPDATE projects SET status='failed',updated_at=now() WHERE id=$1 AND project_uid=$2::text::uuid AND status<>'ready'",
+            "UPDATE meta.projects SET status='failed',updated_at=now() WHERE id=$1 AND project_uid=$2::text::uuid AND status<>'ready'",
         )
         .bind(pid).bind(&registry.project_uid)
         .execute(&admin)
@@ -396,7 +396,7 @@ impl DatabaseRouter {
         }
         let admin = self.admin_pool().await?;
         let ids: Vec<i64> = sqlx::query_scalar(
-            "SELECT id FROM projects WHERE status IN ('creating','failed') ORDER BY id",
+            "SELECT id FROM meta.projects WHERE status IN ('creating','failed') ORDER BY id",
         )
         .fetch_all(&admin)
         .await?;
@@ -426,7 +426,7 @@ pub async fn migrate(url: &str) -> anyhow::Result<()> {
     grant_runtime(&admin, runtime.get_username(), true)
         .await
         .map_err(|e| anyhow::anyhow!(e.1))?;
-    let entries: Vec<Registry> = sqlx::query_as("SELECT id,project_uid::text AS project_uid,config_key,name,description,database_name,status FROM projects WHERE status='ready' ORDER BY id").fetch_all(&admin).await?;
+    let entries: Vec<Registry> = sqlx::query_as("SELECT id,project_uid::text AS project_uid,config_key,name,description,database_name,status FROM meta.projects WHERE status='ready' ORDER BY id").fetch_all(&admin).await?;
     for entry in entries {
         anyhow::ensure!(
             entry.database_name

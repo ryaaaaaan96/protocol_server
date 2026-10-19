@@ -46,8 +46,19 @@ JSON 是组织配置的编辑来源。服务器文件修改后，通过网页读
 
 数据库采用 **一个平台库 + 每项目一个业务库**，共用一个 PostgreSQL 实例：
 
-- `protocol_platform`：账号、登录会话、项目登记、成员权限及平台审计。
+- `protocol_platform`：账号、登录会话、项目登记、成员权限及平台审计，按 Schema 分组，共 8 张表。
 - `protocol_project_dc_ups`：DC-UPS 的点表、历史、配置快照和发布，按 Schema 分组，共 7 张表。
+
+平台库：
+
+| 分组 | 表 | 用途 |
+| --- | --- | --- |
+| `auth` | `users`、`sessions`、`login_attempts` | 账号、登录会话及尝试限流 |
+| `meta` | `projects`、`project_members`、`project_member_grants` | 项目定位、成员及编辑范围 |
+| `history` | `audit_logs` | 平台账号和权限操作审计 |
+| `public` | `_sqlx_migrations` | 平台结构升级记录 |
+
+每个项目库：
 
 | 分组 | 表 | 用途 |
 | --- | --- | --- |
@@ -93,6 +104,8 @@ node scripts/export-project.mjs dc-ups
 CLI 创建优先使用 Dump，否则只支持 `workbook_boards: ["DSP"]` 的 DSP 来源导入。项目 Dump 不携带历史、账号和发布，完整迁移分别备份平台库、全部项目库和配置目录。新导出的专用归档使用 `(schema_version, migration_version) = (5, 2)`，同时兼容旧 `(4, 1)` 归档；只导入白名单中的两张点表，其他版本拒绝导入。
 
 已有独立项目库升级到分组结构时，迁移完整保留当前点、历史和发布，合并编辑权及预览存储。旧修改/导入预览失效，项目 `revision` 增加 1、`schema_version` 更新为 5；升级后刷新网页并重新预览尚未提交的修改。
+
+平台迁移 `migrations/platform/0002_grouped_platform.sql` 将原 `public` 表移入上述分组，仍保留 8 张表及原记录、约束和登录会话。它只更新平台迁移记录，不改变已升级项目的 `schema_version=5` 或 `revision`。先完整备份，再运行 `cargo run -- migrate` 并重启服务；DBeaver 刷新后展开新 Schema，自有 SQL 改用 `auth.users`、`meta.projects` 等限定名。
 
 逐表 Excel 追加示例见 [批量添加](docs/batch-add.md)。
 

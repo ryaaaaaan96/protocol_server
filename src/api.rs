@@ -20,8 +20,8 @@ pub async fn projects(State(s): State<AppState>, u: User) -> Result<Json<Value>>
     let mut rows: Vec<Value> = sqlx::query_scalar(r#"
         SELECT to_jsonb(p) || jsonb_build_object(
             'role', CASE WHEN app_is_admin() THEN 'admin' ELSE
-                (SELECT role FROM project_members WHERE project_id=p.id AND user_id=app_user_id()) END)
-        FROM projects p WHERE p.status='ready' ORDER BY p.id"#)
+                (SELECT role FROM meta.project_members WHERE project_id=p.id AND user_id=app_user_id()) END)
+        FROM meta.projects p WHERE p.status='ready' ORDER BY p.id"#)
         .fetch_all(&mut *tx).await?;
     tx.rollback().await?;
     for project in &mut rows {
@@ -380,12 +380,12 @@ pub async fn members(
     Path(pid): Path<i64>,
 ) -> Result<Json<Value>> {
     let mut tx = db::context(&s.pool, &u, None, false).await?;
-    let allowed: bool = sqlx::query_scalar("SELECT app_can_access($1,false) AND EXISTS(SELECT 1 FROM projects WHERE id=$1 AND status='ready')")
+    let allowed: bool = sqlx::query_scalar("SELECT app_can_access($1,false) AND EXISTS(SELECT 1 FROM meta.projects WHERE id=$1 AND status='ready')")
         .bind(pid).fetch_one(&mut *tx).await?;
     if !allowed {
         return Err(AppError::forbidden());
     }
-    Ok(Json(json!(db::all_json(&mut tx,"SELECT to_jsonb(t) FROM (SELECT u.id,u.username,u.display_name,u.active,m.role,m.edit_scope,COALESCE((SELECT jsonb_agg(jsonb_build_object('board_key',g.board_key,'scope',g.scope,'endpoint_key',g.endpoint_key) ORDER BY g.board_key,g.scope,g.endpoint_key) FROM project_member_grants g WHERE g.project_id=m.project_id AND g.user_id=m.user_id),'[]'::jsonb) AS grants FROM project_members m JOIN users u ON u.id=m.user_id WHERE m.project_id=$1 ORDER BY u.id) t",pid).await?)))
+    Ok(Json(json!(db::all_json(&mut tx,"SELECT to_jsonb(t) FROM (SELECT u.id,u.username,u.display_name,u.active,m.role,m.edit_scope,COALESCE((SELECT jsonb_agg(jsonb_build_object('board_key',g.board_key,'scope',g.scope,'endpoint_key',g.endpoint_key) ORDER BY g.board_key,g.scope,g.endpoint_key) FROM meta.project_member_grants g WHERE g.project_id=m.project_id AND g.user_id=m.user_id),'[]'::jsonb) AS grants FROM meta.project_members m JOIN auth.users u ON u.id=m.user_id WHERE m.project_id=$1 ORDER BY u.id) t",pid).await?)))
 }
 #[derive(Deserialize)]
 pub struct MemberInput {
@@ -405,16 +405,17 @@ pub async fn set_member(
         return Err(AppError::bad("角色无效"));
     }
     let mut tx = db::context(&s.pool, &u, None, true).await?;
-    let administrator: Option<i64> =
-        sqlx::query_scalar("SELECT id FROM users WHERE id=$1 AND active AND is_admin FOR SHARE")
-            .bind(u.id)
-            .fetch_optional(&mut *tx)
-            .await?;
+    let administrator: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM auth.users WHERE id=$1 AND active AND is_admin FOR SHARE",
+    )
+    .bind(u.id)
+    .fetch_optional(&mut *tx)
+    .await?;
     if administrator.is_none() {
         return Err(AppError::forbidden());
     }
     db::require_admin(&mut tx).await?;
-    let registry: crate::database::Registry = sqlx::query_as("SELECT id,project_uid::text AS project_uid,config_key,name,description,database_name,status FROM projects WHERE id=$1 AND status='ready' FOR UPDATE")
+    let registry: crate::database::Registry = sqlx::query_as("SELECT id,project_uid::text AS project_uid,config_key,name,description,database_name,status FROM meta.projects WHERE id=$1 AND status='ready' FOR UPDATE")
         .bind(pid).fetch_optional(&mut *tx).await?.ok_or_else(AppError::not_found)?;
     if input
         .edit_scope
@@ -443,27 +444,29 @@ pub async fn set_member(
         crate::permissions::validate_grants_graph(&json!({"project_config":config}), grants)?;
         business.rollback().await?;
     }
-    let before: Option<Value> = sqlx::query_scalar("SELECT to_jsonb(m)||jsonb_build_object('grants',COALESCE((SELECT jsonb_agg(to_jsonb(g)-'project_id'-'user_id') FROM project_member_grants g WHERE g.project_id=m.project_id AND g.user_id=m.user_id),'[]'::jsonb)) FROM project_members m WHERE m.project_id=$1 AND m.user_id=$2").bind(pid).bind(input.user_id).fetch_optional(&mut *tx).await?;
+    let before: Option<Value> = sqlx::query_scalar("SELECT to_jsonb(m)||jsonb_build_object('grants',COALESCE((SELECT jsonb_agg(to_jsonb(g)-'project_id'-'user_id') FROM meta.project_member_grants g WHERE g.project_id=m.project_id AND g.user_id=m.user_id),'[]'::jsonb)) FROM meta.project_members m WHERE m.project_id=$1 AND m.user_id=$2").bind(pid).bind(input.user_id).fetch_optional(&mut *tx).await?;
     if input.role == "remove" {
-        sqlx::query("DELETE FROM project_members WHERE project_id=$1 AND user_id=$2")
+        sqlx::query("DELETE FROM meta.project_members WHERE project_id=$1 AND user_id=$2")
             .bind(pid)
             .bind(input.user_id)
             .execute(&mut *tx)
             .await?;
     } else {
-        sqlx::query("INSERT INTO project_members(project_id,user_id,role,edit_scope) VALUES($1,$2,$3,COALESCE($4,'all')) ON CONFLICT(project_id,user_id) DO UPDATE SET role=excluded.role,edit_scope=COALESCE($4,project_members.edit_scope)").bind(pid).bind(input.user_id).bind(&input.role).bind(&input.edit_scope).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO meta.project_members(project_id,user_id,role,edit_scope) VALUES($1,$2,$3,COALESCE($4,'all')) ON CONFLICT(project_id,user_id) DO UPDATE SET role=excluded.role,edit_scope=COALESCE($4,project_members.edit_scope)").bind(pid).bind(input.user_id).bind(&input.role).bind(&input.edit_scope).execute(&mut *tx).await?;
         if let Some(grants) = &input.grants {
-            sqlx::query("DELETE FROM project_member_grants WHERE project_id=$1 AND user_id=$2")
-                .bind(pid)
-                .bind(input.user_id)
-                .execute(&mut *tx)
-                .await?;
+            sqlx::query(
+                "DELETE FROM meta.project_member_grants WHERE project_id=$1 AND user_id=$2",
+            )
+            .bind(pid)
+            .bind(input.user_id)
+            .execute(&mut *tx)
+            .await?;
             for grant in grants {
-                sqlx::query("INSERT INTO project_member_grants(project_id,user_id,board_key,scope,endpoint_key) VALUES($1,$2,$3,$4,$5)").bind(pid).bind(input.user_id).bind(&grant.board_key).bind(&grant.scope).bind(&grant.endpoint_key).execute(&mut *tx).await?;
+                sqlx::query("INSERT INTO meta.project_member_grants(project_id,user_id,board_key,scope,endpoint_key) VALUES($1,$2,$3,$4,$5)").bind(pid).bind(input.user_id).bind(&grant.board_key).bind(&grant.scope).bind(&grant.endpoint_key).execute(&mut *tx).await?;
             }
         }
     }
-    let after: Option<Value> = sqlx::query_scalar("SELECT to_jsonb(m)||jsonb_build_object('grants',COALESCE((SELECT jsonb_agg(to_jsonb(g)-'project_id'-'user_id') FROM project_member_grants g WHERE g.project_id=m.project_id AND g.user_id=m.user_id),'[]'::jsonb)) FROM project_members m WHERE m.project_id=$1 AND m.user_id=$2").bind(pid).bind(input.user_id).fetch_optional(&mut *tx).await?;
+    let after: Option<Value> = sqlx::query_scalar("SELECT to_jsonb(m)||jsonb_build_object('grants',COALESCE((SELECT jsonb_agg(to_jsonb(g)-'project_id'-'user_id') FROM meta.project_member_grants g WHERE g.project_id=m.project_id AND g.user_id=m.user_id),'[]'::jsonb)) FROM meta.project_members m WHERE m.project_id=$1 AND m.user_id=$2").bind(pid).bind(input.user_id).fetch_optional(&mut *tx).await?;
     db::audit(
         &mut tx,
         u.id,
@@ -480,7 +483,7 @@ pub async fn set_member(
 pub async fn users(State(s): State<AppState>, u: User) -> Result<Json<Value>> {
     u.admin()?;
     let rows: Vec<Value> =
-        sqlx::query_scalar("SELECT to_jsonb(u)-'password_hash' FROM users u ORDER BY id")
+        sqlx::query_scalar("SELECT to_jsonb(u)-'password_hash' FROM auth.users u ORDER BY id")
             .fetch_all(&s.pool.platform)
             .await?;
     Ok(Json(json!(rows)))
@@ -511,11 +514,11 @@ pub async fn create_user(
     let hash = hash_password(input.password).await?;
     let mut tx = db::context(&s.pool, &u, None, true).await?;
     // Same ordering as update_user: serialize user creation with revocation.
-    sqlx::query("LOCK TABLE users IN SHARE ROW EXCLUSIVE MODE")
+    sqlx::query("LOCK TABLE auth.users IN SHARE ROW EXCLUSIVE MODE")
         .execute(&mut *tx)
         .await?;
     db::require_admin(&mut tx).await?;
-    let row:Value=sqlx::query_scalar("INSERT INTO users(username,display_name,password_hash,is_admin) VALUES($1,$2,$3,$4) RETURNING to_jsonb(users.*)-'password_hash'").bind(input.username).bind(input.display_name).bind(hash).bind(input.is_admin).fetch_one(&mut *tx).await?;
+    let row:Value=sqlx::query_scalar("INSERT INTO auth.users(username,display_name,password_hash,is_admin) VALUES($1,$2,$3,$4) RETURNING to_jsonb(users.*)-'password_hash'").bind(input.username).bind(input.display_name).bind(hash).bind(input.is_admin).fetch_one(&mut *tx).await?;
     db::audit(
         &mut tx,
         u.id,
@@ -552,12 +555,12 @@ pub async fn update_user(
         Some(hash_password(input.password).await?)
     };
     let mut tx = db::context(&s.pool, &u, None, true).await?;
-    sqlx::query("LOCK TABLE users IN SHARE ROW EXCLUSIVE MODE")
+    sqlx::query("LOCK TABLE auth.users IN SHARE ROW EXCLUSIVE MODE")
         .execute(&mut *tx)
         .await?;
     db::require_admin(&mut tx).await?;
-    let row:Value=sqlx::query_scalar("UPDATE users SET active=$2,is_admin=$3,password_hash=COALESCE($4,password_hash) WHERE id=$1 RETURNING to_jsonb(users.*)-'password_hash'").bind(id).bind(input.active).bind(input.is_admin).bind(hash).fetch_optional(&mut *tx).await?.ok_or(AppError::not_found())?;
-    sqlx::query("DELETE FROM sessions WHERE user_id=$1")
+    let row:Value=sqlx::query_scalar("UPDATE auth.users SET active=$2,is_admin=$3,password_hash=COALESCE($4,password_hash) WHERE id=$1 RETURNING to_jsonb(users.*)-'password_hash'").bind(id).bind(input.active).bind(input.is_admin).bind(hash).fetch_optional(&mut *tx).await?.ok_or(AppError::not_found())?;
+    sqlx::query("DELETE FROM auth.sessions WHERE user_id=$1")
         .bind(id)
         .execute(&mut *tx)
         .await?;

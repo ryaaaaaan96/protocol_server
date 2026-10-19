@@ -30,6 +30,40 @@
 
 外部 PostgreSQL 先建立空平台库及运行角色，再配置两个 URL，运行 `cargo run -- migrate`。新版本迁移分别读取 `migrations/platform/`、`migrations/project/`；根目录旧迁移只用于旧单库拆分，不会自动套用到新平台库。
 
+## 平台库按职责分组
+
+平台迁移 `migrations/platform/0002_grouped_platform.sql` 将已有表从 `public` 移入以下 Schema，仍保留 8 张表：
+
+| Schema | 表 |
+| --- | --- |
+| `auth` | `users`、`sessions`、`login_attempts` |
+| `meta` | `projects`、`project_members`、`project_member_grants` |
+| `history` | `audit_logs` |
+| `public` | `_sqlx_migrations` |
+
+先停止 HTTP 服务，完成下文的平台库、所有项目库及配置目录完整备份，再执行：
+
+```bash
+node scripts/local-db.mjs start
+cargo run -- migrate
+./scripts/dev.sh
+```
+
+平台原记录、ID、序列、约束和登录会话保留，权限检查及审计只追加限制保持有效。平台迁移版本记录在自己的 `public._sqlx_migrations`，升级后为 2；已经完成项目迁移的库仍为 7 张表，`meta.project_state.schema_version=5`，业务 `revision` 不变。如果项目库尚未执行其 `0002`，本次 migrate 也会按下节完成项目升级。
+
+DBeaver 刷新 `protocol_platform`，展开 `auth`、`meta` 和 `history` 查看。旧 `public.users`、`public.projects` 等自有 SQL 改用新限定名，不依赖当前默认 Schema。连接平台库后可核对：
+
+```sql
+SELECT version, success FROM public._sqlx_migrations ORDER BY version;
+SELECT id, username, display_name, active FROM auth.users ORDER BY id;
+SELECT id, config_key, database_name, status FROM meta.projects ORDER BY id;
+SELECT count(*) FROM meta.project_members;
+SELECT count(*) FROM meta.project_member_grants;
+SELECT count(*) FROM history.audit_logs;
+```
+
+升级完成后检查登录、项目列表及成员授权，再切换正常访问。旧程序使用原表位置，回退时应同时恢复匹配备份、配置及程序，不直接连接已升级的平台库。
+
 ## 独立项目库升级为分组结构
 
 已经使用 `protocol_platform` 和 `protocol_project_dc_ups` 时，先停止 HTTP 服务并完成下文的完整备份，再执行：
@@ -72,7 +106,7 @@ SELECT kind, count(*) FROM history.events GROUP BY kind ORDER BY kind;
 node scripts/split-databases.mjs --maintenance
 ```
 
-脚本先生成完整 custom Dump 和恢复日志，默认位于 `.runtime/backups/split-<时间>/`；随后复制平台账号、权限与登记，并按项目建立迁移 v1、schema_version 4 的业务库。这个中间结构用于核对旧记录，分组升级由后续 `cargo run -- migrate` 完成。原项目 `upm` 改为 `dc-ups`，显示名称为 DC-UPS，原项目 ID、点 ID、关联和历史保持不变。新增 UUID 绑定平台登记和业务库，旧预览清空，revision 增加以拒绝旧草稿；编辑租约保留原到期时间并补充操作者快照，到期自然释放。
+脚本先生成完整 custom Dump 和恢复日志，默认位于 `.runtime/backups/split-<时间>/`；随后复制平台账号、权限与登记，建立平台迁移 v1 和各项目迁移 v1、schema_version 4 的业务库。这个中间结构用于核对旧记录，平台及项目的分组升级由后续 `cargo run -- migrate` 完成。原项目 `upm` 改为 `dc-ups`，显示名称为 DC-UPS，原项目 ID、点 ID、关联和历史保持不变。新增 UUID 绑定平台登记和业务库，旧预览清空，revision 增加以拒绝旧草稿；编辑租约保留原到期时间并补充操作者快照，到期自然释放。
 
 脚本逐表比较完整记录摘要；已有目标库不属于当前迁移时直接拒绝，不覆盖。失败后保留备份和已创建目标，使用输出的日志路径续跑：
 
@@ -93,7 +127,7 @@ cargo run -- migrate
 
 `config/<key>/project.json` 指定板卡目录、拓扑、名称和页签顺序。DC-UPS 的 key 是 `dc-ups`；UPM、DSP 等均为板卡类型。板卡目录分别包含 `process.json`、`collect.json`、`transmit.json`，显示规则实时读取，拓扑和点表归属配置须校验导入后生效。
 
-在服务器或 SSH 中编辑 JSON，在网页重新读取、检查并导入。网页不提供拓扑编辑表单，点表仍可编辑。隐藏表格或调整本地列顺序不会删除数据。业务库 `meta.project_state.topology_config` 保存生效快照，平台 `projects` 仅登记身份、名称及数据库位置。被点表或权限引用的板卡、分组、端点不能直接移除。
+在服务器或 SSH 中编辑 JSON，在网页重新读取、检查并导入。网页不提供拓扑编辑表单，点表仍可编辑。隐藏表格或调整本地列顺序不会删除数据。业务库 `meta.project_state.topology_config` 保存生效快照，平台 `meta.projects` 仅登记身份、名称及数据库位置。被点表或权限引用的板卡、分组、端点不能直接移除。
 
 ## 导出与导入项目文件夹
 
@@ -125,7 +159,7 @@ pg_dump -h DB_HOST -U postgres -d protocol_project_dc_ups -Fc -f dc-ups-full.dum
 
 平台备份含密码散列和会话，按业务凭据保护。`.env`、角色密码和部署信息单独保管；数据库 Dump 不包含集群角色。专用 `project.dump` 不包含完整历史、权限和发布，不能替代上述备份。
 
-目标实例建立运行角色及同名空库后，用管理员 `pg_restore --no-owner` 分别恢复。保留登记与 `meta.project_state` 的相同 UUID，复制配置目录，配置新主机上的两个平台连接，再执行 `cargo run -- migrate`。检查登录、项目列表、点表数量、历史、工程师编辑、只读禁写及隔离后切换服务。需要强制重新登录时，清空平台库 `sessions`。
+目标实例建立运行角色及同名空库后，用管理员 `pg_restore --no-owner` 分别恢复。保留登记与 `meta.project_state` 的相同 UUID，复制配置目录，配置新主机上的两个平台连接，再执行 `cargo run -- migrate`。检查登录、项目列表、点表数量、历史、工程师编辑、只读禁写及隔离后切换服务。需要强制重新登录时，清空平台库 `auth.sessions`。
 
 后续升级先备份，再运行新增迁移和新程序。已应用迁移不要修改校验和。迁移到 macOS 时使用该系统的 PostgreSQL 服务与客户端；当前 `local-db.mjs` 捆绑实例仅支持 Linux x64。
 

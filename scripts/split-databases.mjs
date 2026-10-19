@@ -125,8 +125,9 @@ export async function splitDatabases(options = {}) {
       }
       const platform = await connect(pg, dbUrl(sourceUrl, platformName));
       clients.push(platform);
+      const groupedPlatform = (await platform.query("SELECT to_regclass('meta.projects') IS NOT NULL AS ready")).rows[0].ready;
       for (const project of journal.projects) {
-        const registration = (await platform.query("SELECT project_uid,config_key,database_name,status FROM projects WHERE id=$1", [project.id])).rows[0];
+        const registration = (await platform.query(`SELECT project_uid,config_key,database_name,status FROM ${groupedPlatform ? "meta" : "public"}.projects WHERE id=$1`, [project.id])).rows[0];
         if (!registration || registration.project_uid !== project.uid || registration.config_key !== project.key || registration.database_name !== project.database || registration.status !== "ready") throw new Error("已迁移的项目登记身份发生变化，请人工检查。");
         const db = await connect(pg, dbUrl(sourceUrl, project.database));
         clients.push(db);

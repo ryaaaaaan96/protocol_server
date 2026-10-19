@@ -166,11 +166,12 @@ impl Drop for StagingGuard {
 
 async fn begin(pool: &DatabaseRouter, user: &User) -> Result<db::DbTransaction> {
     let mut tx = db::context(pool, user, None, true).await?;
-    let administrator: Option<i64> =
-        sqlx::query_scalar("SELECT id FROM users WHERE id=$1 AND active AND is_admin FOR SHARE")
-            .bind(user.id)
-            .fetch_optional(&mut *tx)
-            .await?;
+    let administrator: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM auth.users WHERE id=$1 AND active AND is_admin FOR SHARE",
+    )
+    .bind(user.id)
+    .fetch_optional(&mut *tx)
+    .await?;
     if administrator.is_none() {
         return Err(AppError::forbidden());
     }
@@ -191,7 +192,7 @@ async fn target(
     key: &str,
 ) -> Result<Option<(i64, i32)>> {
     let pid: Option<i64> =
-        sqlx::query_scalar("SELECT id FROM projects WHERE config_key=$1 AND status='ready'")
+        sqlx::query_scalar("SELECT id FROM meta.projects WHERE config_key=$1 AND status='ready'")
             .bind(key)
             .fetch_optional(&mut *tx)
             .await?;
@@ -631,7 +632,7 @@ pub async fn recover(pool: &DatabaseRouter) -> anyhow::Result<()> {
     if !imports.exists() {
         return Ok(());
     }
-    let user: User = sqlx::query_as("SELECT id,username,display_name,is_admin FROM users WHERE active AND is_admin ORDER BY id LIMIT 1").fetch_one(&pool.platform).await?;
+    let user: User = sqlx::query_as("SELECT id,username,display_name,is_admin FROM auth.users WHERE active AND is_admin ORDER BY id LIMIT 1").fetch_one(&pool.platform).await?;
     let mut tx = begin(pool, &user).await.map_err(|e| anyhow::anyhow!(e.1))?;
     for entry in fs::read_dir(&imports)? {
         let entry = entry?;
@@ -654,7 +655,7 @@ pub async fn recover(pool: &DatabaseRouter) -> anyhow::Result<()> {
             let pid = if let Some(pid) = journal.project_id {
                 Some(pid)
             } else {
-                sqlx::query_scalar::<_, i64>("SELECT id FROM projects WHERE config_key=$1")
+                sqlx::query_scalar::<_, i64>("SELECT id FROM meta.projects WHERE config_key=$1")
                     .bind(&journal.key)
                     .fetch_optional(&mut *tx)
                     .await?

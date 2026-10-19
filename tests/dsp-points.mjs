@@ -39,7 +39,7 @@ export async function checkDspPoints({ client, engineer, viewer, engineerId, vie
   const platform = new pg.Client({ connectionString: String(migrationUrl) });
   let databaseName;
   await platform.connect();
-  try { databaseName=(await platform.query("SELECT database_name FROM projects WHERE id=$1",[project.id])).rows[0].database_name; }
+  try { databaseName=(await platform.query("SELECT database_name FROM meta.projects WHERE id=$1",[project.id])).rows[0].database_name; }
   finally { await platform.end(); }
   const inspectionUrl=new URL(migrationUrl),runtimeUrl=new URL(appUrl);
   inspectionUrl.pathname=runtimeUrl.pathname=`/${databaseName}`;
@@ -186,7 +186,7 @@ export async function checkDspPoints({ client, engineer, viewer, engineerId, vie
     equal((await viewer.call(`${url}/sql`,"POST",{sql:"WITH data AS (SELECT * FROM points.process_points), summary AS (SELECT count(*) AS count FROM data) SELECT * FROM summary"})).rows[0].count,552);
     const sqlRows=await viewer.call(`${url}/sql`,"POST",{sql:"SELECT id FROM points.process_points ORDER BY id"});
     equal(sqlRows.rows.length,500);equal(sqlRows.truncated,true);
-    for(const sql of ["DELETE FROM points.process_points","SELECT * FROM users","SELECT * FROM signals",
+    for(const sql of ["DELETE FROM points.process_points","SELECT * FROM auth.users","SELECT * FROM signals",
       "SELECT set_config('app.is_admin','true',true)","SELECT * FROM points.process_points FOR UPDATE",
       "SELECT * FROM meta.project_state", "SELECT * FROM meta.previews",
       "WITH project_state AS (SELECT * FROM project_state) SELECT * FROM project_state",
