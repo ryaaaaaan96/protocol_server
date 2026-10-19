@@ -107,12 +107,21 @@ export function boardScope(g: Row, board: Row) {
   ]);
   return { groups, signals, endpoints, contracts, fields, dataIds };
 }
+const nativePointEntities = new Set(["process_points", "transmit_points", "collect_points"]);
+function nativeBoardKeys(g: Row, board: Row): Set<string> {
+  const model = rows(g, "board_models").find(item => item.id === board.model_id);
+  if (!model) return new Set();
+  return new Set((g.project_config?.board_types || [])
+    .filter((type: Row) => type.point_storage === "native" && type.model_code === model.code)
+    .map((type: Row) => type.code));
+}
 export function belongsToBoard(
   g: Row,
   board: Row,
   entity: string,
   r: Row,
 ): boolean {
+  if (nativePointEntities.has(entity)) return nativeBoardKeys(g, board).has(r.board_key);
   const scope = boardScope(g, board);
   switch (entity) {
     case "boards":
@@ -147,6 +156,10 @@ export function scopedRows(
   records: Row[],
 ): Row[] {
   if (!board) return records;
+  if (nativePointEntities.has(entity)) {
+    const keys = nativeBoardKeys(g, board);
+    return records.filter(record => keys.has(record.board_key));
+  }
   // Compute membership once instead of rebuilding sets for every table row.
   const scope = boardScope(g, board),
     groups = new Set(scope.groups.map((r) => r.id)),

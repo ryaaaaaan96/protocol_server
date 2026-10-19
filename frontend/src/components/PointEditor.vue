@@ -20,6 +20,7 @@ const props = defineProps<{
   canWrite: boolean;
   processEnabled: boolean;
   groupId?: number;
+  groupKey?: string;
   signalId?: number;
   contextId?: number;
 }>();
@@ -40,7 +41,13 @@ for (const key of def.editor) {
             : ""));
 }
 if (!props.row) {
-  if (props.data.kind === "process") {
+  if (props.data.storage === "native") {
+    if (props.data.kind === "process") {
+      values.value.group_key = props.groupKey ?? props.data.options.native_groups?.[0]?.code ?? "LOCAL";
+    } else if (props.signalId != null) {
+      values.value.process_point_id = props.signalId;
+    }
+  } else if (props.data.kind === "process") {
     values.value.group_id = props.groupId ?? props.data.options.groups[0]?.id ?? null;
     values.value.process_enabled = props.processEnabled;
   } else {
@@ -67,10 +74,12 @@ function close() {
   emit("close");
 }
 function locked(key: string) {
-  return (key === "group_id" && props.groupId != null) || (key === "signal_id" && props.signalId != null);
+  return (key === "group_id" && props.groupId != null) ||
+    (key === "group_key" && props.groupKey != null) ||
+    (["signal_id", "process_point_id"].includes(key) && props.signalId != null);
 }
 const inherited = computed(() =>
-  props.data.options.data.find((d) => d.id === values.value.data_item_id),
+  props.data.options.data?.find((d) => d.id === values.value.data_item_id),
 );
 const stringPoint = computed(() => pointIsString(props.data, values.value, props.row || undefined));
 const editorFields = computed(() => def.editor.filter(key => !stringPoint.value || !["min_value", "max_value"].includes(key)));
@@ -233,7 +242,7 @@ function delta(change: Row): string {
               @change="set(key, $event)"
             >
               <option v-if="def.fields[key].nullable" value="">
-                跟随数据定义
+                {{ data.storage === 'native' ? '未指定' : '跟随数据定义' }}
               </option>
               <option v-for="o in def.fields[key].options" :key="o" :value="o">
                 {{ o }}

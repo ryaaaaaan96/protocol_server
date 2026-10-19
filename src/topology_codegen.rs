@@ -108,6 +108,9 @@ pub fn generate(g: &Value) -> Result<Value> {
             },
             s(board, "code")
         );
+        if crate::dsp_points::is_native_model(g, mid) {
+            continue;
+        }
         let endpoints: Vec<_> = rows(g, "endpoints")
             .iter()
             .filter(|e| n(e, "model_id") == mid && e["enabled"] == true)
@@ -586,6 +589,7 @@ INT32 signal_range_restore_default(VOID) {
         files.insert(format!("{prefix}signal_range.h"),"#pragma once\n#include \"data_process.h\"\nVOID signal_range_init(VOID);\nINT32 signal_range_get(UINT16,UINT16,DM_SIG_DATA_S*,BOOLEAN*);\nINT32 signal_range_restore_default(VOID);\n".into());
         files.insert(format!("{prefix}integration.txt"),"dev_cfg.c includes process.c, collect.c and transmit.c; compile dev_cfg.c once, and compile signal_range.c separately. Register cfg_get_dev_table, cfg_dev_num and signal_range_get using the platform callbacks. Address-segment callback bodies remain application code: include passthrough_config.h in those implementations and consume the generated bounds/layout; changing a route does not rewrite an existing hardcoded callback. Port drivers and the northern service initialization remain application responsibilities.\n".into());
     }
+    files.extend(crate::dsp_points::generate(g));
     let count = rows(&report, "issues")
         .iter()
         .filter(|i| i["level"] == "error")

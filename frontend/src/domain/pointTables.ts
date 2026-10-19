@@ -32,6 +32,7 @@ export type PointSchema = {
 export type PointTableData = {
   revision: number;
   kind: PointKind;
+  storage?: "native";
   definition: PointDefinition;
   rows: Row[];
   options: Record<string, Row[]>;
@@ -71,12 +72,13 @@ export function pointDataType(
     )
       return normalizedDataType(fallbackRow?.data_type);
   } else {
+    const signalKey = data.storage === "native" ? "process_point_id" : "signal_id";
     const signal = data.options.signals?.find(
-      (item) => item.id === current.signal_id,
+      (item) => item.id === current[signalKey],
     );
     const type = normalizedDataType(signal?.data_type);
     if (type) return type;
-    if (current.signal_id === original.signal_id)
+    if (current[signalKey] === original[signalKey])
       return normalizedDataType(fallbackRow?.data_type);
   }
   return undefined;
@@ -92,6 +94,7 @@ export function pointIsString(
 
 export function pointGroupLabel(group: Row): string {
   const names: Record<string, string> = {
+    LOCAL: "LOCAL · 本机数据",
     ARM_LOCAL: "LOCAL · 本机数据",
     DSP_LOCAL: "LOCAL · DSP 内部数据",
     DSP_PROXY: "DSP · 下级 DSP 数据",
@@ -106,7 +109,10 @@ export function pointChoices(
   values: Row,
 ): Row[] {
   const field = data.definition.fields[key];
+  if (!field) return [];
   const all = data.options[field.reference || ""] || [];
+  if (data.storage === "native" && field.reference === "native_groups")
+    return all.map(group => ({ ...group, id: group.code }));
   if (key === "endpoint_id")
     return all.filter(
       (e) => e.role === (data.kind === "collect" ? "client" : "server"),

@@ -17,7 +17,15 @@ use sha2::{Digest, Sha256};
 
 pub async fn projects(State(s): State<AppState>, u: User) -> Result<Json<Value>> {
     let mut tx = db::context(&s.pool, &u, None, false).await?;
-    let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(p)||jsonb_build_object('role',CASE WHEN app_is_admin() THEN 'admin' ELSE (SELECT role FROM project_members WHERE project_id=p.id AND user_id=app_user_id()) END,'point_count',(SELECT count(*) FROM data_items WHERE project_id=p.id)) FROM projects p ORDER BY p.id").fetch_all(&mut *tx).await?;
+    let rows: Vec<Value> = sqlx::query_scalar(r#"
+        SELECT to_jsonb(p) || jsonb_build_object(
+            'role', CASE WHEN app_is_admin() THEN 'admin' ELSE
+                (SELECT role FROM project_members WHERE project_id=p.id AND user_id=app_user_id()) END,
+            'point_count', (SELECT count(*) FROM data_items WHERE project_id=p.id)
+                + (SELECT count(*) FROM process_points WHERE project_id=p.id))
+        FROM projects p ORDER BY p.id"#)
+        .fetch_all(&mut *tx)
+        .await?;
     Ok(Json(json!(rows)))
 }
 #[derive(Deserialize)]
@@ -109,15 +117,16 @@ pub async fn overview(
     u: User,
     Path(pid): Path<i64>,
 ) -> Result<Json<Value>> {
-    let mut tx = db::context(&s.pool, &u, Some(pid), false).await?;
-    let project: Value =
-        sqlx::query_scalar("SELECT to_jsonb(p) FROM projects p WHERE id=$1 FOR SHARE")
-            .bind(pid)
-            .fetch_one(&mut *tx)
-            .await?;
+    let mut tx = db::read_snapshot_context(&s.pool, &u, pid).await?;
+    let project: Value = sqlx::query_scalar("SELECT to_jsonb(p) FROM projects p WHERE id=$1")
+        .bind(pid)
+        .fetch_one(&mut *tx)
+        .await?;
     let g = topology::snapshot(&mut tx, pid, true).await?;
-    let stats = json!({"total":topology::rows(&g,"data_items").len(),"boards":topology::rows(&g,"boards").len(),"signals":topology::rows(&g,"signals").len(),"contracts":topology::rows(&g,"protocol_contracts").len(),"links":topology::rows(&g,"board_links").len()});
-    let transmit = topology::rows(&g, "v_passthrough_fields").len();
+    let native_count = topology::rows(&g, "process_points").len();
+    let stats = json!({"total":topology::rows(&g,"data_items").len()+native_count,"boards":topology::rows(&g,"boards").len(),"signals":topology::rows(&g,"signals").len()+native_count,"contracts":topology::rows(&g,"protocol_contracts").len(),"links":topology::rows(&g,"board_links").len()});
+    let transmit = topology::rows(&g, "v_passthrough_fields").len()
+        + topology::rows(&g, "transmit_points").len();
     let report = topology_validation::validate(&g);
     let activity=db::all_json(&mut tx,"SELECT to_jsonb(t) FROM (SELECT a.id,a.action,a.entity,a.created_at,u.display_name FROM audit_logs a LEFT JOIN users u ON u.id=a.user_id WHERE project_id=$1 ORDER BY a.id DESC LIMIT 8) t",pid).await?;
     Ok(Json(
@@ -146,6 +155,8 @@ pub async fn preview_import(
 ) -> Result<Json<Value>> {
     let mut tx = db::context(&s.pool, &u, Some(pid), true).await?;
     crate::permissions::require_all(&mut tx, pid).await?;
+    let dsp_only: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM projects p CROSS JOIN LATERAL jsonb_array_elements(p.topology_config->'board_types') b WHERE p.id=$1 AND b->>'model_code'='DSP' AND b->>'point_storage'='native')")
+        .bind(pid).fetch_one(&mut *tx).await?;
     tx.rollback().await?;
     let field = multipart
         .next_field()
@@ -162,6 +173,30 @@ pub async fn preview_import(
         .map_err(|_| AppError::bad("文件过大或上传失败"))?
         .to_vec();
     let hash = hex::encode(Sha256::digest(&bytes));
+    if dsp_only {
+        let data = tokio::task::spawn_blocking(move || crate::dsp_workbook::parse_workbook(bytes))
+            .await
+            .map_err(|_| AppError::bad("DSP Excel 解析失败"))??;
+        let mut tx = db::context(&s.pool, &u, Some(pid), true).await?;
+        crate::permissions::require_all(&mut tx, pid).await?;
+        let revision = db::lock_project(&mut tx, pid).await?;
+        sqlx::query("DELETE FROM import_previews WHERE created_by=$1 AND project_id=$2")
+            .bind(u.id)
+            .bind(pid)
+            .execute(&mut *tx)
+            .await?;
+        let id: i64 = sqlx::query_scalar("INSERT INTO import_previews(project_id,created_by,filename,sha256,revision,payload) VALUES($1,$2,$3,$4,$5,$6) RETURNING id")
+            .bind(pid).bind(u.id).bind(&filename).bind(&hash).bind(revision)
+            .bind(json!({"kind":"dsp_native","data":data})).fetch_one(&mut *tx).await?;
+        tx.commit().await?;
+        return Ok(Json(
+            json!({"id":id,"filename":filename,"sha256":hash,"revision":revision,"import_scope":"dsp",
+            "point_count":data.process.len(),"dsp_count":data.process.len(),"local_count":0,"transmit_count":data.transmit.len(),
+            "mapping_count":data.transmit.len(),"device_count":1,"sheets":["DSP内部数据","UPM-DSP采集数据"],
+            "warnings":["本次仅替换 DSP 内部数据与 UPP 转发表；UPM 及其他板卡数据保持原样。DSP sigID 未在来源中提供，按变量枚举关联。"],
+            "sample":data.process.iter().take(6).collect::<Vec<_>>()}),
+        ));
+    }
     let data = tokio::task::spawn_blocking(move || importer::parse(bytes))
         .await
         .map_err(|_| AppError::bad("Excel 解析失败"))??;
@@ -204,6 +239,18 @@ pub async fn commit_import(
         ));
     }
     let before = db::snapshot(&mut tx, pid).await?;
+    let native_dsp = before["project_config"]["board_types"]
+        .as_array()
+        .is_some_and(|types| {
+            types
+                .iter()
+                .any(|board| board["model_code"] == "DSP" && board["point_storage"] == "native")
+        });
+    if native_dsp != (row["payload"]["kind"] == "dsp_native") {
+        return Err(AppError::conflict(
+            "DSP 存储配置已变化，请重新上传并预览工作簿",
+        ));
+    }
     if !input.replace
         && topology::TABLES
             .iter()
@@ -212,8 +259,26 @@ pub async fn commit_import(
     {
         return Err(AppError::conflict("项目已有配置，必须明确确认替换"));
     }
-    let data: importer::ImportData = serde_json::from_value(row["payload"].clone())?;
-    let report = topology_import::import(&mut tx, pid, &data).await?;
+    let (report, point_count) = if row["payload"]["kind"] == "dsp_native" {
+        let data: crate::dsp_workbook::DspImport =
+            serde_json::from_value(row["payload"]["data"].clone())?;
+        crate::dsp_points::import(&mut tx, pid, &data).await?;
+        let graph = topology::snapshot(&mut tx, pid, true).await?;
+        let report = topology_validation::validate(&graph);
+        let errors = topology::new_errors(&topology_validation::validate(&before), &report);
+        if !errors.is_empty() {
+            let mut error = AppError::bad("DSP 导入校验失败，数据未保存");
+            error.2 = Some(json!({"errors":errors}));
+            return Err(error);
+        }
+        (report, data.process.len())
+    } else {
+        let data: importer::ImportData = serde_json::from_value(row["payload"].clone())?;
+        (
+            topology_import::import(&mut tx, pid, &data).await?,
+            data.points.len(),
+        )
+    };
     sqlx::query(
         "INSERT INTO imports(project_id,filename,sha256,report,created_by) VALUES($1,$2,$3,$4,$5)",
     )
@@ -229,7 +294,9 @@ pub async fn commit_import(
         .execute(&mut *tx)
         .await?;
     db::touch(&mut tx, pid).await?;
-    db::audit(&mut tx,u.id,Some(pid),"import.commit","workbook",Some(before),Some(json!({"filename":row["filename"],"sha256":row["sha256"],"point_count":data.points.len(),"validation":report}))).await?;
+    let after = topology::snapshot(&mut tx, pid, true).await?;
+    crate::dsp_points::history(&mut tx, pid, u.id, "workbook.import", &before, &after).await?;
+    db::audit(&mut tx,u.id,Some(pid),"import.commit","workbook",Some(before),Some(json!({"filename":row["filename"],"sha256":row["sha256"],"point_count":point_count,"validation":report}))).await?;
     crate::edit_lock::release_owned(&mut tx, pid, u.id).await?;
     tx.commit().await?;
     Ok(Json(report))

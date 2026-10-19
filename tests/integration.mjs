@@ -6,6 +6,7 @@ import { checkStringRanges } from "./string-ranges.mjs";
 import { checkEditLocks } from "./edit-locks.mjs";
 import { checkEditScopes } from "./edit-scopes.mjs";
 import { checkProjectFolders } from "./project-folders.mjs";
+import { checkDspPoints } from "./dsp-points.mjs";
 import path from "node:path";
 import crypto from "node:crypto";
 import assert from "node:assert/strict";
@@ -26,6 +27,8 @@ const env = Object.fromEntries(
 const { default: pg } = await import(
   path.join(root, ".runtime/db-tools/node_modules/pg/lib/index.js")
 );
+if (process.env.TEST_MIGRATION_DATABASE_URL) env.MIGRATION_DATABASE_URL = process.env.TEST_MIGRATION_DATABASE_URL;
+if (process.env.TEST_DATABASE_URL) env.DATABASE_URL = process.env.TEST_DATABASE_URL;
 const adminUrl = new URL(env.MIGRATION_DATABASE_URL);
 adminUrl.pathname = "/postgres";
 const adminDb = new pg.Client({ connectionString: adminUrl.toString() });
@@ -45,6 +48,12 @@ const workbookPath = path.join(fixtureSource, "sources/UPM项目测点数据表.
 const readJson = (filename) => JSON.parse(fs.readFileSync(filename, "utf8"));
 const writeJson = (filename, value) => fs.writeFileSync(filename, JSON.stringify(value));
 const manifest = readJson(path.join(fixtureSource, "project.json"));
+const nativeManifest = structuredClone(manifest);
+delete manifest.workbook_boards;
+for (const board of manifest.topology.board_types) {
+  delete board.point_storage;
+  delete board.point_groups;
+}
 const standardTables = Object.fromEntries(["process", "collect", "transmit"].map((kind) =>
   [kind, readJson(path.join(fixtureSource, "UPM", `${kind}.json`))],
 ));
@@ -52,6 +61,14 @@ function projectFixture(key, name, codes = null, workbook = null) {
   const directory = path.join(projectConfigs, key);
   fs.cpSync(fixtureSource, directory, { recursive: true });
   const config = { ...structuredClone(manifest), key, name, workbook };
+  // Existing board-graph tests continue to exercise the legacy backend;
+  // dedicated DSP fixtures below exercise the new independent storage.
+  for (const [kind, definition] of Object.entries(standardTables)) {
+    writeJson(path.join(directory, "DSP", `${kind}.json`), {
+      ...structuredClone(definition), ...(kind === "process" ? { label: "DSP内部数据" } : {}),
+      ...(kind === "collect" ? { enabled: false } : {}),
+    });
+  }
   if (codes) {
     for (const board of config.topology.board_types) fs.rmSync(path.join(directory, board.directory), { recursive: true });
     config.topology = {
@@ -119,6 +136,14 @@ updateTable("second", "DSP", "transmit", table => {
   table.fields.signal_name.label = "DSP 转发来源";
 });
 projectFixture("web_seed", "HTTP seeded project", null, manifest.workbook);
+for (const [key, withWorkbook] of [["dsp_native", true], ["dsp_native_other", false]]) {
+  const config = projectFixture(key, key, null, withWorkbook ? nativeManifest.workbook : null);
+  config.topology.board_types.find(board => board.code === "DSP").point_storage = "native";
+  config.topology.board_types.find(board => board.code === "DSP").point_groups = [{code: "LOCAL", name: "DSP 内部数据"}];
+  config.workbook_boards = ["DSP"];
+  writeJson(path.join(projectConfigs, key, "project.json"), config);
+  fs.cpSync(path.join(fixtureSource, "DSP"), path.join(projectConfigs, key, "DSP"), {recursive: true});
+}
 projectFixture("broken", "Script broken", null, "sources/invalid.xlsx");
 fs.writeFileSync(path.join(projectConfigs, "broken/sources/invalid.xlsx"), "invalid workbook archive");
 const requestFixtures = new Map();
@@ -240,7 +265,7 @@ class Client {
     return r.data;
   }
 }
-try {
+async function runIntegration() {
   execFileSync("target/debug/protocol-server", ["migrate"], {
     env: testEnv,
     stdio: "inherit",
@@ -277,6 +302,16 @@ try {
     password,
   });
   equal((await client.call("/projects")).length, 0); // Startup never creates a project.
+  if (process.argv.includes("--dsp")) {
+    const engineer = await client.call("/users", "POST", { username: "engineer", display_name: "工程师", password });
+    const viewer = await client.call("/users", "POST", { username: "viewer", display_name: "只读", password });
+    const e = new Client(), v = new Client();
+    await e.call("/auth/login", "POST", { username: "engineer", password });
+    await v.call("/auth/login", "POST", { username: "viewer", password });
+    await checkDspPoints({ client, engineer: e, viewer: v, engineerId: engineer.id, viewerId: viewer.id, equal, ok, migrationUrl: migration.toString(), appUrl: appUrl.toString(), testEnv, projectConfigs });
+    console.log(`PASS: ${assertions} native DSP assertions`);
+    return;
+  }
   const createFromFile = (key) =>
     execFileSync("target/debug/protocol-server", ["create-project", key], {
       env: testEnv,
@@ -1501,11 +1536,12 @@ try {
   ok(exportedEndpoints.every((e) => e.transport === "CANFD"));
 
   await checkPointEditing({ client, engineer: e, viewer: v, engineerId: engineer.id, viewerId: viewer.id, equal, ok });
+  await checkDspPoints({ client, engineer: e, viewer: v, engineerId: engineer.id, viewerId: viewer.id, equal, ok, migrationUrl: migration.toString(), appUrl: appUrl.toString(), testEnv, projectConfigs });
   await checkPointBatch({ client, engineer: e, viewer: v, engineerId: engineer.id, viewerId: viewer.id, password, equal, ok });
   await checkStringRanges({ client, engineer: e, viewer: v, engineerId: engineer.id, viewerId: viewer.id, equal, ok });
   await checkEditLocks({ client, engineer: e, viewer: v, engineerId: engineer.id, viewerId: viewer.id, password, migrationUrl: migration.toString(), equal, ok });
   await checkEditScopes({ client, engineer: e, viewer: v, engineerId: engineer.id, viewerId: viewer.id, password, migrationUrl: migration.toString(), equal, ok });
-  await checkProjectFolders({ client, engineer: e, viewer: v, engineerId: engineer.id, viewerId: viewer.id, password, makeClient: () => new Client(), projectConfigs, fixtureSource, testEnv, equal, ok });
+  await checkProjectFolders({ client, engineer: e, viewer: v, engineerId: engineer.id, viewerId: viewer.id, password, makeClient: () => new Client(), projectConfigs, fixtureSource: path.join(projectConfigs, "web_seed"), testEnv, equal, ok });
   const direct = new pg.Client({ connectionString: appUrl.toString() });
   await direct.connect();
   equal(
@@ -1549,6 +1585,9 @@ try {
   console.log(
     `PASS: ${assertions} assertions; board graph, shared definitions, transactional impact previews, independent sigIDs, address shifts, rollback, stale revision, ownership, RLS and workbook import.`,
   );
+}
+try {
+  await runIntegration();
 } finally {
   if (server) {
     server.kill("SIGTERM");

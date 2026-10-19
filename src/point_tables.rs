@@ -19,6 +19,8 @@ const PROCESS: &str = "group_id,data_item_id,name,enum_name,sig_id,sig_symbol,in
 const RANGE: &str = "default_value,min_value,max_value,boot_restore,manual_restore";
 const BINDING: &str = "endpoint_id,context_id,field_id,signal_id";
 const COLLECTION: &str = "poll_interval,set_priority,scan_priority";
+const NATIVE_PROCESS: &str = "group_key,element_count,byte_length,unit,notes";
+const NATIVE_FORWARD: &str = "process_point_id,endpoint_key,name,upp_model,address,wire_type,wire_length,scale,access,byte_order,conversion,enabled";
 
 pub fn entity(kind: &str) -> Result<&'static str> {
     match kind {
@@ -39,13 +41,24 @@ fn keys(csv: &str) -> BTreeSet<&str> {
 }
 pub(crate) fn writable(kind: &str) -> BTreeSet<&str> {
     match kind {
-        "process" => keys(PROCESS).union(&keys(RANGE)).copied().collect(),
+        "process" => keys(PROCESS)
+            .union(&keys(RANGE))
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .union(&keys(NATIVE_PROCESS))
+            .copied()
+            .collect(),
         "collect" => keys(BINDING).union(&keys(COLLECTION)).copied().collect(),
-        _ => keys(BINDING),
+        _ => keys(BINDING)
+            .union(&keys(NATIVE_FORWARD))
+            .copied()
+            .collect(),
     }
 }
 fn readable(kind: &str) -> BTreeSet<&str> {
-    let common = keys("id,model_id,unit,data_type,byte_length,resolved_sig_id,enum_name");
+    let common = keys(
+        "id,model_id,unit,data_type,byte_length,resolved_sig_id,enum_name,group_key,group_name,metadata",
+    );
     let extra = if kind == "process" {
         keys("group_name,contexts,collection_count,forward_count,range_inherited")
     } else {
@@ -234,7 +247,17 @@ fn validate_interaction(kind: &str, table: &Value) -> Result<()> {
                 "field_name" => "field_id",
                 _ => column.as_str(),
             };
-            if alias != field
+            let native_alias = matches!(
+                (column.as_str(), field),
+                ("group_name", "group_key")
+                    | ("signal_name", "process_point_id")
+                    | ("field_name", "name")
+                    | ("endpoint_name", "endpoint_key")
+                    | ("effective_address", "address")
+                    | ("effective_type", "wire_type")
+                    | ("effective_length", "wire_length")
+            );
+            if (alias != field && !native_alias)
                 || !readable(kind).contains(column.as_str())
                 || !writable(kind).contains(field)
                 || !table["editor"]
@@ -345,6 +368,7 @@ pub async fn read(
         .await?;
     board(&mut tx, pid, mid).await?;
     let definition = board_definition(&mut tx, pid, mid, &kind, &s.project_files).await?;
+    let native = crate::dsp_points::native_board(&mut tx, pid, mid).await?;
     let mut data = table_rows(&mut tx, pid, mid, &kind).await?;
     crate::point_order::sort_rows(&mut data, &definition["ordering"]);
     let mut options = json!({});
@@ -380,6 +404,14 @@ pub async fn read(
     // Definitions may be shared with another board; offer names/types, never source workbook blobs.
     options["data"] = json!(db::all_json(&mut tx,
         "SELECT jsonb_build_object('id',id,'name',name,'data_type',data_type,'byte_length',byte_length,'default_value',default_value,'min_value',min_value,'max_value',max_value) FROM data_items WHERE project_id=$1 ORDER BY id", pid).await?);
+    if let Some(config) = &native {
+        options["native_groups"] = config["point_groups"].clone();
+        options["signals"] =
+            json!(crate::dsp_points::table_rows(&mut tx, pid, mid, "process").await?);
+        for key in ["groups", "contexts", "data", "fields"] {
+            options[key] = json!([]);
+        }
+    }
     let mut graph = crate::permissions::catalog(&mut tx, pid).await?;
     graph["signal_groups"] = options["groups"].clone();
     let access = crate::permissions::load(&mut tx, pid).await?;
@@ -387,7 +419,11 @@ pub async fn read(
         row["can_edit"] = json!(crate::permissions::can_edit_row(
             &access,
             &graph,
-            if kind == "process" {
+            if native.is_some() && kind == "process" {
+                "process_points"
+            } else if native.is_some() {
+                "transmit_points"
+            } else if kind == "process" {
                 "signals"
             } else {
                 "signal_bindings"
@@ -397,7 +433,7 @@ pub async fn read(
     }
     let permissions = access.value(&graph);
     Ok(Json(
-        json!({"version":1,"revision":revision,"model_id":mid,"kind":kind,
+        json!({"version":1,"revision":revision,"model_id":mid,"kind":kind,"storage":if native.is_some(){"native"}else{"legacy"},
         "definition":definition,"rows":data,"options":options,"permissions":permissions}),
     ))
 }
@@ -408,6 +444,12 @@ pub(crate) async fn table_rows(
     mid: i64,
     kind: &str,
 ) -> Result<Vec<Value>> {
+    if crate::dsp_points::native_board(tx, pid, mid)
+        .await?
+        .is_some()
+    {
+        return crate::dsp_points::table_rows(tx, pid, mid, kind).await;
+    }
     let data: Vec<Value> = if kind == "process" {
         sqlx::query_scalar(r#"
             SELECT to_jsonb(v) || jsonb_build_object(
@@ -537,6 +579,12 @@ pub async fn apply(tx: &mut Transaction<'_, Postgres>, pid: i64, c: &Change) -> 
         .as_i64()
         .ok_or(AppError::bad("缺少板卡类型"))?;
     board(tx, pid, mid).await?;
+    if crate::dsp_points::native_board(tx, pid, mid)
+        .await?
+        .is_some()
+    {
+        return crate::dsp_points::apply(tx, pid, mid, kind, c).await;
+    }
     let values = &c.values["fields"];
     let fields = values
         .as_object()
@@ -548,7 +596,12 @@ pub async fn apply(tx: &mut Transaction<'_, Postgres>, pid: i64, c: &Change) -> 
         return Err(AppError::bad("未提供修改字段"));
     }
     for key in fields.keys() {
-        if !writable(kind).contains(key.as_str()) {
+        let legacy = match kind {
+            "process" => keys(PROCESS).union(&keys(RANGE)).copied().collect(),
+            "collect" => keys(BINDING).union(&keys(COLLECTION)).copied().collect(),
+            _ => keys(BINDING),
+        };
+        if !legacy.contains(key.as_str()) {
             return Err(AppError::bad(format!("{key} 是只读字段或不属于当前点表")));
         }
     }
@@ -683,7 +736,19 @@ pub async fn apply(tx: &mut Transaction<'_, Postgres>, pid: i64, c: &Change) -> 
         .await
     }
 }
-pub fn audit_before(g: &Value, entity: &str, id: i64) -> Option<Value> {
+pub fn audit_before(g: &Value, entity: &str, id: i64, mid: i64) -> Option<Value> {
+    if crate::dsp_points::is_native_model(g, mid) {
+        return topology::find(
+            g,
+            if entity == "process_points" {
+                "process_points"
+            } else {
+                "transmit_points"
+            },
+            id,
+        )
+        .cloned();
+    }
     if entity == "process_points" {
         let mut signal = topology::find(g, "signals", id)?.clone();
         signal["range"] = topology::rows(g, "signal_ranges")

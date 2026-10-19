@@ -108,6 +108,12 @@ pub async fn read(State(s): State<AppState>, u: User, Path(pid): Path<i64>) -> R
 /// The grant picker needs the scope catalog, not workbook cells or point rows.
 pub async fn catalog(tx: &mut Transaction<'_, Postgres>, pid: i64) -> Result<Value> {
     let mut graph = json!({});
+    graph["project_config"] =
+        sqlx::query_scalar::<_, Option<Value>>("SELECT topology_config FROM projects WHERE id=$1")
+            .bind(pid)
+            .fetch_one(&mut **tx)
+            .await?
+            .unwrap_or(Value::Null);
     for table in ["board_models", "endpoints", "protocol_contracts"] {
         graph[table] = json!(
             db::all_json(
@@ -145,6 +151,30 @@ pub fn resources(graph: &Value, table: &str, row: &Value) -> BTreeSet<Grant> {
     let protocol =
         |e: &Value| Grant::new(num(e, "model_id"), "protocol", Some(num(e, "contract_id")));
     match table {
+        "process_points" | "transmit_points" => {
+            if let Some(kind) = graph["project_config"]["board_types"]
+                .as_array()
+                .and_then(|types| types.iter().find(|kind| kind["code"] == row["board_key"]))
+            {
+                if let Some(model) = rows(graph, "board_models")
+                    .iter()
+                    .find(|m| m["code"] == kind["model_code"])
+                {
+                    let mid = num(model, "id");
+                    if table == "process_points" {
+                        out.insert(internal(mid));
+                    } else if let Some(endpoint) = rows(graph, "endpoints").iter().find(|e| {
+                        num(e, "model_id") == mid
+                            && e["code"] == row["endpoint_key"]
+                            && e["role"] == "server"
+                    }) {
+                        out.insert(protocol(endpoint));
+                    } else {
+                        out.insert(board(mid));
+                    }
+                }
+            }
+        }
         "board_models" => {
             out.insert(board(num(row, "id")));
         }
@@ -342,6 +372,47 @@ mod tests {
         };
         assert!(!viewer.any());
         assert!(!viewer.allows(&Grant::new(1, "internal", None)));
+    }
+    #[test]
+    fn native_points_use_applied_board_and_explicit_protocol_grants() {
+        let mut graph = json!({"project_config":{"board_types":[{"code":"POWER","model_code":"DSP","point_storage":"native"}]},
+            "board_models":[{"id":1,"code":"DSP"},{"id":2,"code":"UPM"}],"endpoints":[]});
+        let process = json!({"id":1,"board_key":"POWER"});
+        let transmit = json!({"id":1,"board_key":"POWER","endpoint_key":"UPP_SERVICE"});
+        let internal = scoped(vec![Grant::new(1, "internal", None)]);
+        assert!(can_edit_row(&internal, &graph, "process_points", &process));
+        assert!(!can_edit_row(
+            &internal,
+            &graph,
+            "transmit_points",
+            &transmit
+        ));
+        assert!(can_edit_row(
+            &scoped(vec![Grant::new(1, "board", None)]),
+            &graph,
+            "transmit_points",
+            &transmit
+        ));
+        assert!(!can_edit_row(
+            &scoped(vec![Grant::new(2, "board", None)]),
+            &graph,
+            "process_points",
+            &process
+        ));
+        graph["endpoints"] =
+            json!([{"id":9,"model_id":1,"code":"UPP_SERVICE","role":"server","contract_id":3}]);
+        assert!(can_edit_row(
+            &scoped(vec![Grant::new(1, "protocol", Some(3))]),
+            &graph,
+            "transmit_points",
+            &transmit
+        ));
+        assert!(!can_edit_row(
+            &scoped(vec![Grant::new(1, "protocol", Some(4))]),
+            &graph,
+            "transmit_points",
+            &transmit
+        ));
     }
     #[test]
     fn moving_owned_records_does_not_discard_the_old_owner() {

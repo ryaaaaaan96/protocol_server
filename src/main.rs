@@ -3,6 +3,8 @@ mod auth;
 mod change_merge;
 mod codegen;
 mod db;
+mod dsp_points;
+mod dsp_workbook;
 mod edit_lock;
 mod error;
 mod importer;
@@ -103,7 +105,7 @@ async fn main() -> anyhow::Result<()> {
         "DATABASE_URL must use a non-superuser role without BYPASSRLS; run migrations using MIGRATION_DATABASE_URL separately"
     );
     let schema_ready: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='projects' AND column_name='config_key') AND to_regclass('public.project_edit_locks') IS NOT NULL AND to_regclass('public.project_member_grants') IS NOT NULL",
+        "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='projects' AND column_name='config_key') AND to_regclass('public.project_edit_locks') IS NOT NULL AND to_regclass('public.project_member_grants') IS NOT NULL AND to_regclass('public.process_points') IS NOT NULL AND to_regclass('public.transmit_points') IS NOT NULL AND to_regclass('public.point_history') IS NOT NULL",
     ).fetch_one(&pool).await?;
     anyhow::ensure!(
         schema_ready,

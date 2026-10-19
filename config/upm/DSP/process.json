@@ -2,13 +2,14 @@
   "version": 1,
   "enabled": true,
   "label": "DSP内部数据",
-  "description": "统一维护内部信号、默认值、上下限及恢复策略；采集与转发通过固定记录 ID 引用。",
+  "description": "维护 DSP 内部点的编号、枚举、类型、长度、默认值和范围。UPP 转发通过固定记录 ID 引用内部点；分组由项目 JSON 配置。",
   "columns": [
     "name",
     "group_name",
     "resolved_sig_id",
     "enum_name",
     "data_type",
+    "element_count",
     "byte_length",
     "unit",
     "default_value",
@@ -16,45 +17,49 @@
     "max_value",
     "boot_restore",
     "manual_restore",
+    "process_enabled",
     "flags",
     "callback",
-    "collection_count",
-    "forward_count"
+    "forward_count",
+    "notes"
   ],
   "editor": [
     "name",
-    "group_id",
-    "data_item_id",
+    "group_key",
     "enum_name",
     "sig_id",
-    "sig_symbol",
     "internal_type",
-    "flags",
-    "callback",
-    "process_enabled",
+    "element_count",
+    "unit",
     "default_value",
     "min_value",
     "max_value",
     "boot_restore",
-    "manual_restore"
+    "manual_restore",
+    "process_enabled",
+    "flags",
+    "callback",
+    "notes"
   ],
   "ordering": {
     "mode": "display",
-    "group_by": [
-      "group_id"
-    ]
+    "group_by": []
   },
   "inline": {
     "name": "name",
     "enum_name": "enum_name",
-    "flags": "flags",
-    "callback": "callback",
+    "element_count": "element_count",
+    "unit": "unit",
     "default_value": "default_value",
     "min_value": "min_value",
     "max_value": "max_value",
     "boot_restore": "boot_restore",
     "manual_restore": "manual_restore",
-    "group_name": "group_id",
+    "process_enabled": "process_enabled",
+    "flags": "flags",
+    "callback": "callback",
+    "notes": "notes",
+    "group_name": "group_key",
     "resolved_sig_id": "sig_id",
     "data_type": "internal_type"
   },
@@ -65,8 +70,19 @@
     "group_name": {
       "label": "点表分组"
     },
+    "group_key": {
+      "label": "点表分组",
+      "reference": "native_groups",
+      "default": "LOCAL"
+    },
     "resolved_sig_id": {
       "label": "sigID"
+    },
+    "sig_id": {
+      "label": "数字 sigID",
+      "type": "number",
+      "nullable": true,
+      "hint": "留空表示暂未分配；关联使用固定记录 ID，修改编号不会改变关联。"
     },
     "enum_name": {
       "label": "枚举"
@@ -74,68 +90,8 @@
     "data_type": {
       "label": "内部类型"
     },
-    "byte_length": {
-      "label": "内部字节数"
-    },
-    "unit": {
-      "label": "单位"
-    },
-    "default_value": {
-      "label": "默认值覆盖",
-      "nullable": true,
-      "hint": "留空继承数据定义；表格展示生效值。",
-      "column_label": "默认值"
-    },
-    "min_value": {
-      "label": "下限覆盖",
-      "nullable": true,
-      "hint": "留空继承数据定义；表格展示生效值。",
-      "column_label": "下限"
-    },
-    "max_value": {
-      "label": "上限覆盖",
-      "nullable": true,
-      "hint": "留空继承数据定义；表格展示生效值。",
-      "column_label": "上限"
-    },
-    "flags": {
-      "label": "处理标志",
-      "default": "0"
-    },
-    "callback": {
-      "label": "回调函数",
-      "default": "NULL"
-    },
-    "collection_count": {
-      "label": "采集绑定数"
-    },
-    "forward_count": {
-      "label": "转发绑定数"
-    },
-    "group_id": {
-      "label": "点表分组",
-      "reference": "groups",
-      "type": "number"
-    },
-    "data_item_id": {
-      "label": "数据来源定义",
-      "reference": "data",
-      "type": "number",
-      "hint": "定义提供类型、长度、单位和默认范围，可由多个点共享。"
-    },
-    "sig_id": {
-      "label": "数字 sigID",
-      "type": "number",
-      "nullable": true,
-      "hint": "数字与公共符号二选一；引用通过固定记录 ID 关联。"
-    },
-    "sig_symbol": {
-      "label": "公共 sigID 符号",
-      "nullable": true
-    },
     "internal_type": {
-      "label": "内部类型覆盖",
-      "nullable": true,
+      "label": "内部类型",
       "options": [
         "U8",
         "U16",
@@ -144,12 +100,35 @@
         "S32",
         "F32",
         "STRING"
-      ]
+      ],
+      "default": "F32"
     },
-    "process_enabled": {
-      "label": "加入处理表",
-      "type": "boolean",
-      "default": true
+    "element_count": {
+      "label": "元素数量",
+      "type": "number",
+      "default": 1,
+      "hint": "数组填写元素个数，字符串填写字节容量；标量填 1。"
+    },
+    "byte_length": {
+      "label": "内部字节数",
+      "hint": "根据内部类型和元素数量计算。"
+    },
+    "unit": {
+      "label": "单位",
+      "nullable": true
+    },
+    "default_value": {
+      "label": "默认值",
+      "nullable": true,
+      "hint": "直接保存点默认值；留空表示未指定。"
+    },
+    "min_value": {
+      "label": "下限",
+      "nullable": true
+    },
+    "max_value": {
+      "label": "上限",
+      "nullable": true
     },
     "boot_restore": {
       "label": "上电恢复默认值",
@@ -161,11 +140,25 @@
       "type": "boolean",
       "default": false
     },
-    "contexts": {
-      "label": "设备上下文"
+    "process_enabled": {
+      "label": "加入处理表",
+      "type": "boolean",
+      "default": true
     },
-    "range_inherited": {
-      "label": "继承范围"
+    "flags": {
+      "label": "处理标志",
+      "default": "0"
+    },
+    "callback": {
+      "label": "回调函数",
+      "default": "NULL"
+    },
+    "forward_count": {
+      "label": "转发绑定数"
+    },
+    "notes": {
+      "label": "备注",
+      "nullable": true
     }
   }
 }

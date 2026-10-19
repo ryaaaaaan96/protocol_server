@@ -68,8 +68,11 @@ const board = computed(() =>
 const boardModel = computed(() =>
   props.graph?.board_models.find((m: Row) => m.id === board.value?.model_id),
 );
+const nativeBoard = computed(() => board.value?.point_storage === "native");
+const nativeGroups = computed<Row[]>(() => nativeBoard.value ? board.value?.point_groups || [] : []);
+const groupKey = ref<string>();
 const groupId = ref<number>();
-const groups = computed<Row[]>(() => props.mode === "board"
+const groups = computed<Row[]>(() => props.mode === "board" && !nativeBoard.value
   ? rows(props.graph || {}, "signal_groups").filter(g => g.model_id === board.value?.model_id)
   : []);
 let groupModelId: number | undefined;
@@ -83,6 +86,16 @@ watch([groups, () => board.value?.model_id], ([available, modelId]) => {
     groupId.value = available[0]?.id;
   }
 }, { immediate: true });
+let nativeGroupModelId: number | undefined;
+watch([nativeGroups, () => board.value?.model_id], ([available, modelId]) => {
+  if (!props.graph || modelId == null) return;
+  if (modelId !== nativeGroupModelId) {
+    nativeGroupModelId = modelId;
+    groupKey.value = available[0]?.code;
+  } else if (groupKey.value != null && !available.some(group => group.code === groupKey.value)) {
+    groupKey.value = available[0]?.code;
+  }
+}, { immediate: true });
 const groupContexts = computed(() => rows(props.graph || {}, "device_contexts")
   .filter(c => groupId.value != null && c.group_id === groupId.value));
 function selectGroup(id?: number) {
@@ -93,7 +106,16 @@ function selectGroup(id?: number) {
   pointFocus.value = undefined;
   query.value = "";
 }
+function selectNativeGroup(code?: string) {
+  if (code === groupKey.value) return;
+  if (pointDirty.value && !window.confirm("有未保存的修改，是否放弃并切换点表分组？")) return;
+  pointDirty.value = false;
+  groupKey.value = code;
+  pointFocus.value = undefined;
+  query.value = "";
+}
 function typeSignals(type: Row) {
+  if (type.point_storage === "native") return rows(props.graph || {}, "process_points").filter(point => point.board_key === type.code).length;
   return (
     props.graph?.v_signals.filter((s: Row) => s.model_id === type.model_id)
       .length || 0
@@ -198,7 +220,11 @@ watch(
   () => {
     if (!props.graph || !props.focus) return;
     if (props.mode === "board" && !displaySchema.value) return;
-    const target = (props.mode === "settings" ? projectSheets : boardSheets).find(
+    const nativeKind = nativeBoard.value
+      ? ({ process_points: "process", transmit_points: "forward", collect_points: "collect" } as Record<string, string>)[props.focus.entity]
+      : undefined;
+    const target = nativeKind ? sheets.value.find(item => item.pointKind === nativeKind)
+      : (props.mode === "settings" ? projectSheets : boardSheets).find(
       (s) =>
         s.entity === props.focus!.entity &&
         (!s.role ||
@@ -209,6 +235,13 @@ watch(
       sheetKey.value = target.key;
       if (target.pointKind) {
         edit.value = null;
+        if (nativeBoard.value) {
+          const pointId = target.pointKind === "process" ? props.focus.id
+            : rows(props.graph, target.pointKind === "forward" ? "transmit_points" : "collect_points").find(point => point.id === props.focus!.id)?.process_point_id;
+          groupKey.value = rows(props.graph, "process_points").find(point => point.id === pointId)?.group_key;
+          pointFocus.value = props.focus.id;
+          return;
+        }
         const signalId = target.pointKind === "process" ? props.focus.id
           : props.graph.signal_bindings.find((b: Row) => b.id === props.focus!.id)?.signal_id;
         groupId.value = props.graph.signals.find((s: Row) => s.id === signalId)?.group_id;
@@ -232,6 +265,13 @@ watch(
 watch([sheetKey, query], () => (page.value = 1));
 function entries(s: Sheet): Row[] {
   if (!props.graph) return [];
+  if (nativeBoard.value && s.pointKind) {
+    const points = rows(props.graph, "process_points").filter(point => point.board_key === board.value?.code);
+    if (s.pointKind === "process") return points.filter(point => groupKey.value == null || point.group_key === groupKey.value);
+    const ids = new Set(points.filter(point => groupKey.value == null || point.group_key === groupKey.value).map(point => point.id));
+    return rows(props.graph, s.pointKind === "forward" ? "transmit_points" : "collect_points")
+      .filter(point => point.board_key === board.value?.code && ids.has(point.process_point_id));
+  }
   if (s.entity === "type_connections")
     return typeConnections(props.graph).filter(
       (r) => r.parent === board.value?.code || r.child === board.value?.code,
@@ -364,7 +404,8 @@ function pointDone(merged = false) {
 }
 function openProcess(id: number) {
   if (sheets.value.some((s) => s.pointKind === "process")) {
-    groupId.value = props.graph?.signals.find((r: Row) => r.id === id)?.group_id;
+    if (nativeBoard.value) groupKey.value = rows(props.graph || {}, "process_points").find(point => point.id === id)?.group_key;
+    else groupId.value = props.graph?.signals.find((r: Row) => r.id === id)?.group_id;
     sheetKey.value = "signals";
     pointFocus.value = id;
   } else {
@@ -430,6 +471,13 @@ function sourceOf(row: Row) {
       detail="当前板卡未配置需要显示的表格。"
     />
     <section v-else class="panel table-panel board-tables">
+      <div v-if="nativeBoard && nativeGroups.length" class="point-groups" role="group" aria-label="点表分组">
+        <span>点表分组</span>
+        <button v-for="group in nativeGroups" :key="group.code" class="button small"
+          :class="{ primary: groupKey === group.code }" :aria-pressed="groupKey === group.code"
+          @click="selectNativeGroup(group.code)">{{ group.code }} · {{ group.name }}</button>
+        <button v-if="nativeGroups.length > 1" class="button small" :aria-pressed="groupKey == null" @click="selectNativeGroup()">全部分组</button>
+      </div>
       <div v-if="board && groups.length" class="point-groups" role="group" aria-label="点表分组">
         <span>点表分组</span>
         <button v-for="g in groups" :key="g.id" class="button small"
@@ -459,7 +507,7 @@ function sourceOf(row: Row) {
       </div>
       <PointTable
         v-if="sheet.pointKind && board && graph"
-        :key="`${board.model_id}:${sheet.pointKind}:${groupId ?? 'all'}`"
+        :key="`${board.model_id}:${sheet.pointKind}:${nativeBoard ? groupKey ?? 'all' : groupId ?? 'all'}`"
         :pid="pid"
         :model-id="board.model_id"
         :kind="sheet.pointKind"
@@ -468,7 +516,8 @@ function sourceOf(row: Row) {
         :can-write="canWrite"
         :process-enabled="boardModel?.firmware_profile === 'aidc'"
         :focus-id="pointFocus"
-        :group-id="groupId"
+        :group-id="nativeBoard ? undefined : groupId"
+        :group-key="nativeBoard ? groupKey : undefined"
         :allow-forward="sheets.some(s => s.pointKind === 'forward')"
         :forward-label="sheets.find(s => s.pointKind === 'forward')?.label"
         @done="pointDone"

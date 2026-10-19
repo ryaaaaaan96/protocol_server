@@ -13,6 +13,7 @@ const tables = [
   "signal_ranges", "device_contexts", "protocol_contracts", "protocol_fields",
   "endpoints", "signal_bindings", "board_links", "passthrough_routes",
   "platform_signals", "source_records",
+  "process_points", "transmit_points",
 ];
 
 function environment() {

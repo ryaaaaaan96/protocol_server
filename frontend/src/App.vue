@@ -625,7 +625,8 @@ function userCreated() {
       v-if="modal === 'import'"
       :pid="pid"
       :can-write="canManageWrite"
-      :has-points="!!overview?.has_configuration"
+      :has-points="!!overview?.has_configuration || !!graph?.process_points?.length || !!graph?.transmit_points?.length"
+      :dsp-only="!!graph?.project_config?.board_types?.some((board: Row) => board.model_code === 'DSP' && board.point_storage === 'native')"
       @close="modal = null"
       @done="importDone"
     />

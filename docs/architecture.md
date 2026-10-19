@@ -1,6 +1,50 @@
 # 数据模型与派生规则
 
-## 从工作簿分层建模
+## DSP 原生点表：迁移 0014
+
+DSP 已使用独立的业务存储，其他板卡继续使用下文的旧版关系图模型。项目清单顶层配置 `"workbook_boards": ["DSP"]` 后，CLI 创建项目只导入 DSP；它读取 `DSP内部数据` 和 `UPM-DSP采集数据` 两个 sheet，不创建 UPM 处理或采集数据。本仓库工作簿包含 552 个 DSP 内部点、445 条转发记录，107 个内部点没有转发映射。
+
+```mermaid
+erDiagram
+  projects ||--o{ process_points : owns
+  process_points ||--o{ transmit_points : maps
+  projects ||--o{ point_history : records
+```
+
+| 存储 | 内容 |
+| --- | --- |
+| `process_points` | 板卡和分组 key、名称、枚举、可空 sigID、内部类型、元素数、总字节数、单位、默认值、上下限、恢复策略、处理标志及来源元数据 |
+| `transmit_points` | 固定内部点 ID、输出接口 key、UPP 模型、显式偏移、通信类型和长度、系数、读写属性、字节序、转换方式、启用状态及来源位置 |
+| `point_history` | 修改批次、操作者及名称快照、项目版本、对象身份、修改前后完整记录、配置前后快照和时间；只追加 |
+
+`transmit_points` 通过包含项目、板卡的复合外键引用内部点，允许多个转发记录对应一个内部点；修改枚举或 sigID 不改变引用。`UPM-DSP采集数据` 当前作为 DSP 对外 UPP 布局来源，后续 UPM 采集端可复用这个协议定义；本次没有实现 UPM 的新采集存储或双端联动。
+
+板卡和分组的编辑来源是 `project.json`，DSP 配置示例：
+
+```json
+{
+  "code": "DSP",
+  "name": "DSP 功率板",
+  "model_code": "DSP",
+  "directory": "DSP",
+  "point_storage": "native",
+  "point_groups": [{ "code": "LOCAL", "name": "本地内部数据" }]
+}
+```
+
+该对象位于 `topology.board_types`。点记录通过 `board_key`、`group_key` 对应已应用的配置，不依赖旧 `signal_groups`、`data_items` 或 `signal_ranges`。`projects`、`board_models` 仍保留项目身份、生效快照和现有权限目录；此次没有删除其他板卡依赖的组织表。配置变更需要导入，不能只修改文件就使已有点失去归属。
+
+固定内部类型的总字节数由类型大小乘元素数得到；`STRING` 的元素数表示字节容量，默认字符串按 UTF-8 字节检查。内部 `F32` 与通信 `S32` 使用显式 `fixed_point` 转换：`wire = round(internal / scale)`，反向为 `internal = wire * scale`。`identity` 要求类型、长度一致且系数为 1；`array_bytes` 保留数组的总字节数并使用 `STRING` 通信表示。转换声明随导出保存，固件仍需实现对应编码。
+
+DSP sheet 未提供已确认的数字 sigID，导入保留空值，用枚举匹配来源、固定记录 ID 保存关联。生成器输出 `board_types/DSP/process.json`、`transmit.json` 和 `UPP_SERVICE.xml`，用于数据定义和协议交付；不推断 DSP 固件编号，也不生成未经确认的 DSP C ABI。
+
+DSP 继续使用设置弹窗、单元格编辑、批量操作、显示排序、项目编辑租约和版本冲突检查。范围直接属于内部点，不再继承共享定义。保留原工作簿中未修改的范围异常和未解析符号时给出警告；新增越界默认值或新填入的未解析符号会阻止提交。DSP 行拖动只修改 `display_order`，不会重新计算通信偏移；列隐藏、冻结和顺序仍属于浏览器本地视图。
+
+业务修改和 `point_history` 在同一事务提交，批量修改共用一个批次；预览、失败提交不留下成功修改历史。历史不关联可删除的点记录，删除点、重新导入和项目 Dump 替换都保留已有历史。新业务表进入项目快照、不可变发布和项目 Dump；`point_history` 不随项目业务 Dump 导出或覆盖，完整历史迁移需全库备份。RLS、成员范围检查、编辑锁和项目 revision 继续生效。
+
+## 旧版工作簿关系图模型
+
+本节及下文标记为旧版的派生规则适用于未设置 `point_storage: "native"` 的板卡。它们保留原 UPM/ARM 行为，不是新 DSP 表的存储结构。
 
 ```mermaid
 erDiagram
@@ -40,7 +84,7 @@ erDiagram
 
 ## 采集、处理、转发、range 的关系
 
-业务点表接口由 `src/point_tables.rs` 实现，前端 `PointTable.vue` / `PointEditor.vue` 使用独立契约，不根据数据库表结构生成主业务页面。`process_points`、`collect_points`、`forward_points` 是业务操作名，不新增重复存储表；处理点写入信号及可选的范围覆盖，采集和转发写入各自角色的绑定。底层外键仍是唯一的关联依据。界面以 LOCAL、DSP 等点表分组组织编辑，处理点的转发配置入口筛选并维护同一份绑定。VIR 从启用的对外接口派生注册，转发数据来自既有映射，不复制处理点。
+业务点表接口由 `src/point_tables.rs` 实现，前端 `PointTable.vue` / `PointEditor.vue` 使用独立契约，不根据数据库表结构生成主业务页面。`process_points`、`collect_points`、`forward_points` 是 API 业务操作名：旧版板卡将处理点写入信号及可选范围覆盖，将采集和转发写入各自角色的绑定；原生 DSP 则分派到 `dsp_points.rs` 的真实 `process_points` / `transmit_points` 表。底层外键是关联依据。旧版界面以 LOCAL、DSP 等点表分组组织编辑，处理点的转发配置入口筛选并维护同一份绑定。VIR 从启用的对外接口派生注册，转发数据来自既有映射，不复制处理点。
 
 显示定义随项目保存在 `config/<项目名>/`，通过 `projects.config_key` 关联，项目显示名与目录关联独立。`project.json` 包含名称、拓扑、可选工作簿和 Dump 路径以及 `workspace`；`topology.board_types[].directory` 明确指定各板卡在本项目内的目录。每个板卡目录分别提供 `process.json`、`collect.json`、`transmit.json`，其中 `transmit` 对应原有 `forward` 业务操作。所有路径限制在所属项目内，项目加载不依赖公共定义或覆盖层。
 
@@ -48,7 +92,7 @@ erDiagram
 
 项目通过服务器命令 `create-project <key>` 或管理员网页文件夹导入创建，以 `config_key` 关联目录。`GET /api/project-templates` 读取当前目录列表，`GET /api/projects/{pid}/configuration/source` 实时返回 `{key, config, sha256}`。SSH 修改后的拓扑在网页只读显示，经差异预览和提交更新数据库；处理、采集、转发点表仍可在网页编辑。新增项目、板卡、目录与展示定义无需重启。数据库仍保留项目身份、板卡模板、拓扑生效快照及业务关系；配置目录中的 JSON 不保存实际点表行。
 
-Rust 白名单负责读写能力边界。返回的有效值用于显示，`edit_values` 保留真实覆盖值，包括继承用的 `null`。处理点删除与范围删除处于同一事务，被绑定引用时整体回滚；跨板卡移动、端点角色错误和协议不匹配在业务写入口直接拒绝。
+Rust 白名单负责读写能力边界。返回的有效值用于显示，`edit_values` 保留真实编辑值；旧版包含继承用的 `null`，原生 DSP 的可空文本输入则规范为空字符串。旧版处理点删除与范围删除处于同一事务，被绑定引用时整体回滚；跨板卡移动、端点角色错误和协议不匹配在业务写入口直接拒绝。
 
 单元格网格由 `usePointGrid.ts` 管理选择、编辑、区域剪贴板和本地撤销历史，`pointGrid.ts` 处理类型转换和草稿显示。草稿按稳定记录 ID 保存字段增量，引用字段通过合法选项及依赖关系解析，显示投影不改变数据库记录。`inline` 定义可直接编辑的字段；完整设置弹窗保留创建、删除和高级字段入口。复制时携带应用内部的字段/原值元数据以保留 null 继承和关联 ID，跨应用的文本粘贴仍需逐格类型与引用校验。
 
@@ -73,7 +117,7 @@ flowchart LR
 
 参考 AIDC 当前启用了普通 Modbus 转发及 Modbus→UPP 同步透传。`transmit_upp.c` 未在当前设备注册中启用。透传读取走协议请求，不要求每个字段都进入 ARM DP；写入路径仍需要采集解析 ID。未绑定 DP 的协议字段在生成时分配独立解析 ID，不能据此推断 DSP 固件内部 sigID。
 
-## SQL 派生规则
+## 旧版 SQL 派生规则
 
 定义见 `migrations/0005_topology.sql`：
 
@@ -106,7 +150,7 @@ UPP 偏移以字节计，普通模型默认从 6 开始，源表六个特殊字�
 SQL 工作台执行的是 AST 校验后重新渲染的单条查询，不直接运行未解析的字符串：
 
 - 只允许 SELECT / WITH；禁止修改语句、SELECT INTO、锁定、外部表函数。
-- 业务表/视图白名单；CTE 使用作用域栈；不开放用户、会话、审计或系统目录。
+- 业务表/视图白名单；支持只读查询 DSP 的 `process_points`、`transmit_points`、`point_history`，CTE 使用作用域栈；不开放用户、会话、通用审计或系统目录。
 - 仅允许列出的常用聚合、字符串和窗口函数；禁止 set_config、pg_sleep、文件函数和用户自定义类型转换。
 - 事务只读、当前项目 RLS、3 秒超时、500 行结果上限。
 
@@ -116,13 +160,17 @@ SQL 工作台执行的是 AST 校验后重新渲染的单条查询，不直接�
 
 所有跨表外键包含项目 ID，禁止跨项目引用；校验额外检查模板归属、协议端点角色、契约匹配和地址冲突。现有导入错误允许逐项修复，但新引入的阻断错误不能提交。SQL 工作台只读。
 
-Excel 导入在同一个事务内重建整个拓扑，已有任一配置时要求明确勾选替换。上传预览绑定用户和 revision，1 小时失效。覆盖前保留完整审计快照。同一 sigID 的别名若存在不同类型、范围或处理参数会拒绝导入，避免静默合并。
+旧版 Excel 导入在同一个事务内重建旧版业务图；原生 DSP 项目的 Excel 导入只替换 DSP 内部点和转发记录，保留 UPM 及其他板卡数据。已有配置时要求明确确认替换。上传预览绑定用户和 revision，1 小时失效。覆盖前保留完整审计快照。旧版同一 sigID 的别名若存在不同类型、范围或处理参数会拒绝导入；DSP 来源枚举必须唯一，转发必须能匹配到内部点。
 
 项目文件夹导入由 `project_folders.rs` 提供管理员专用 `POST /api/project-folders/preview` 和 `/commit`。预览接收带相对路径的 `files`，限制 512 个文件、64 MiB，暂存到配置根目录的私有 `.imports/`；模拟配置和可选数据替换后回滚。令牌绑定管理员、项目 revision 与原目录指纹，30 分钟失效。提交在项目行锁下检查其他编辑者和文件变化，目录替换与数据库事务通过恢复日志衔接；未确定提交状态时返回 503，重启后恢复再开放服务。进程内请求锁避免同一服务的读取穿过替换窗口；一个配置根目录应只由一个服务实例管理。过期暂存目录在启动时清理。
 
 文件夹没有 Dump 时保留业务行，不隐式导入 XLSX；有 Dump 时 `project_dump.rs` 在单项目范围内替换白名单业务表并重建外键映射，保留其他项目、账号、审计和发布历史。`export-project.mjs` 生成真正的 PostgreSQL custom 归档，包含专用 `protocol_studio_project_dump` 载荷表；清单 `dump` 指向归档，或使用根目录唯一 `.dump` 文件。导入调用 `pg_restore` 仅输出所选表的数据，再解析和校验载荷，不执行归档 SQL，也不提供数据库连接参数，参见 [PostgreSQL pg_restore 文档](https://www.postgresql.org/docs/current/app-pgrestore.html)。运行服务仍使用普通应用角色；仅导出脚本使用管理员连接创建并清理临时数据库。
 
 迁移 `0005` 后，Rust 迁移程序将旧 `points/devices` 转为规范化模型，并设置 `projects.schema_version=2`。原点表和设备记录保留为只读档案，旧视图不再供 SQL 工作台使用。迁移保留已保存的参数，不用工作簿值覆盖用户修改；可识别的 UPM 项目附加来源记录。再次运行迁移不会重新导入。
+
+迁移 `0014_dsp_point_tables.sql` 新增 DSP 原生业务表和修改历史，不自动导入工作簿，也不转换旧 DSP 或 UPM 数据。原生 DSP 清单声明 `workbook` 时必须同时声明 `"workbook_boards": ["DSP"]`，防止误走旧版全项目导入。只升级数据库结构不会自动创建项目。
+
+原生板卡禁止继续保存旧 `signal_groups`、`device_contexts` 和该板卡端点的 `signal_bindings`，避免生成不可见的重复点表；端点仍可保留为拓扑和权限登记。这项检查同时约束旧 CRUD、配置应用和 Dump 导入。已有项目切换前需在旧模式清理 DSP 的旧点及上述关联，保留 UPM 和共享协议数据，再应用原生配置并导入 DSP 工作簿；或用已整理的新格式项目 Dump 显式替换。带 Dump 替换覆盖整个项目业务数据，必须携带需要保留的其他板卡内容，不会自动转换旧 DSP 行。
 
 发布在项目锁内完成校验、生成及快照保存。JSON 项目按 `board_types/<类型代码>/` 各生成一份配置，并输出 `project.json`，数量不复制生成目录；未配置 JSON 的旧项目保留 `boards/<实例代码>/` 格式。配置含设备注册、采集、处理、普通转发、range 和透传表，contract 模板输出协议契约和 XML。类型级 XML 的 DevCode 为 0（未指定实例），具体通信地址仍由实际部署配置。未明确 DSP 固件内部身份时不生成其处理表。
 

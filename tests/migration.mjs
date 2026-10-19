@@ -15,6 +15,7 @@ const env = Object.fromEntries(
       return [l.slice(0, i), l.slice(i + 1)];
     }),
 );
+if (process.env.TEST_MIGRATION_DATABASE_URL) env.MIGRATION_DATABASE_URL = process.env.TEST_MIGRATION_DATABASE_URL;
 const url = new URL(env.MIGRATION_DATABASE_URL),
   adminUrl = new URL(url);
 adminUrl.pathname = "/postgres";
@@ -96,6 +97,11 @@ try {
   const graph = (await db.query("SELECT count(*)::int AS n FROM boards"))
     .rows[0].n;
   assert.ok(graph >= 2);
+  // New native storage is additive: migration must not copy old DSP proxy rows
+  // or seed workbook content without an explicit project import.
+  for (const table of ["process_points", "transmit_points", "point_history"]) {
+    assert.equal((await db.query(`SELECT count(*)::int AS n FROM ${table}`)).rows[0].n, 0);
+  }
   if (!process.argv[2]) {
     assert.equal(
       Number(

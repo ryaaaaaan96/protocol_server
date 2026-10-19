@@ -23,7 +23,14 @@
         "code": "DSP",
         "name": "DSP 功率板",
         "model_code": "DSP",
-        "directory": "DSP"
+        "directory": "DSP",
+        "point_storage": "native",
+        "point_groups": [
+          {
+            "code": "LOCAL",
+            "name": "DSP 内部数据"
+          }
+        ]
       },
       {
         "code": "IDU_T",
@@ -162,5 +169,8 @@
         ]
       }
     }
-  }
+  },
+  "workbook_boards": [
+    "DSP"
+  ]
 }

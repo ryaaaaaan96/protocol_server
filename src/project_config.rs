@@ -22,6 +22,16 @@ pub struct BoardType {
     pub model_code: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub directory: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub point_storage: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub point_groups: Vec<PointGroup>,
+}
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PointGroup {
+    pub code: String,
+    pub name: String,
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -99,6 +109,28 @@ impl Config {
         let mut codes = BTreeSet::new();
         let mut models = BTreeSet::new();
         for t in &self.board_types {
+            if t.point_storage
+                .as_deref()
+                .is_some_and(|storage| storage != "native")
+            {
+                return Err(AppError::bad(
+                    "point_storage 仅支持 native，省略时沿用已有存储",
+                ));
+            }
+            let mut groups = BTreeSet::new();
+            if t.point_groups.iter().any(|g| {
+                !model::identifier(&g.code)
+                    || g.code.len() > 80
+                    || g.name.trim().is_empty()
+                    || g.name.len() > 300
+                    || !groups.insert(&g.code)
+            }) || (t.point_storage.is_some() && t.point_groups.is_empty())
+                || (t.point_storage.is_none() && !t.point_groups.is_empty())
+            {
+                return Err(AppError::bad(
+                    "native 板卡须在 point_groups 中定义唯一、有效的点表分组",
+                ));
+            }
             if !model::identifier(&t.code)
                 || !model::identifier(&t.model_code)
                 || t.code.len() > 80

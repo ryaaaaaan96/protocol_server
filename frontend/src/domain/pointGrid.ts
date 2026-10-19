@@ -114,7 +114,7 @@ export function parseCell(
   if (field.reference) {
     if (!trimmed && field.nullable) return null;
     const choices = pointChoices(data, key, values);
-    const select = (matches: Row[]): number | undefined => {
+    const select = (matches: Row[]): number | string | undefined => {
       if (matches.length > 1)
         throw new Error(
           `${field.label}存在同名记录，请使用完整选项名称或记录 ID。`,
@@ -125,6 +125,10 @@ export function parseCell(
     if (label !== undefined) return label;
     const name = select(choices.filter((row) => row.name === trimmed));
     if (name !== undefined) return name;
+    if (data.storage === "native" && field.type !== "number") {
+      const code = select(choices.filter((row) => String(row.id) === trimmed));
+      if (code !== undefined) return code;
+    }
     if (/^\d+$/.test(trimmed)) {
       const id = Number(trimmed);
       if (Number.isSafeInteger(id) && choices.some((row) => row.id === id))
@@ -136,7 +140,7 @@ export function parseCell(
   }
   if (field.options) {
     if (!trimmed && field.nullable) return null;
-    if (field.options.includes(trimmed)) return trimmed;
+    if (field.options.includes(trimmed)) return field.type === "number" ? Number(trimmed) : trimmed;
     throw new Error(`${field.label}只能选择：${field.options.join("、")}。`);
   }
   if (field.type === "boolean") {
@@ -177,9 +181,36 @@ export function displayCell(
   const projected = (record: Row | undefined, key: string) =>
     record && key in record ? pointText(record[key]) : PENDING;
   const current = () =>
-    column === "upp_model" && row.protocol !== "UPP"
+    data.storage !== "native" && column === "upp_model" && row.protocol !== "UPP"
       ? "—"
       : pointText(row[column]);
+
+  if (data.storage === "native") {
+    if (["min_value", "max_value"].includes(column) && pointIsString(data, values, row)) return "—";
+    if (data.kind === "process") {
+      if (column === "group_name" && changed("group_key"))
+        return projected(data.options.native_groups?.find(group => group.code === values.group_key), "name");
+      if (column === "data_type" && changed("internal_type")) return pointText(values.internal_type);
+      if (column === "resolved_sig_id" && changed("sig_id")) return pointText(values.sig_id);
+      if (column === "byte_length" && changed("internal_type", "element_count")) {
+        const widths: Record<string, number> = { U8: 1, U16: 2, S16: 2, U32: 4, S32: 4, F32: 4, STRING: 1 };
+        const width = widths[String(values.internal_type)];
+        const count = Number(values.element_count);
+        return width && Number.isSafeInteger(count) && count > 0 ? String(width * count) : PENDING;
+      }
+    } else {
+      const signalColumns: Record<string, string> = {
+        signal_name: "name", resolved_sig_id: "sig_id", enum_name: "enum_name",
+        data_type: "data_type", byte_length: "byte_length", unit: "unit",
+      };
+      if (signalColumns[column] && changed("process_point_id"))
+        return projected(related("signals", "process_point_id"), signalColumns[column]);
+    }
+    const key = fieldForColumn(data, column);
+    if (key && changed(key)) return pointText(values[key]);
+    if (data.definition.editor.includes(column) && changed(column)) return pointText(values[column]);
+    return current();
+  }
 
   if (pointIsString(data, values, row)) {
     if (["min_value", "max_value"].includes(column)) return "—";

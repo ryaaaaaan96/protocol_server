@@ -130,6 +130,27 @@ fn overlap(a: &str, b: &str) -> bool {
         || b.strip_prefix(a).is_some_and(|rest| rest.starts_with('/'))
 }
 
+/// Merge documents key table rows by ID, unlike the array-based topology graph.
+/// Resolve storage from the applied board configuration, never from an ID that
+/// may also exist in a legacy table's independent sequence.
+fn reorder_table(document: &Value, c: &Change) -> &'static str {
+    let model = &document["board_models"][c.values["model_id"].to_string()];
+    let native = model.is_object()
+        && document["project_config"]["board_types"]
+            .as_array()
+            .is_some_and(|boards| {
+                boards.iter().any(|board| {
+                    board["model_code"] == model["code"] && board["point_storage"] == "native"
+                })
+            });
+    match (native, c.values["kind"].as_str()) {
+        (true, Some("process")) => "process_points",
+        (true, _) => "transmit_points",
+        (false, Some("process")) => "signals",
+        (false, _) => "signal_bindings",
+    }
+}
+
 /// Produce the only acceptable combined state. Domain replay must match it exactly.
 pub fn rebase(
     base: &Value,
@@ -155,25 +176,39 @@ pub fn rebase(
         return Err(error);
     }
     if c.entity == "point_order" {
-        let table = if c.values["kind"] == "process" {
-            "signals"
-        } else {
-            "signal_bindings"
+        let table = reorder_table(base, c);
+        if reorder_table(current, c) != table {
+            return Err(conflict(
+                c,
+                revision,
+                "板卡点表存储配置已变化，无法自动合并排序",
+            ));
+        }
+        let guarded: &[&str] = match table {
+            "process_points" => &["display_order", "project_id", "board_key", "group_key"],
+            "transmit_points" => &[
+                "display_order",
+                "project_id",
+                "board_key",
+                "endpoint_key",
+                "upp_model",
+                "process_point_id",
+            ],
+            _ => &[
+                "display_order",
+                "group_id",
+                "endpoint_id",
+                "context_id",
+                "field_id",
+            ],
         };
         for id in c.values["ids"].as_array().into_iter().flatten() {
             let key = id.to_string();
             let old = &base[table][&key];
             let new = &current[table][&key];
-            if new.is_null()
-                || [
-                    "display_order",
-                    "group_id",
-                    "endpoint_id",
-                    "context_id",
-                    "field_id",
-                ]
-                .iter()
-                .any(|f| old[f] != new[f])
+            if old.is_null()
+                || new.is_null()
+                || guarded.iter().any(|field| old[field] != new[field])
             {
                 return Err(conflict(
                     c,
@@ -241,5 +276,122 @@ mod tests {
         assert!(rebase(&base, &patch, &current, &change(), 2).is_err());
         current["signals"].as_object_mut().unwrap().remove("1");
         assert!(rebase(&base, &patch, &current, &change(), 2).is_err());
+    }
+
+    fn native_order(kind: &str) -> (Value, Change, json_patch::Patch) {
+        let graph = json!({
+            "project_config":{"board_types":[{"code":"DSP","model_code":"DSP","point_storage":"native"}]},
+            "board_models":[{"id":7,"code":"DSP"}],
+            "process_points":[
+                {"id":1,"project_id":1,"board_key":"DSP","group_key":"LOCAL","name":"one","display_order":1},
+                {"id":2,"project_id":1,"board_key":"DSP","group_key":"LOCAL","name":"two","display_order":2}],
+            "transmit_points":[
+                {"id":1,"project_id":1,"board_key":"DSP","endpoint_key":"UPP_SERVICE","upp_model":99,"process_point_id":1,"name":"first output","display_order":1},
+                {"id":2,"project_id":1,"board_key":"DSP","endpoint_key":"UPP_SERVICE","upp_model":99,"process_point_id":2,"name":"second output","display_order":2}],
+            "signals":[{"id":1,"group_id":200,"display_order":90}],
+            "signal_bindings":[{"id":1,"endpoint_id":200,"display_order":90}]
+        });
+        let c = Change {
+            revision: 8,
+            entity: "point_order".into(),
+            operation: "reorder".into(),
+            id: Some(7),
+            values: json!({"model_id":7,"kind":kind,"ids":[2,1]}),
+            expected: json!([1, 2]),
+        };
+        let base = document(&graph);
+        let mut edited = base.clone();
+        let table = if kind == "process" {
+            "process_points"
+        } else {
+            "transmit_points"
+        };
+        edited[table]["1"]["display_order"] = json!(2);
+        edited[table]["2"]["display_order"] = json!(1);
+        let patch = json_patch::diff(&base, &edited);
+        (base, c, patch)
+    }
+
+    #[test]
+    fn native_reorder_commits_at_same_revision_and_merges_unrelated_edits() {
+        for kind in ["process", "forward"] {
+            let (base, c, patch) = native_order(kind);
+            let table = if kind == "process" {
+                "process_points"
+            } else {
+                "transmit_points"
+            };
+            let merged = rebase(&base, &patch, &base, &c, 8).unwrap();
+            assert_eq!(merged[table]["1"]["display_order"], 2);
+            assert_eq!(merged[table]["2"]["display_order"], 1);
+            let mut current = base.clone();
+            current[table]["1"]["name"] = json!("renamed while ordering");
+            // Legacy IDs overlap native IDs but belong to independent records.
+            current["signals"]["1"]["display_order"] = json!(91);
+            current["signal_bindings"]["1"]["endpoint_id"] = json!(201);
+            let merged = rebase(&base, &patch, &current, &c, 9).unwrap();
+            assert_eq!(merged[table]["1"]["name"], "renamed while ordering");
+            assert_eq!(merged[table]["1"]["display_order"], 2);
+            assert_eq!(merged["signals"]["1"]["display_order"], 91);
+        }
+    }
+
+    #[test]
+    fn native_reorder_rejects_moved_deleted_and_reconfigured_records() {
+        for (kind, field, value) in [
+            ("process", "group_key", json!("OTHER")),
+            ("forward", "endpoint_key", json!("OTHER_INTERFACE")),
+            ("forward", "upp_model", json!(100)),
+            ("forward", "process_point_id", json!(3)),
+            ("forward", "board_key", json!("OTHER_BOARD")),
+        ] {
+            let (base, c, patch) = native_order(kind);
+            let table = if kind == "process" {
+                "process_points"
+            } else {
+                "transmit_points"
+            };
+            let mut current = base.clone();
+            current[table]["1"][field] = value;
+            assert!(
+                rebase(&base, &patch, &current, &c, 9).is_err(),
+                "{kind}/{field}"
+            );
+            current = base.clone();
+            current[table].as_object_mut().unwrap().remove("1");
+            assert!(rebase(&base, &patch, &current, &c, 9).is_err());
+            current = base.clone();
+            current["project_config"]["board_types"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("point_storage");
+            assert!(rebase(&base, &patch, &current, &c, 9).is_err());
+        }
+    }
+
+    #[test]
+    fn legacy_reorder_keeps_protocol_ordinal_conflict_checks() {
+        let base = document(&json!({
+            "signal_bindings":[
+                {"id":1,"field_id":11,"display_order":1},
+                {"id":2,"field_id":12,"display_order":2}],
+            "protocol_fields":[{"id":11,"ordinal":0},{"id":12,"ordinal":1}]
+        }));
+        let mut edited = base.clone();
+        edited["signal_bindings"]["1"]["display_order"] = json!(2);
+        edited["signal_bindings"]["2"]["display_order"] = json!(1);
+        let patch = json_patch::diff(&base, &edited);
+        let c = Change {
+            revision: 1,
+            entity: "point_order".into(),
+            operation: "reorder".into(),
+            id: Some(7),
+            values: json!({"model_id":7,"kind":"forward","ids":[2,1]}),
+            expected: json!([1, 2]),
+        };
+        assert!(rebase(&base, &patch, &base, &c, 1).is_ok());
+        let mut current = base.clone();
+        current["protocol_fields"]["11"]["ordinal"] = json!(10);
+        assert!(rebase(&base, &patch, &current, &c, 2).is_err());
     }
 }

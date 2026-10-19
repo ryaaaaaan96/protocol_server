@@ -243,8 +243,9 @@ async fn apply(
     }
     Ok((
         pid,
-        json!({"point_count":topology::rows(&after,"data_items").len(),
-        "signal_count":topology::rows(&after,"signals").len(),"validation":report,"restored":restored}),
+        json!({"point_count":topology::rows(&after,"data_items").len()+topology::rows(&after,"process_points").len(),
+        "signal_count":topology::rows(&after,"signals").len()+topology::rows(&after,"process_points").len(),
+        "transmit_count":topology::rows(&after,"transmit_points").len(),"validation":report,"restored":restored}),
     ))
 }
 
@@ -417,8 +418,23 @@ pub async fn commit(
     } else {
         None
     };
+    let history_before = if let Some((pid, _)) = existing {
+        topology::snapshot(&mut tx, pid, true).await?
+    } else {
+        json!({})
+    };
     let (pid, summary) = apply(&mut tx, &user, &manifest, existing, payload.as_ref()).await?;
     db::touch(&mut tx, pid).await?;
+    let history_after = topology::snapshot(&mut tx, pid, true).await?;
+    crate::dsp_points::history(
+        &mut tx,
+        pid,
+        user.id,
+        "folder.import",
+        &history_before,
+        &history_after,
+    )
+    .await?;
     let revision: i32 = sqlx::query_scalar("SELECT revision FROM projects WHERE id=$1")
         .bind(pid)
         .fetch_one(&mut *tx)

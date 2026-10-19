@@ -41,10 +41,24 @@ const INSERT_ORDER: &[&str] = &[
     "board_links",
     "passthrough_routes",
     "source_records",
+    "process_points",
+    "transmit_points",
 ];
 
 fn columns(table: &str) -> String {
     let extra = match table {
+        "process_points" => {
+            return format!(
+                "id,project_id,board_key,{}",
+                crate::dsp_points::PROCESS_COLUMNS
+            );
+        }
+        "transmit_points" => {
+            return format!(
+                "id,project_id,board_key,{}",
+                crate::dsp_points::TRANSMIT_COLUMNS
+            );
+        }
         "data_items" => {
             "name,data_type,byte_length,unit,default_value,min_value,max_value,notes,source_sheet,source_row,raw_json"
         }
@@ -62,6 +76,7 @@ fn columns(table: &str) -> String {
 
 fn references(table: &str) -> &'static [(&'static str, &'static str)] {
     match table {
+        "transmit_points" => &[("process_point_id", "process_points")],
         "boards" | "signal_groups" => &[("model_id", "board_models")],
         "signals" => &[
             ("group_id", "signal_groups"),

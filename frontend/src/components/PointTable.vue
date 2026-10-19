@@ -31,6 +31,7 @@ const props = defineProps<{
   processEnabled: boolean;
   focusId?: number;
   groupId?: number;
+  groupKey?: string;
   signalId?: number;
   allowForward?: boolean;
   forwardLabel?: string;
@@ -152,15 +153,24 @@ const scopedData = computed<PointTableData | null>(() => {
     options.contexts = options.contexts.filter(c => c.group_id === props.groupId);
     options.signals = options.signals.filter(s => s.group_id === props.groupId);
   }
+  if (data.value.storage === "native" && props.groupKey != null) {
+    options.native_groups = (options.native_groups || []).filter(group => group.code === props.groupKey);
+    options.signals = (options.signals || []).filter(signal => signal.group_key === props.groupKey);
+  }
   if (props.signalId != null) options.signals = options.signals.filter(s => s.id === props.signalId);
   return { ...data.value, options };
 });
-const contextOptions = computed(() => scopedData.value?.options.contexts.filter(c => c.group_id != null) || []);
+const contextOptions = computed(() => scopedData.value?.options.contexts?.filter(c => c.group_id != null) || []);
 watch(contextOptions, options => {
   if (!data.value) return;
   if (filter.value !== "" && !options.some(c => c.id === filter.value)) filter.value = "";
 });
 function inScope(row: Row) {
+  if (data.value?.storage === "native") return (
+    (props.signalId == null || (row.process_point_id ?? row.signal_id) === props.signalId) &&
+    (props.groupKey == null || (row.group_key ?? row.edit_values?.group_key ??
+      data.value.options.signals.find(signal => signal.id === (row.process_point_id ?? row.signal_id))?.group_key) === props.groupKey)
+  );
   return (props.signalId == null || row.signal_id === props.signalId) &&
     (props.groupId == null || (props.kind === "process" ? row.group_id === props.groupId :
       data.value?.options.signals.some(s => s.id === row.signal_id && s.group_id === props.groupId)));
@@ -196,7 +206,9 @@ const grid = usePointGrid({
   rowWritable: (row, values) => scopeEditable(row) && scopeEditable(row, values),
   allowedChoice: (row, key, choice, values) => key !== "endpoint_id" || scopeEditable(row, { ...values, endpoint_id: choice.id }),
   blocked: () => busy.value || !!review.value || !!orderDraft.value,
-  locked: key => (key === "group_id" && props.groupId != null) || (key === "signal_id" && props.signalId != null),
+  locked: key => (key === "group_id" && props.groupId != null) ||
+    (key === "group_key" && props.groupKey != null) ||
+    (["signal_id", "process_point_id"].includes(key) && props.signalId != null),
   error: message => { actionError.value = message; },
 });
 const gridTable = grid.table, gridInput = grid.input;
@@ -338,7 +350,7 @@ function cellHint(row: Row, column: string) {
   if (!grid.editable(row, column)) return "此字段在当前分组中锁定，可通过记录详情查看。";
   const scopeHint = permissions.state.value?.edit_scope === "scoped" && props.kind === "process" && ["name", "enum_name", "sig_id", "sig_symbol", "internal_type", "data_item_id", "group_id"].includes(key)
     ? "；若影响关联协议，保存时也需要该协议的编辑权限" : "";
-  return `${def.value!.fields[key].hint || "双击或按 Enter 编辑"}${def.value!.fields[key].nullable ? "；留空恢复继承" : ""}${scopeHint}`;
+  return `${def.value!.fields[key].hint || "双击或按 Enter 编辑"}${def.value!.fields[key].nullable ? data.value?.storage === "native" ? "；留空表示未指定" : "；留空恢复继承" : ""}${scopeHint}`;
 }
 function discardGrid() {
   if (grid.dirty.value && !window.confirm("放弃这些尚未保存的单元格修改？")) return;
@@ -412,12 +424,12 @@ function cancel() {
 }
 const orderEnabled = computed(() => canEditTable.value && def.value?.ordering.mode !== "disabled");
 const canReorder = computed(() => orderEnabled.value && !query.value.trim() && !busy.value && !gridDirty.value);
-function groupKey(row:Row) { return JSON.stringify(def.value!.ordering.group_by.map(key => row[key] ?? 0)); }
-function groupRows(row:Row) { return data.value!.rows.filter(r => groupKey(r) === groupKey(row)); }
+function orderGroupKey(row:Row) { return JSON.stringify(def.value!.ordering.group_by.map(key => row[key] ?? 0)); }
+function groupRows(row:Row) { return data.value!.rows.filter(r => orderGroupKey(r) === orderGroupKey(row)); }
 const filteredIds = computed(() => new Set(filtered.value.map(r => r.id)));
 function canMove(row:Row) {
   const members = groupRows(row);
-  return canReorder.value && (!orderDraft.value || orderDraft.value.key === groupKey(row)) &&
+  return canReorder.value && (!orderDraft.value || orderDraft.value.key === orderGroupKey(row)) &&
     members.length > 1 && members.every(r => filteredIds.value.has(r.id) && scopeEditable(r));
 }
 function move(row:Row, position:number) {
@@ -428,9 +440,9 @@ function move(row:Row, position:number) {
   const [item] = group.splice(from,1);
   group.splice(position-1,0,item);
   let index = 0;
-  data.value!.rows = data.value!.rows.map(r => groupKey(r) === groupKey(row) ? group[index++] : r);
+  data.value!.rows = data.value!.rows.map(r => orderGroupKey(r) === orderGroupKey(row) ? group[index++] : r);
   const same = original.every((r,i) => r.id === data.value!.rows[i].id);
-  orderDraft.value = same ? null : {key:groupKey(row),ids:group.map(r => r.id),original};
+  orderDraft.value = same ? null : {key:orderGroupKey(row),ids:group.map(r => r.id),original};
   moving.value = null;
   actionError.value = "";
 }
@@ -441,13 +453,13 @@ function startDrag(row:Row, event:DragEvent) {
   if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
 }
 function dragOver(row:Row, event:DragEvent) {
-  if (dragging.value && canMove(row) && groupKey(row) === groupKey(dragging.value)) {
+  if (dragging.value && canMove(row) && orderGroupKey(row) === orderGroupKey(dragging.value)) {
     event.preventDefault(); dropId.value = row.id;
   }
 }
 function drop(row:Row, event:DragEvent) {
   event.preventDefault();
-  if (dragging.value && groupKey(row) === groupKey(dragging.value)) move(dragging.value,groupRows(row).findIndex(r => r.id === row.id)+1);
+  if (dragging.value && orderGroupKey(row) === orderGroupKey(dragging.value)) move(dragging.value,groupRows(row).findIndex(r => r.id === row.id)+1);
   dragging.value = null; dropId.value = undefined;
 }
 function choosePosition(row:Row) {
@@ -468,7 +480,7 @@ async function previewChange() {
     review.value = await api(`${base}/reorder/preview`, "POST", {
       revision: data.value.revision,
       ids: orderDraft.value.ids,
-      expected: orderDraft.value.original.filter(r => groupKey(r) === orderDraft.value!.key).map(r => r.id),
+      expected: orderDraft.value.original.filter(r => orderGroupKey(r) === orderDraft.value!.key).map(r => r.id),
     });
     if (review.value && !review.value.allowed) emit("error", review.value.errors.map((e:Row) => e.message).join("；") || "关联检查未通过");
   } catch(e) {
@@ -600,16 +612,16 @@ function text(row: Row, key: string) {
                   @mousedown.stop @click.stop @dblclick.stop @keydown.stop="grid.editorKey" @change="grid.finish() && grid.focusActive()" @blur="grid.finish">
                   <template v-if="gridEditorDef.type === 'boolean'"><option value="true">是</option><option value="false">否</option></template>
                   <template v-else-if="gridEditorDef.reference"><option value="">请选择</option><option v-for="choice in grid.choices.value" :key="choice.id" :value="String(choice.id)">{{ choiceLabel(choice) }}</option></template>
-                  <template v-else><option v-if="gridEditorDef.nullable" value="">跟随数据定义</option><option v-for="option in gridEditorDef.options" :key="option" :value="option">{{ option }}</option></template>
+                  <template v-else><option v-if="gridEditorDef.nullable" value="">{{ data.storage === 'native' ? '未指定' : '跟随数据定义' }}</option><option v-for="option in gridEditorDef.options" :key="option" :value="option">{{ option }}</option></template>
                 </select>
                 <input v-else v-model="gridInput" class="point-cell-editor" type="text" :inputmode="gridEditorDef.type === 'number' ? 'decimal' : undefined" :disabled="!canWrite || !scopeEditable(row)"
-                  :aria-label="`编辑 ${gridEditorDef.label}`" :placeholder="gridEditorDef.nullable ? '留空恢复继承' : ''"
+                  :aria-label="`编辑 ${gridEditorDef.label}`" :placeholder="gridEditorDef.nullable ? data.storage === 'native' ? '留空表示未指定' : '留空恢复继承' : ''"
                   @mousedown.stop @click.stop @dblclick.stop @keydown.stop="grid.editorKey" @blur="grid.finish" />
               </template>
               <span
                 v-else class="point-cell-value" :class="{ 'record-name': column.key === def.columns[0], 'point-cell-boolean': typeof row[column.key] === 'boolean' }"
                 :title="
-                  kind === 'process' &&
+                  data.storage !== 'native' && kind === 'process' &&
                   ['default_value', 'min_value', 'max_value'].includes(column.key)
                     ? grid.values(row)[column.key] == null
                       ? '继承数据定义'
@@ -693,6 +705,7 @@ function text(row: Row, key: string) {
       :can-write="canWrite && scopeEditable(selected)"
       :process-enabled="processEnabled"
       :group-id="groupId"
+      :group-key="groupKey"
       :signal-id="signalId"
       :context-id="kind !== 'process' && filter !== '' ? filter : undefined"
       @dirty="editorDirty = $event"
@@ -706,10 +719,10 @@ function text(row: Row, key: string) {
     />
     <Modal v-if="forwardSignal" :title="`${forwardSignal.name} · 转发配置`" wide @close="closeForward">
       <div class="modal-body point-forwarding">
-        <p class="notice">此处与转发点表共用配置。可为不同来源设备添加多条映射；AIDC 板卡的 VIR 服务随对外接口生成。</p>
+        <p class="notice">{{ data.storage === 'native' ? '此处与 DSP UPP 转发表共用配置，同一个内部点可以配置多条转发映射。' : '此处与转发点表共用配置。可为不同来源设备添加多条映射；AIDC 板卡的 VIR 服务随对外接口生成。' }}</p>
         <PointTable :pid="pid" :model-id="modelId" kind="forward" :label="forwardLabel || '转发点表'"
           :revision="revision" :can-write="canWrite" :process-enabled="processEnabled"
-          :group-id="forwardSignal.group_id" :signal-id="forwardSignal.id"
+          :group-id="forwardSignal.group_id" :group-key="data.storage === 'native' ? forwardSignal.group_key : undefined" :signal-id="forwardSignal.id"
           @done="emit('done', $event)" @conflict="forwardSignal = null; conflict()"
           @error="emit('error', $event)" @dirty="forwardDirty = $event" />
       </div>

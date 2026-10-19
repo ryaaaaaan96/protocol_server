@@ -38,10 +38,11 @@ export function allowsBoard(permissions: ProjectPermissions | null, modelId: num
 
 export function allowsPoint(permissions: ProjectPermissions | null, modelId: number, kind: PointKind, data: PointTableData, row?: Row | null): boolean {
   if (kind === "process") return allowsScope(permissions, { model_id: modelId, scope: "internal" });
+  if (data.storage === "native" && allowsScope(permissions, { model_id: modelId, scope: "board" })) return true;
   const endpointId = row?.edit_values?.endpoint_id ?? row?.endpoint_id;
-  const endpoints = data.options.endpoints.filter(endpoint =>
+  const endpoints = (data.options.endpoints || []).filter(endpoint =>
     endpoint.role === (kind === "collect" ? "client" : "server") &&
-    (row == null || endpoint.id === endpointId));
+    (data.storage === "native" || row == null || endpoint.id === endpointId));
   return endpoints.some(endpoint => allowsScope(permissions, { model_id: modelId, scope: "protocol", contract_id: endpoint.contract_id }));
 }
 

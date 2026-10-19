@@ -164,7 +164,14 @@ pub async fn apply(
         return Err(AppError::bad("顺序未改变"));
     }
     if rule["mode"] == "display" {
-        let table = if kind == "process" {
+        let native = crate::dsp_points::native_board(tx, pid, mid)
+            .await?
+            .is_some();
+        let table = if native && kind == "process" {
+            "process_points"
+        } else if native && kind == "forward" {
+            "transmit_points"
+        } else if kind == "process" {
             "signals"
         } else {
             "signal_bindings"
@@ -172,6 +179,14 @@ pub async fn apply(
         sqlx::query(&format!("UPDATE {table} t SET display_order=ordered.position FROM unnest($2::bigint[]) WITH ORDINALITY AS ordered(id,position) WHERE t.project_id=$1 AND t.id=ordered.id"))
             .bind(pid).bind(&ids).execute(&mut **tx).await?;
     } else {
+        if crate::dsp_points::native_board(tx, pid, mid)
+            .await?
+            .is_some()
+        {
+            return Err(AppError::bad(
+                "DSP 转发表保留显式通信偏移，仅支持显示顺序调整",
+            ));
+        }
         let by_id: BTreeMap<i64, &Value> =
             group.iter().map(|r| (topology::num(r, "id"), *r)).collect();
         let field_ids: Vec<i64> = ids

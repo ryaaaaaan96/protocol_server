@@ -30,6 +30,8 @@ pub const TABLES: &[&str] = &[
     "passthrough_routes",
     "platform_signals",
     "source_records",
+    "process_points",
+    "transmit_points",
 ];
 pub const VIEWS: &[&str] = &[
     "v_signals",
@@ -309,6 +311,8 @@ fn impact(before: &Value, after: &Value) -> Value {
         "boards",
         "device_contexts",
         "endpoints",
+        "process_points",
+        "transmit_points",
     ] {
         let key = |r: &Value| {
             if t == "v_passthrough_fields" {
@@ -354,6 +358,13 @@ fn impact(before: &Value, after: &Value) -> Value {
             }
             if r["model_id"].is_number() {
                 models.insert(num(r, "model_id"));
+            }
+            if matches!(table, "process_points" | "transmit_points") {
+                models.extend(
+                    crate::permissions::resources(g, table, r)
+                        .iter()
+                        .map(|scope| scope.model_id),
+                );
             }
             if table == "board_models" {
                 models.insert(num(r, "id"));
@@ -573,7 +584,12 @@ pub async fn commit(
     } else if c.entity == "project_config" {
         Some(json!({"config":before["project_config"]}))
     } else if crate::point_tables::is_point_entity(&c.entity) {
-        crate::point_tables::audit_before(&before, &c.entity, num(&row, "id"))
+        crate::point_tables::audit_before(
+            &before,
+            &c.entity,
+            num(&row, "id"),
+            num(&c.values, "model_id"),
+        )
     } else {
         find(&before, &c.entity, num(&row, "id")).cloned()
     };
@@ -584,6 +600,15 @@ pub async fn commit(
         Some(json!({"record":if c.operation == "delete" {Value::Null} else {row.clone()},"impact":effects,"merged":merged,"base_revision":c.revision})),
     ).await?;
     db::touch(&mut tx, pid).await?;
+    crate::dsp_points::history(
+        &mut tx,
+        pid,
+        u.id,
+        &format!("point.{}", c.operation),
+        &before,
+        &after,
+    )
+    .await?;
     sqlx::query("DELETE FROM change_previews WHERE id=$1")
         .bind(id)
         .execute(&mut *tx)

@@ -26,6 +26,8 @@ struct Manifest {
     // Project-relative source file, imported only by the explicit creation command.
     #[serde(skip_serializing_if = "Option::is_none")]
     workbook: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    workbook_boards: Vec<String>,
     // Optional portable, project-scoped PostgreSQL archive.
     #[serde(skip_serializing_if = "Option::is_none")]
     dump: Option<String>,
@@ -476,6 +478,31 @@ impl ProjectFiles {
             project_config::Config::parse(manifest.topology)
                 .map_err(|error| anyhow!("{}: {}", file.display(), error.1))?,
         )?;
+        if !manifest.workbook_boards.is_empty() {
+            ensure!(
+                manifest.workbook_boards == ["DSP"]
+                    && manifest.topology["board_types"]
+                        .as_array()
+                        .is_some_and(|types| types.iter().any(|t| t["code"] == "DSP"
+                            && t["model_code"] == "DSP"
+                            && t["point_storage"] == "native")),
+                "workbook_boards 当前只支持已配置 native 存储的 DSP 板卡"
+            );
+        }
+        if manifest.workbook.is_some()
+            && manifest.topology["board_types"]
+                .as_array()
+                .is_some_and(|types| {
+                    types
+                        .iter()
+                        .any(|t| t["model_code"] == "DSP" && t["point_storage"] == "native")
+                })
+        {
+            ensure!(
+                manifest.workbook_boards == ["DSP"],
+                "原生 DSP 工作簿必须配置 workbook_boards: [\"DSP\"]，避免导入其他板卡的旧格式数据"
+            );
+        }
         if let Some(workbook) = &manifest.workbook {
             workbook_path(&path, workbook)?;
         }
@@ -548,6 +575,7 @@ impl ProjectFiles {
             .map_err(|error| AppError::bad(format!("{error:#}")))?;
         if let Some(path) = project.dump {
             let payload = crate::project_dump::decode(&path, key).await?;
+            let before = crate::topology::snapshot(tx, pid, true).await?;
             let restored = crate::project_dump::replace(tx, pid, &payload).await?;
             project_config::apply(tx, pid, &project.manifest.topology).await?;
             let graph = crate::topology::snapshot(tx, pid, true).await?;
@@ -555,6 +583,8 @@ impl ProjectFiles {
             if report["errors"].as_u64().unwrap_or(0) != 0 {
                 return Err(AppError::bad("项目 Dump 数据校验失败，未创建项目"));
             }
+            crate::dsp_points::history(tx, pid, user.id, "project.dump.import", &before, &graph)
+                .await?;
             let bytes = std::fs::read(&path).map_err(|_| AppError::bad("读取项目 Dump 失败"))?;
             let hash = hex::encode(Sha256::digest(bytes));
             let filename = path
@@ -579,6 +609,37 @@ impl ProjectFiles {
             return Err(AppError::bad("工作簿不能超过 15 MiB"));
         }
         let hash = hex::encode(Sha256::digest(&bytes));
+        if !project.manifest.workbook_boards.is_empty() {
+            if project.manifest.workbook_boards != ["DSP"] {
+                return Err(AppError::bad(
+                    "当前定向工作簿导入仅支持 workbook_boards: [\"DSP\"]",
+                ));
+            }
+            let data =
+                tokio::task::spawn_blocking(move || crate::dsp_workbook::parse_workbook(bytes))
+                    .await
+                    .map_err(|_| AppError::bad("DSP 工作簿解析失败"))??;
+            let before = crate::topology::snapshot(tx, pid, true).await?;
+            crate::dsp_points::import(tx, pid, &data).await?;
+            let after = crate::topology::snapshot(tx, pid, true).await?;
+            let report = crate::topology_validation::validate(&after);
+            if report["errors"].as_u64().unwrap_or(0) != 0 {
+                let mut error = AppError::bad("DSP 点表校验失败，项目未创建");
+                error.2 = Some(json!({"validation":report}));
+                return Err(error);
+            }
+            crate::dsp_points::history(tx, pid, user.id, "workbook.import", &before, &after)
+                .await?;
+            let filename = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("points.xlsx");
+            sqlx::query("INSERT INTO imports(project_id,filename,sha256,report,created_by) VALUES($1,$2,$3,$4,$5)")
+                .bind(pid).bind(filename).bind(&hash).bind(&report).bind(user.id).execute(&mut **tx).await?;
+            return Ok(
+                json!({"filename":filename,"sha256":hash,"boards":["DSP"],"process_count":data.process.len(),"transmit_count":data.transmit.len(),"validation":report}),
+            );
+        }
         let data = tokio::task::spawn_blocking(move || importer::parse(bytes))
             .await
             .map_err(|_| AppError::bad(format!("解析工作簿 {} 失败", path.display())))?
@@ -882,6 +943,75 @@ mod tests {
         assert_eq!(first, files.topology_source("alpha").unwrap());
         assert_eq!(first["sha256"].as_str().unwrap().len(), 64);
         assert_eq!(first["key"], "alpha");
+    }
+
+    #[test]
+    fn native_dsp_workbook_requires_explicit_board_selection() {
+        let fixture = Fixture::new();
+        fixture.project("alpha", "原生 DSP");
+        let mut manifest = fixture.read("alpha/project.json");
+        manifest["topology"]["board_types"][0]["model_code"] = json!("DSP");
+        manifest["topology"]["board_types"][0]["point_storage"] = json!("native");
+        manifest["topology"]["board_types"][0]["point_groups"] =
+            json!([{"code":"LOCAL","name":"本地内部数据"}]);
+        fixture.write("alpha/project.json", &manifest);
+        // Empty native projects do not require an Excel import selector.
+        assert!(fixture.load().is_ok());
+
+        manifest["workbook"] = json!("source.xlsx");
+        // Configuration loading checks paths; it does not parse workbook bytes.
+        std::fs::write(fixture.0.join("alpha/source.xlsx"), b"source fixture").unwrap();
+        fixture.write("alpha/project.json", &manifest);
+        assert!(
+            fixture
+                .error()
+                .contains("原生 DSP 工作簿必须配置 workbook_boards")
+        );
+
+        manifest["workbook_boards"] = json!([]);
+        fixture.write("alpha/project.json", &manifest);
+        assert!(
+            fixture
+                .error()
+                .contains("原生 DSP 工作簿必须配置 workbook_boards")
+        );
+
+        manifest["workbook_boards"] = json!(["DSP"]);
+        fixture.write("alpha/project.json", &manifest);
+        let files = fixture.load().unwrap();
+        let loaded = files.manifest("alpha").unwrap().unwrap();
+        assert_eq!(loaded["workbook_boards"], json!(["DSP"]));
+        assert_eq!(loaded["workbook"], "source.xlsx");
+    }
+
+    #[test]
+    fn workbook_board_selector_rejects_unsupported_lists_and_legacy_dsp() {
+        let fixture = Fixture::new();
+        fixture.project("alpha", "原生 DSP");
+        let mut manifest = fixture.read("alpha/project.json");
+        manifest["topology"]["board_types"][0]["model_code"] = json!("DSP");
+        manifest["topology"]["board_types"][0]["point_storage"] = json!("native");
+        manifest["topology"]["board_types"][0]["point_groups"] =
+            json!([{"code":"LOCAL","name":"本地内部数据"}]);
+        manifest["workbook"] = json!("source.xlsx");
+        std::fs::write(fixture.0.join("alpha/source.xlsx"), b"source fixture").unwrap();
+        for selection in [json!(["UPM"]), json!(["DSP", "UPM"]), json!(["DSP", "DSP"])] {
+            manifest["workbook_boards"] = selection;
+            fixture.write("alpha/project.json", &manifest);
+            assert!(fixture.error().contains("workbook_boards 当前只支持"));
+        }
+        manifest["workbook_boards"] = json!(["DSP"]);
+        let board = manifest["topology"]["board_types"][0]
+            .as_object_mut()
+            .unwrap();
+        board.remove("point_storage");
+        board.remove("point_groups");
+        fixture.write("alpha/project.json", &manifest);
+        assert!(
+            fixture
+                .error()
+                .contains("workbook_boards 当前只支持已配置 native")
+        );
     }
 
     #[test]

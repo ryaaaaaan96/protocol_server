@@ -1,50 +1,95 @@
 {
   "version": 1,
   "enabled": true,
-  "label": "转发点表",
-  "description": "将处理点提供给对外协议；同一处理点可关联多种协议和多个地址。",
+  "label": "DSP UPP转发表",
+  "description": "来源为工作簿“UPM-DSP采集数据” sheet，本表维护 DSP 对外提供的 UPP 字段。同一内部点允许多条映射；UPM 侧采集配置暂不处理。",
   "columns": [
     "signal_name",
-    "context_name",
-    "dev_id",
     "resolved_sig_id",
-    "endpoint_name",
-    "protocol",
-    "transport",
-    "field_name",
+    "enum_name",
+    "name",
     "upp_model",
     "effective_address",
+    "data_type",
+    "byte_length",
     "effective_type",
     "effective_length",
+    "scale",
+    "conversion",
     "access",
-    "scale"
+    "byte_order",
+    "enabled"
   ],
   "editor": [
-    "endpoint_id",
-    "context_id",
-    "signal_id",
-    "field_id"
+    "process_point_id",
+    "endpoint_key",
+    "name",
+    "upp_model",
+    "address",
+    "wire_type",
+    "wire_length",
+    "scale",
+    "access",
+    "byte_order",
+    "conversion",
+    "enabled"
   ],
   "ordering": {
     "mode": "display",
-    "group_by": [
-      "endpoint_id",
-      "upp_model",
-      "bank"
-    ]
+    "group_by": []
   },
   "inline": {
-    "signal_name": "signal_id",
-    "context_name": "context_id",
-    "endpoint_name": "endpoint_id",
-    "field_name": "field_id"
+    "name": "name",
+    "upp_model": "upp_model",
+    "scale": "scale",
+    "access": "access",
+    "byte_order": "byte_order",
+    "conversion": "conversion",
+    "enabled": "enabled",
+    "signal_name": "process_point_id",
+    "effective_address": "address",
+    "effective_type": "wire_type",
+    "effective_length": "wire_length"
   },
   "fields": {
+    "signal_name": {
+      "label": "DSP 内部点"
+    },
+    "process_point_id": {
+      "label": "DSP 内部点",
+      "reference": "signals",
+      "type": "number",
+      "hint": "通过固定记录 ID 关联，sigID 和枚举随内部点更新。"
+    },
     "resolved_sig_id": {
       "label": "sigID"
     },
     "enum_name": {
-      "label": "枚举"
+      "label": "内部枚举"
+    },
+    "endpoint_key": {
+      "label": "输出接口",
+      "default": "UPP_SERVICE",
+      "options": [
+        "UPP_SERVICE"
+      ]
+    },
+    "name": {
+      "label": "转发字段名称"
+    },
+    "upp_model": {
+      "label": "UPP 模型",
+      "type": "number",
+      "default": 0
+    },
+    "effective_address": {
+      "label": "实际字节偏移"
+    },
+    "address": {
+      "label": "字节偏移",
+      "type": "number",
+      "default": 6,
+      "hint": "UPP 帧头占 6 字节。拖动仅调整显示顺序，不会重算偏移。"
     },
     "data_type": {
       "label": "内部类型"
@@ -52,97 +97,69 @@
     "byte_length": {
       "label": "内部字节数"
     },
-    "unit": {
-      "label": "单位"
-    },
-    "default_value": {
-      "label": "默认值覆盖",
-      "nullable": true,
-      "hint": "留空继承数据定义；表格展示生效值。",
-      "column_label": "默认值"
-    },
-    "min_value": {
-      "label": "下限覆盖",
-      "nullable": true,
-      "hint": "留空继承数据定义；表格展示生效值。",
-      "column_label": "下限"
-    },
-    "max_value": {
-      "label": "上限覆盖",
-      "nullable": true,
-      "hint": "留空继承数据定义；表格展示生效值。",
-      "column_label": "上限"
-    },
-    "signal_name": {
-      "label": "处理点"
-    },
-    "context_name": {
-      "label": "逻辑设备"
-    },
-    "dev_id": {
-      "label": "dev_id"
-    },
-    "endpoint_name": {
-      "label": "协议端点"
-    },
-    "protocol": {
-      "label": "协议"
-    },
-    "transport": {
-      "label": "传输方式"
-    },
-    "field_name": {
-      "label": "协议字段"
-    },
-    "upp_model": {
-      "label": "UPP 模型"
-    },
-    "effective_address": {
-      "label": "协议地址 / 偏移"
-    },
     "effective_type": {
       "label": "通信类型"
+    },
+    "wire_type": {
+      "label": "通信类型",
+      "options": [
+        "U8",
+        "U16",
+        "S16",
+        "U32",
+        "S32",
+        "F32",
+        "STRING"
+      ],
+      "default": "F32"
     },
     "effective_length": {
       "label": "通信字节数"
     },
+    "wire_length": {
+      "label": "通信字节数",
+      "type": "number",
+      "default": 4
+    },
     "scale": {
-      "label": "协议系数"
-    },
-    "endpoint_id": {
-      "label": "协议端点",
-      "reference": "endpoints",
-      "type": "number"
-    },
-    "context_id": {
-      "label": "逻辑设备",
-      "reference": "contexts",
-      "type": "number"
-    },
-    "signal_id": {
-      "label": "本地内部信号",
-      "reference": "signals",
-      "type": "number"
-    },
-    "field_id": {
-      "label": "协议字段",
-      "reference": "fields",
-      "type": "number"
-    },
-    "address_length": {
-      "label": "地址长度"
-    },
-    "register_type": {
-      "label": "寄存器区"
+      "label": "协议系数",
+      "type": "number",
+      "default": 1
     },
     "access": {
-      "label": "读写属性"
+      "label": "读写属性",
+      "options": [
+        "RO",
+        "RW",
+        "WO"
+      ],
+      "default": "RO"
     },
     "byte_order": {
-      "label": "字节序"
+      "label": "字节序",
+      "options": [
+        "0",
+        "1",
+        "2",
+        "3"
+      ],
+      "default": 0,
+      "type": "number"
     },
-    "port": {
-      "label": "端口"
+    "conversion": {
+      "label": "数据转换",
+      "options": [
+        "identity",
+        "fixed_point",
+        "array_bytes"
+      ],
+      "default": "identity",
+      "hint": "identity：直接映射；fixed_point：定点缩放；array_bytes：数组字节映射。"
+    },
+    "enabled": {
+      "label": "启用",
+      "type": "boolean",
+      "default": true
     }
   }
 }
