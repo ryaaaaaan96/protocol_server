@@ -14,6 +14,13 @@ const points = [
   { id: 1, project_id: 1, board_key: "DSP", group_key: "LOCAL", name: "母线电压", enum_name: "DC_BUS_VOLTAGE", sig_id: 4097, internal_type: "F32", element_count: 1, byte_length: 4, unit: "V", default_value: "0", min_value: "0", max_value: "1000", flags: "0", callback: "NULL", process_enabled: true, boot_restore: false, manual_restore: false, notes: null },
   { id: 2, project_id: 1, board_key: "DSP", group_key: "LOCAL", name: "输出电流", enum_name: "OUTPUT_CURRENT", sig_id: 4098, internal_type: "U16", element_count: 1, byte_length: 2, unit: "A", default_value: "0", min_value: "0", max_value: "100", flags: "0", callback: "NULL", process_enabled: true, boot_restore: false, manual_restore: false, notes: null },
 ];
+for (const [index, point] of points.entries()) Object.assign(point, {
+  variable_name: index ? "OutputCurrent" : "DcBusVoltage", sheet_type: `Sys_${point.internal_type}`,
+  enum_table: index ? "" : "bit0:有效\nbit1:故障", display_digits: 0, type_length: point.byte_length,
+  access: "RO", ram: "N", flash: "Y", eeprom: "N", calibration: "Y", structure: "PARAM_MONITOR_DATA_STR",
+  cpu: "CPU2", precision: 1, sheet_data_type: index ? "U16" : "S32", upload_level: "2：UPM进行轮询",
+  category: "系统参数1", sheet_upp_model: 1,
+});
 const mappings = [3, 4].map((id, index) => ({ id, project_id: 1, board_key: "DSP", process_point_id: 1, endpoint_key: "UPP_SERVICE", name: `电压转发 ${index + 1}`, upp_model: 5 + index, address: 6, wire_type: "S32", wire_length: 4, scale: 0.001, access: "RO", byte_order: 0, conversion: "fixed_point", enabled: true }));
 const processRows = points.map(point => ({ ...point, edit_values: { ...point }, data_type: point.internal_type, group_name: "DSP 内部数据", resolved_sig_id: point.sig_id, forward_count: point.id === 1 ? 2 : 0 }));
 const forwardRows = mappings.map(mapping => ({ ...mapping, edit_values: { ...mapping }, group_key: "LOCAL", signal_name: points[0].name, enum_name: points[0].enum_name, data_type: "F32", byte_length: 4, resolved_sig_id: 4097, effective_address: mapping.address, effective_type: mapping.wire_type, effective_length: mapping.wire_length }));
@@ -56,7 +63,15 @@ try {
     const request = route.request(), path = new URL(request.url()).pathname;
     if (request.method() !== "GET") {
       requests.push({ path, body: request.postDataJSON() });
-      if (path.endsWith("/preview")) return route.fulfill({ json: preview });
+      if (path.endsWith("/preview")) {
+        const payload = request.postDataJSON(), values = payload.rows?.[0]?.values || payload.values || {};
+        if (values.ram === "Y") {
+          const before = { id: 1, board_key: "DSP", name: "母线电压", enum_name: "DC_BUS_VOLTAGE", internal_type: "F32", metadata: { source_variable: "DcBusVoltage", ram: "N", cpu: "CPU2", enum_table: "bit0:有效\nbit1:故障" } };
+          const after = { ...before, internal_type: values.sheet_type?.replace("Sys_", "") || before.internal_type, metadata: { ...before.metadata, ram: "Y", ...(values.enum_table !== undefined ? { enum_table: values.enum_table } : {}) } };
+          return route.fulfill({ json: { ...preview, impact: { count: 1, changes: [{ entity: "process_points", key: 1, before, after }] } } });
+        }
+        return route.fulfill({ json: preview });
+      }
       throw new Error(`Unexpected mutation ${path}`);
     }
     if (path.endsWith("/point-tables/schema")) return route.fulfill({ json: schema });
@@ -67,6 +82,9 @@ try {
     }
     throw new Error(`Unexpected request ${path}`);
   });
+  await page.addInitScript(() => localStorage.setItem("point-columns:1:DSP:process", JSON.stringify([
+    { key: "enum_name", visible: true, frozen: true }, { key: "name", visible: false, frozen: false },
+  ])));
   await page.goto("/__native_test");
   const rows = () => page.locator(".point-table tbody tr");
   const cell = (key, index = 0) => rows().nth(index).locator(`[data-column-key="${key}"]`);
@@ -74,6 +92,18 @@ try {
   await expect(page.getByRole("group", { name: "点表分组", exact: true })).toContainText("LOCAL · DSP 内部数据");
   await expect(page.getByRole("tab", { name: /^DSP内部数据/ })).toContainText("2");
   await expect(page.getByRole("button", { name: "选择 DSP 板卡", exact: true })).toContainText("2 个内部点");
+  await expect(cell("variable_name")).toHaveText("DcBusVoltage");
+  await expect(cell("sheet_type")).toHaveText("Sys_F32");
+  await expect(cell("enum_table")).toHaveText("bit0:有效\nbit1:故障");
+  await expect(cell("notes")).toHaveText("");
+  await expect(cell("type_length")).toHaveAttribute("aria-readonly", "true");
+  await expect(page.getByPlaceholder("搜索名称、变量、类型或分类…")).toBeVisible();
+  await expect(page.locator('.point-column-label').filter({ hasText: /^DataType/ })).toHaveText("DataType\nLength");
+  const search = page.getByPlaceholder("搜索名称、变量、类型或分类…");
+  await search.fill("bit1:故障");
+  await expect(rows()).toHaveCount(1);
+  await search.clear();
+  await expect(rows()).toHaveCount(2);
   await checkPointColumns(page, { data: tables.process, forward: tables.forward });
   await checkPointCopy(page, tables.process);
   assert.equal(requests.length, 0, "column views and copying never submit data");
@@ -91,22 +121,75 @@ try {
   await expect(rows().first()).toHaveAttribute("data-row-id", "2");
   await page.getByRole("button", { name: "取消修改", exact: true }).click();
   await cell("max_value").dblclick();
-  await page.getByLabel("编辑 上限", { exact: true }).fill("");
-  await page.getByLabel("编辑 上限", { exact: true }).press("Enter");
-  await expect(cell("max_value")).toHaveText("—");
+  await page.getByLabel(`编辑 ${processDefinition.fields.max_value.label}`, { exact: true }).fill("");
+  await page.getByLabel(`编辑 ${processDefinition.fields.max_value.label}`, { exact: true }).press("Enter");
+  await expect(cell("max_value")).toHaveText("");
   await page.getByRole("button", { name: "检查", exact: true }).click();
   await expect(page.locator("dialog")).toContainText("草稿检查结果");
   assert.equal(requests.at(-1).body.rows[0].values.max_value, null);
   await page.getByRole("button", { name: "继续编辑", exact: true }).click();
   await page.getByRole("button", { name: "放弃修改", exact: true }).click();
+  await cell("sheet_type").dblclick();
+  await page.getByLabel("编辑 DateType", { exact: true }).selectOption("Sys_U16");
+  await expect(cell("type_length")).toHaveText("2");
+  await expect(cell("sheet_data_type")).toHaveText("U16");
+  await cell("element_count").dblclick();
+  await page.getByLabel("编辑 ArrayCnt", { exact: true }).fill("15");
+  await page.getByLabel("编辑 ArrayCnt", { exact: true }).press("Enter");
+  await expect(cell("byte_length")).toHaveText("30");
+  await expect(cell("sheet_data_type")).toHaveText("STRING");
+  await expect(cell("max_value")).toHaveAttribute("aria-readonly", "false");
+  await cell("display_digits").dblclick();
+  await page.getByLabel("编辑 DisplayDigit", { exact: true }).fill("3");
+  await page.getByLabel("编辑 DisplayDigit", { exact: true }).press("Enter");
+  await expect(cell("precision")).toHaveText("0.001");
+  await cell("category").dblclick();
+  await page.getByLabel("编辑 数据分类", { exact: true }).selectOption("任务级观测量");
+  await expect(cell("sheet_upp_model")).toHaveText("99");
+  await cell("ram").dblclick();
+  await page.getByLabel("编辑 RAM", { exact: true }).selectOption("Y");
+  await cell("enum_table").dblclick();
+  const multiline = page.getByLabel("编辑 EnumTab", { exact: true });
+  await expect(multiline).toHaveJSProperty("tagName", "TEXTAREA");
+  await multiline.fill("bit0:修改");
+  await multiline.press("End");
+  await multiline.press("Shift+Enter");
+  await multiline.pressSequentially("bit1:新增");
+  await multiline.press("Enter");
+  await expect(cell("enum_table")).toHaveText("bit0:修改\nbit1:新增");
+  await page.getByRole("button", { name: "检查", exact: true }).click();
+  await expect(page.locator("dialog .impact-list")).toContainText("RAM：N → Y");
+  await expect(page.locator("dialog .impact-list")).toContainText("DateType：Sys_F32 → Sys_U16");
+  await expect(page.locator("dialog .impact-list")).not.toContainText("[object Object]");
+  await expect(page.locator("dialog .impact-list")).not.toContainText("metadata");
+  const sheetChanges = requests.at(-1).body.rows[0].values;
+  assert.equal(sheetChanges.sheet_type, "Sys_U16");
+  assert.equal(sheetChanges.element_count, 15);
+  assert.equal(sheetChanges.enum_table, "bit0:修改\nbit1:新增");
+  assert.equal(sheetChanges.display_digits, 3);
+  assert.equal(sheetChanges.category, "任务级观测量");
+  assert.equal(sheetChanges.ram, "Y");
+  for (const key of ["byte_length", "precision", "sheet_data_type", "sheet_upp_model", "internal_type", "sig_id"]) assert.ok(!(key in sheetChanges));
+  await page.getByRole("button", { name: "继续编辑", exact: true }).click();
+  await page.getByRole("button", { name: "放弃修改", exact: true }).click();
+  await openRowAction(page, rows().first());
+  await page.getByLabel("RAM", { exact: true }).selectOption("Y");
+  await page.getByRole("button", { name: "检查关联影响", exact: true }).click();
+  await expect(page.locator("dialog .impact-list")).toContainText("RAM：N → Y");
+  await expect(page.locator("dialog .impact-list")).not.toContainText("[object Object]");
+  await page.locator("dialog").getByRole("button", { name: "关闭", exact: true }).last().click();
   await page.getByRole("button", { name: "新建DSP内部数据", exact: true }).click();
-  await page.getByLabel("信号名称", { exact: true }).fill("新增内部点");
-  await page.getByLabel("枚举", { exact: true }).fill("NEW_INTERNAL_POINT");
+  await page.getByLabel(processDefinition.fields.name.label, { exact: true }).fill("新增内部点");
+  await page.getByLabel(processDefinition.fields.variable_name.label, { exact: true }).fill("NewInternalPoint");
   await page.getByRole("button", { name: "检查关联影响", exact: true }).click();
   await expect(page.locator("dialog")).toContainText("关联检查通过");
   const processCreate = requests.at(-1).body;
   assert.equal(processCreate.values.group_key, "LOCAL", JSON.stringify(processCreate));
   assert.equal(processCreate.values.element_count, 1);
+  assert.equal(processCreate.values.variable_name, "NewInternalPoint");
+  assert.equal(processCreate.values.sheet_type, "Sys_F32");
+  assert.ok(!("enum_name" in processCreate.values));
+  assert.ok(!("sig_id" in processCreate.values));
   assert.ok(!("group_id" in processCreate.values));
   assert.ok(!("data_item_id" in processCreate.values));
   await page.locator("dialog").getByRole("button", { name: "关闭", exact: true }).last().click();

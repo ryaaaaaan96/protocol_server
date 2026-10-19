@@ -4,7 +4,7 @@ import { api, revisionConflict, type Row } from "../api";
 import {
   choiceLabel,
   pointChoices,
-  pointText,
+  pointChangeSummary,
   pointIsString,
   type PointTableData,
 } from "../domain/pointTables";
@@ -158,19 +158,7 @@ async function commit() {
   }
 }
 function delta(change: Row): string {
-  const a = change.after || {},
-    b = change.before || {};
-  return Object.keys({ ...b, ...a })
-    .filter(
-      (k) =>
-        !["raw_json", "project_id"].includes(k) &&
-        JSON.stringify(a[k]) !== JSON.stringify(b[k]),
-    )
-    .map(
-      (k) =>
-        `${def.fields[k]?.column_label || def.fields[k]?.label || k}: ${pointText(b[k])} → ${pointText(a[k])}`,
-    )
-    .join("；");
+  return pointChangeSummary(change, def.fields);
 }
 </script>
 <template>
@@ -227,13 +215,21 @@ function delta(change: Row): string {
               :disabled="!canWrite || busy"
               @change="set(key, $event)"
             />
+            <textarea
+              v-else-if="def.fields[key].multiline"
+              :aria-label="def.fields[key].label"
+              :value="values[key] ?? ''"
+              :disabled="!canWrite || busy"
+              rows="4"
+              @input="set(key, $event)"
+            />
             <input
               v-else
               :type="def.fields[key].type === 'number' ? 'number' : 'text'"
               :step="def.fields[key].type === 'number' ? 'any' : undefined"
               :aria-label="def.fields[key].label"
               :value="values[key] ?? ''"
-              :required="['name', 'enum_name'].includes(key)"
+              :required="['name', 'enum_name', 'variable_name'].includes(key)"
               :disabled="!canWrite || busy"
               @input="set(key, $event)"
             />

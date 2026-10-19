@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref } from "vue";
 import { api, revisionConflict, type Row } from "../api";
-import { pointText, type PointField } from "../domain/pointTables";
+import { pointChangeSummary, type PointField } from "../domain/pointTables";
 import Modal from "./Modal.vue";
 const props = defineProps<{pid:number; preview:Row; title:string; canWrite:boolean; checkOnly?:boolean; fields?:Record<string,PointField>}>();
 const emit = defineEmits<{close:[]; done:[merged:boolean]; error:[message:string]; conflict:[]}>();
@@ -20,9 +20,7 @@ async function commit() {
   finally { busy.value = false; }
 }
 function changes(change:Row) {
-  const before = change.before || {}, after = change.after || {};
-  return Object.keys({...before,...after}).filter(k => !["project_id","raw_json"].includes(k) && JSON.stringify(before[k]) !== JSON.stringify(after[k]))
-    .map(k => `${props.fields?.[k]?.column_label || props.fields?.[k]?.label || ({display_order:"显示顺序",ordinal:"协议排列",effective_address:"协议地址"} as Row)[k] || k}：${pointText(before[k])} → ${pointText(after[k])}`).join("；");
+  return pointChangeSummary(change, props.fields);
 }
 </script>
 <template>

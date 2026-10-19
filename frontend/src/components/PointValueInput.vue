@@ -12,7 +12,7 @@ const choices = computed(() => pointChoices(props.data, props.fieldKey, props.va
 watch(() => props.autofocus, async (active) => {
   if (active) {
     await nextTick();
-    root.value?.querySelector<HTMLElement>("input,select")?.focus();
+    root.value?.querySelector<HTMLElement>("input,select,textarea")?.focus();
   }
 }, { immediate: true });
 function set(event: Event) {
@@ -33,6 +33,7 @@ function set(event: Event) {
       <option v-for="option in field.options" :key="option" :value="option">{{ option }}</option>
     </select>
     <input v-else-if="field.type === 'boolean'" :disabled="disabled" type="checkbox" :aria-label="field.label" :checked="!!values[fieldKey]" @change="set" />
+    <textarea v-else-if="field.multiline" :disabled="disabled" :aria-label="field.label" :value="values[fieldKey] ?? ''" rows="4" @input="set" />
     <input v-else :disabled="disabled" :type="field.type === 'number' ? 'number' : 'text'" :step="field.type === 'number' ? 'any' : undefined" :aria-label="field.label" :value="values[fieldKey] ?? ''" :placeholder="field.nullable ? '留空表示未指定' : ''" @input="set" />
     <small v-if="field.hint">{{ field.hint }}</small>
   </div>

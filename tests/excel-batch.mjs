@@ -24,13 +24,21 @@ export async function checkExcelBatch({client, equal, ok, fixtureKey}) {
       await book.xlsx.writeFile(filename);
     };
     const processFile=path.join(temporary,"process.xlsx"), processReport=path.join(temporary,"process-report.json");
-    await populate(processFile,"process",{group_key:"LOCAL",name:"Excel电压",enum_name:"EXCEL_VOLTAGE",internal_type:"F32",element_count:1,unit:"V",min_value:"0",max_value:"1000",default_value:"0"});
+    await populate(processFile,"process",{name:"Excel电压",variable_name:"ExcelVoltage",sheet_type:"Sys_F32",element_count:1,unit:"V",min_value:"0.0000",max_value:"1000.0000",default_value:"0.0000",display_digits:4,upload_level:"1：上传至UPM",category:"控制参数设置",enum_table:"0：关闭\n1：开启"});
     ok((await cli([...common,"--kind","process","--file",processFile])).includes("仅完成预览"));
     equal((await client.call(`${url}/topology`)).process_points.length,0);
     ok((await cli([...common,"--kind","process","--file",processFile,"--commit","--report",processReport])).includes("添加成功"));
     const processResult=JSON.parse(await fs.readFile(processReport,"utf8"));
     const point=processResult.record.rows[0].record;
     equal(point.internal_type,"F32");equal(point.byte_length,4);equal(point.group_key,"LOCAL");
+    equal(point.enum_name,"EXCEL_VOLTAGE");equal(point.sig_id,null);
+    equal(point.min_value,"0.0000");equal(point.max_value,"1000.0000");
+    equal(point.metadata.source_variable,"ExcelVoltage");equal(point.metadata.display_digits,4);
+    equal(point.metadata.ram,"N");equal(point.metadata.flash,"Y");equal(point.metadata.eeprom,"N");equal(point.metadata.calibration,"Y");
+    const sheetTable=await client.call(`${url}/boards/DSP/point-tables/process`);
+    equal(sheetTable.rows[0].variable_name,"ExcelVoltage");equal(sheetTable.rows[0].sheet_type,"Sys_F32");
+    for(const field of ["cpu","access","ram","flash","eeprom","calibration"])equal(point.metadata[field],sheetTable.definition.fields[field].default);
+    equal(point.flags,"0"); // Hidden canonical defaults remain the server's responsibility.
     const references=path.join(temporary,"references.json");
     await cli([...common,"--kind","forward","--references",references]);
     const refs=JSON.parse(await fs.readFile(references,"utf8"));
@@ -49,6 +57,6 @@ export async function checkExcelBatch({client, equal, ok, fixtureKey}) {
     ok(rejected,"Duplicate Excel points must fail atomically");
     equal((await client.call(`${url}/topology`)).process_points.length,1);
     equal((await client.call(`${url}/edit-lock`)).locked,false);
-    console.log("PASS: Node.js Excel preview/commit, JSON board references, decimal scale, explicit conversion and duplicate rollback");
+    console.log("PASS: Node.js DSP sheet Excel preview/commit without sigID, metadata, JSON board references, decimal scale, explicit conversion and duplicate rollback");
   } finally { await fs.rm(temporary,{recursive:true,force:true}); }
 }

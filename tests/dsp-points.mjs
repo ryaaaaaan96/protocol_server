@@ -7,6 +7,7 @@ import path from "node:path";
 import os from "node:os";
 import { createHash } from "node:crypto";
 import { exportProject } from "../scripts/export-project.mjs";
+import { checkDspSheet } from "./dsp-sheet.mjs";
 
 function folderFiles(directory) {
   const files = new Map();
@@ -118,6 +119,7 @@ export async function checkDspPoints({ client, engineer, viewer, engineerId, vie
     equal(product.byte_length, 30);
     ok(!Object.hasOwn(frequencyMapping, "poll_interval"));
     equal((await read("process", viewer)).rows.length, 552);
+    await checkDspSheet({ client, engineer, url, read, graph, preview, commit, edit, rejectEdit, history, equal, ok });
 
     // JSON organization and endpoint keys are the only ownership catalog.
     equal(internal.board_key, "DSP");

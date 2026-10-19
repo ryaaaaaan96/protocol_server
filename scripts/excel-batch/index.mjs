@@ -2,7 +2,7 @@
 // Example client: Excel -> JSON rows -> batch preview -> explicit atomic commit.
 import { parseArgs } from "node:util";
 import { writeFile } from "node:fs/promises";
-import { readRows, writeTemplate } from "./workbook.mjs";
+import { readRows, writeTemplate, withDefinitionDefaults } from "./workbook.mjs";
 
 const help = `点表 Excel 批量追加示例（Node.js 22+）
 先安装依赖：npm ci --prefix scripts/excel-batch
@@ -15,9 +15,11 @@ const help = `点表 Excel 批量追加示例（Node.js 22+）
 --url         服务地址，默认 http://127.0.0.1:8080（也接受 /api 结尾）
 --sheet       工作表名，默认等于 --kind；仅处理该工作表
 --report      将预览/提交结果写入 JSON 文件（不会覆盖已有文件）
---kind        process（DSP 内部数据）、forward（转发）
+--kind        process（DSP 内部数据示例）、forward（转发）
 
 登录：环境变量 PROTOCOL_USERNAME、PROTOCOL_PASSWORD，或 PROTOCOL_SESSION。
+process 模板以 DSP内部数据 sheet 的可写字段为准，不含 sigID；其他板卡以各自配置为准。
+长度、精度、数据类型及 UPP 模型号由服务端计算；转发协议在 forward 中单独配置。
 预览不保存业务数据；--commit 会预览并提交一次，不自动重试、覆盖或拆批。
 脚本会申请项目编辑权；他人正在编辑时会停止，预览结束或提交成功后释放。
 所有引用 ID 必须已存在；单批 1～200 行。详情见 docs/batch-add.md。`;
@@ -112,7 +114,8 @@ async function main() {
       renewal = renewal.then(() => api(`/projects/${pid}/edit-lock/renew`, "POST", {})).catch(error => { leaseError = error; });
     }, 30000);
     const current = await api(tablePath);
-    const preview = await api(`${tablePath}/batch/preview`, "POST", { revision: current.revision, rows });
+    const preparedRows = withDefinitionDefaults(rows, current.definition);
+    const preview = await api(`${tablePath}/batch/preview`, "POST", { revision: current.revision, rows: preparedRows });
     if (!preview.allowed) {
       if (reportHandle) await reportHandle.writeFile(JSON.stringify({ stage: "preview", ...preview }, null, 2));
       throw new Error(`批量校验未通过，业务数据未保存：\n${issues(preview)}`);

@@ -247,10 +247,10 @@ export function usePointGrid(options: Options) {
     options.error("");
     await nextTick();
     const element = table.value?.querySelector<
-      HTMLInputElement | HTMLSelectElement
+      HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement
     >(".point-cell-editor");
     element?.focus();
-    if (element instanceof HTMLInputElement) {
+    if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
       if (replace === undefined) element.select();
       else
         element.setSelectionRange(element.value.length, element.value.length);
@@ -395,6 +395,7 @@ export function usePointGrid(options: Options) {
       event.preventDefault();
       cancelEditor();
     } else if (event.key === "Enter") {
+      if (event.shiftKey && event.target instanceof HTMLTextAreaElement) return;
       event.preventDefault();
       travel(event.shiftKey ? -1 : 1, 0);
     } else if (event.key === "Tab") {
@@ -717,6 +718,7 @@ export function usePointGrid(options: Options) {
             "group_key",
             "endpoint_key",
             "internal_type",
+            "sheet_type",
           ].includes(key)
             ? 0
             : 1;

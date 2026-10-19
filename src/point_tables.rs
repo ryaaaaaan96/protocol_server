@@ -41,6 +41,9 @@ fn keys(csv: &str) -> BTreeSet<&str> {
 fn schema_writable(kind: &str) -> BTreeSet<&str> {
     match kind {
         "process" => keys(PROCESS)
+            .union(&keys(crate::dsp_sheet::EDIT_FIELDS))
+            .copied()
+            .collect::<BTreeSet<_>>()
             .union(&keys(RANGE))
             .copied()
             .collect::<BTreeSet<_>>()
@@ -57,6 +60,9 @@ fn schema_writable(kind: &str) -> BTreeSet<&str> {
 pub(crate) fn writable(kind: &str) -> BTreeSet<&str> {
     match kind {
         "process" => keys("name,enum_name,sig_id,internal_type,flags,callback,process_enabled")
+            .union(&keys(crate::dsp_sheet::EDIT_FIELDS))
+            .copied()
+            .collect::<BTreeSet<_>>()
             .union(&keys(RANGE))
             .copied()
             .collect::<BTreeSet<_>>()
@@ -73,6 +79,9 @@ fn readable(kind: &str) -> BTreeSet<&str> {
     );
     let extra = if kind == "process" {
         keys("group_name,contexts,collection_count,forward_count,range_inherited")
+            .union(&keys(crate::dsp_sheet::READ_FIELDS))
+            .copied()
+            .collect()
     } else {
         keys(
             "signal_name,field_name,context_name,dev_id,endpoint_name,protocol,transport,port,upp_model,effective_address,address_length,effective_type,effective_length,register_type,access,scale,byte_order,default_value,min_value,max_value",

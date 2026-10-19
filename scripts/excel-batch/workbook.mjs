@@ -2,21 +2,36 @@ import ExcelJS from "exceljs";
 import { stat, writeFile } from "node:fs/promises";
 
 export const columns = {
-  process: ["group_key", "name", "enum_name", "sig_id", "internal_type", "element_count", "unit", "flags", "callback", "process_enabled", "default_value", "min_value", "max_value", "boot_restore", "manual_restore", "notes"],
+  // This offline example follows the DSP internal worksheet. Other boards may
+  // define a different set of editable fields in their own process.json.
+  process: ["name", "variable_name", "sheet_type", "enum_table", "display_digits", "element_count", "default_value", "max_value", "min_value", "unit", "access", "ram", "flash", "eeprom", "calibration", "structure", "cpu", "upload_level", "category", "notes"],
   forward: ["process_point_id", "endpoint_key", "name", "upp_model", "address", "wire_type", "wire_length", "scale", "access", "byte_order", "conversion", "enabled"],
 };
-const numbers = new Set(["sig_id", "element_count", "process_point_id", "upp_model", "address", "wire_length", "byte_order"]);
+const legacyProcessColumns = ["group_key", "enum_name", "sig_id", "internal_type", "flags", "callback", "process_enabled", "boot_restore", "manual_restore"];
+const numbers = new Set(["sig_id", "display_digits", "element_count", "process_point_id", "upp_model", "address", "wire_length", "byte_order"]);
 const booleans = new Set(["process_enabled", "boot_restore", "manual_restore", "enabled"]);
 const required = {
-  process: ["group_key", "name", "enum_name", "internal_type"],
-  forward: ["process_point_id", "endpoint_key", "name", "upp_model", "address", "wire_type", "wire_length"],
+  process: [["name"], ["variable_name", "enum_name"], ["sheet_type", "internal_type"]],
+  forward: ["process_point_id", "endpoint_key", "name", "upp_model", "address", "wire_type", "wire_length"].map(key => [key]),
+};
+const dspChoices = {
+  sheet_type: ["Sys_U8", "Sys_U16", "Sys_S16", "Sys_U32", "Sys_S32", "Sys_F32"],
+  access: ["RO", "RW"],
+  ram: ["Y", "N"], flash: ["Y", "N"], eeprom: ["Y", "N"], calibration: ["Y", "N"],
+  cpu: ["CPU1", "CPU2"],
+  upload_level: ["0：不上传", "1：上传至UPM", "2：UPM进行轮询", "3：CSU进行轮询"],
+  category: ["系统参数1", "系统参数2", "任务级观测量", "中断级观测量", "控制参数设置", "任务级标定量"],
 };
 const descriptions = {
-  group_key: "project.json 定义的分组代码，例如 LOCAL（必填）",
+  group_key: "可选的 project.json 分组代码，DSP 默认 LOCAL",
   name: "点名称（必填）", enum_name: "同板卡唯一的 C 枚举标识符（必填）",
-  sig_id: "可选的已确认 DSP sigID，不用采集端编号或行号填充",
+  variable_name: "VariateName，原始变量名，例如 ParamProductType；同板卡唯一的 C 标识符（必填）",
+  sheet_type: "DateType：Sys_U8/Sys_U16/Sys_S16/Sys_U32/Sys_S32/Sys_F32（必填）",
+  enum_table: "EnumTab，枚举或位含义，支持换行",
+  display_digits: "DisplayDigit，显示小数位数 0～8，默认 0",
+  sig_id: "兼容旧模板的可选字段；DSP 内部数据 sheet 不使用 sigID",
   internal_type: "内部类型 U8/U16/S16/U32/S32/F32/STRING（必填）",
-  element_count: "元素数量，默认 1；STRING 表示字节容量", unit: "单位", notes: "备注",
+  element_count: "ArrayCnt，元素数量，默认 1", unit: "Unit，单位", notes: "备注",
   flags: "留空默认 0", callback: "留空默认 NULL", process_enabled: "留空默认 true",
   default_value: "默认值；留空表示未指定", min_value: "数值下限；STRING 不填写",
   max_value: "数值上限；STRING 不填写", boot_restore: "上电恢复；默认 false",
@@ -27,7 +42,16 @@ const descriptions = {
   wire_length: "通信字节长度（必填）", scale: "比例系数，支持小数；默认 1",
   access: "访问属性 RO/WO/RW，默认 RO", byte_order: "字节序，默认 0",
   conversion: "identity/fixed_point/array_bytes；默认 identity", enabled: "启用；默认 true",
+  ram: "RAM：Y/N，默认 N", flash: "FLASH：Y/N，默认 Y",
+  eeprom: "EEPROM：Y/N，默认 N", calibration: "Calibration：Y/N，默认 Y",
+  structure: "STRUCT，留空表示未指定", cpu: "数据来自CPU：CPU1/CPU2，默认 CPU2",
+  upload_level: "数据上传等级：0：不上传 / 1：上传至UPM / 2：UPM进行轮询 / 3：CSU进行轮询；默认 0：不上传",
+  category: "数据分类：系统参数1/系统参数2/任务级观测量/中断级观测量/控制参数设置/任务级标定量；可留空",
 };
+
+function description(kind, key) {
+  return kind === "process" && key === "access" ? "RW：RO/RW，默认 RW" : descriptions[key];
+}
 
 function scalar(cell) {
   const value = cell.value;
@@ -42,12 +66,14 @@ function scalar(cell) {
   return typeof value === "string" ? value.trim() : value;
 }
 
-function convert(value, key) {
+function convert(value, key, kind) {
   if (numbers.has(key)) {
     if (!/^(?:\d+|0x[0-9a-f]+)$/i.test(String(value)) || !Number.isSafeInteger(Number(value))) {
       throw new Error("必须为安全范围内的非负整数，可使用 0x 十六进制");
     }
-    return Number(value);
+    const number = Number(value);
+    if (key === "display_digits" && number > 8) throw new Error("DisplayDigit 必须为 0～8 的整数");
+    return number;
   }
   if (key === "scale") {
     const number = Number(value);
@@ -61,7 +87,27 @@ function convert(value, key) {
   }
   const text = String(value);
   if (Buffer.byteLength(text) > 4096) throw new Error("内容超过 4096 字节");
+  if (kind === "process") {
+    if (key === "variable_name" && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(text)) throw new Error("VariateName 必须为 C 标识符");
+    if (dspChoices[key] && !dspChoices[key].includes(text)) throw new Error(`允许的值为 ${dspChoices[key].join(" / ")}`);
+  }
   return text;
+}
+
+export function withDefinitionDefaults(rows, definition) {
+  const aliases = {
+    variable_name: "enum_name", enum_name: "variable_name",
+    sheet_type: "internal_type", internal_type: "sheet_type",
+  };
+  return rows.map(row => {
+    const values = { ...row.values };
+    for (const key of definition?.editor || []) {
+      if (Object.hasOwn(values, key) || (aliases[key] && Object.hasOwn(values, aliases[key]))) continue;
+      const field = definition.fields?.[key];
+      if (field && Object.hasOwn(field, "default")) values[key] = structuredClone(field.default);
+    }
+    return { ...row, values };
+  });
 }
 
 export async function readRows(file, kind, sheetName = kind) {
@@ -77,12 +123,12 @@ export async function readRows(file, kind, sheetName = kind) {
   sheet.getRow(1).eachCell((cell, col) => {
     const key = scalar(cell);
     if (key == null || key === "") return;
-    if (!columns[kind].includes(key)) throw new Error(`表头 ${cell.address}「${key}」不属于 ${kind} 可写字段`);
+    if (!columns[kind].includes(key) && !(kind === "process" && legacyProcessColumns.includes(key))) throw new Error(`表头 ${cell.address}「${key}」不属于 ${kind} 可写字段`);
     if (seen.has(key)) throw new Error(`表头 ${key} 重复`);
     seen.add(key);
     headers.set(col, key);
   });
-  for (const key of required[kind]) if (!seen.has(key)) throw new Error(`缺少必填表头 ${key}`);
+  for (const keys of required[kind]) if (!keys.some(key => seen.has(key))) throw new Error(`缺少必填表头 ${keys.join(" 或 ")}`);
   const rows = [], errors = [];
   sheet.eachRow((row, rowNumber) => {
     if (rowNumber === 1) return;
@@ -95,12 +141,12 @@ export async function readRows(file, kind, sheetName = kind) {
         populated = true;
         const key = headers.get(col);
         if (!key) throw new Error("此列有数据但没有表头");
-        values[key] = convert(value, key);
+        values[key] = convert(value, key, kind);
       } catch (error) { errors.push(`第 ${rowNumber} 行 ${cell.address}：${error.message}`); }
     });
     if (!populated) return;
-    for (const key of required[kind]) {
-      if (!Object.hasOwn(values, key)) errors.push(`第 ${rowNumber} 行 ${key}：缺少必填值`);
+    for (const keys of required[kind]) {
+      if (!keys.some(key => Object.hasOwn(values, key))) errors.push(`第 ${rowNumber} 行 ${keys.join(" 或 ")}：缺少必填值`);
     }
     rows.push({ row: rowNumber, values });
   });
@@ -115,10 +161,15 @@ export async function writeTemplate(file, kind) {
   const sheet = book.addWorksheet(kind, { views: [{ state: "frozen", ySplit: 1 }] });
   sheet.columns = columns[kind].map(key => ({ header: key, key, width: 23 }));
   sheet.getRow(1).font = { bold: true };
-  for (let i = 0; i < columns[kind].length; i++) sheet.getCell(1, i + 1).note = descriptions[columns[kind][i]];
+  for (let i = 0; i < columns[kind].length; i++) sheet.getCell(1, i + 1).note = description(kind, columns[kind][i]);
   const help = book.addWorksheet("填写说明");
   help.addRow(["字段", "含义"]);
-  for (const key of columns[kind]) help.addRow([key, descriptions[key]]);
+  for (const key of columns[kind]) help.addRow([key, description(kind, key)]);
+  if (kind === "process") {
+    help.addRow(["DSP 示例", "按 DSP内部数据 sheet 的可写字段排列；没有 sigID。其他板卡请以各自配置为准。"]);
+    help.addRow(["自动计算", "DataType Length、Total Length、精度、数据类型、UPP模型号由服务端计算，无需填写；转发配置在 forward 表中单独填写。"]);
+    help.addRow(["分组", "DSP 默认使用 LOCAL；需要其他已配置分组时，可自行添加 group_key 列。"]);
+  }
   help.addRow(["规则", "第 1 行保留英文字段名，第 2 行开始填数据；仅处理指定工作表，每批最多 200 行。"]);
   help.addRow(["空值", "空单元格省略，采用字段默认值。代码和 ID 请用 --references 查询，不能跨项目复用。"]);
   help.addRow(["添加", "仅新增，不覆盖现有记录；公式先粘贴为值；所有引用必须已存在。"]);

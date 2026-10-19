@@ -11,7 +11,7 @@ const definition = async name => JSON.parse(await readFile(new URL(`../config/dc
 const processDefinition = await definition("process"), forwardDefinition = await definition("transmit");
 const board = { code: "DSP", name: "DSP 功率板", point_storage: "native", point_groups: [{ code: "LOCAL", name: "DSP 内部数据" }], point_endpoints: [{ code: "UPP_SERVICE", name: "UPP 对外接口", protocol: "UPP" }] };
 const config = { version: 2, board_types: [{ code: "UPM", name: "UPM 控制板" }, board], root: { type: "UPM", quantity: 1 }, mounts: [{ parent: "UPM", child: "DSP", quantity: 8, connections: [{ protocol: "UPP", transport: "CAN" }] }] };
-const point = { id: 1, board_key: "DSP", group_key: "LOCAL", name: "母线电压", enum_name: "BUS_VOLTAGE", internal_type: "U16", element_count: 1, byte_length: 2, sig_id: null };
+const point = { id: 1, board_key: "DSP", group_key: "LOCAL", name: "母线电压", variable_name: "BusVoltage", sheet_type: "Sys_U16", type_length: 2, enum_name: "BUS_VOLTAGE", internal_type: "U16", element_count: 1, byte_length: 2, sig_id: null };
 const graph = { revision: 1, project_config: config, process_points: [point], transmit_points: [] };
 const project = { id: 1, key: "dc-ups", name: "DC-UPS", revision: 1, role: "engineer" };
 const catalog = [{ board_key: "DSP", board_name: "DSP 功率板", endpoints: [{ endpoint_key: "UPP_SERVICE", name: "UPP 对外接口", protocol: "UPP" }] }];

@@ -128,6 +128,14 @@ fn check_fields(batch: &Batch, operation: &str) -> Result<()> {
             errors.push(json!({"row":row.row,"field":key,"message":message}))
         };
         for key in required {
+            if *key == "enum_name"
+                && row.values.get("variable_name").is_some_and(|value| {
+                    value.as_str().is_some_and(|value| !value.trim().is_empty())
+                })
+                && !row.values.contains_key("enum_name")
+            {
+                continue;
+            }
             if operation == "update" && !row.values.contains_key(*key) {
                 continue;
             }
@@ -158,7 +166,7 @@ fn check_fields(batch: &Batch, operation: &str) -> Result<()> {
             let valid = match key.as_str() {
                 "process_point_id" => value.as_i64().is_some_and(|v| v > 0),
                 "sig_id" | "element_count" | "byte_length" | "upp_model" | "address"
-                | "wire_length" | "byte_order" => {
+                | "display_digits" | "wire_length" | "byte_order" => {
                     value.as_i64().is_some_and(|v| i32::try_from(v).is_ok())
                 }
                 "scale" => value.as_f64().is_some_and(|v| v.is_finite() && v > 0.),
@@ -378,6 +386,38 @@ mod tests {
         ] {
             assert!(check_fields(&batch(kind, values), "update").is_err());
         }
+    }
+    #[test]
+    fn worksheet_variables_can_create_rows_without_sig_ids_or_enum_aliases() {
+        assert!(
+            check_fields(
+                &batch(
+                    "process",
+                    json!({"name":"DSP 新数据",
+            "variable_name":"NewDspValue","sheet_type":"Sys_F32","display_digits":2,
+            "ram":"N","flash":"Y","category":"任务级观测量"})
+                ),
+                "create"
+            )
+            .is_ok()
+        );
+        for values in [
+            json!({"precision":"0.01"}),
+            json!({"type_length":4}),
+            json!({"sheet_data_type":"S32"}),
+            json!({"sheet_upp_model":99}),
+            json!({"metadata":{}}),
+            json!({"display_digits":"2"}),
+        ] {
+            assert!(check_fields(&batch("process", values), "update").is_err());
+        }
+        assert!(
+            check_fields(
+                &batch("process", json!({"name":"DSP 新数据", "variable_name":""})),
+                "create"
+            )
+            .is_err()
+        );
     }
     #[test]
     fn dependencies_follow_json_board_and_referenced_process_point() {

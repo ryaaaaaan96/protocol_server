@@ -5,6 +5,7 @@ mod codegen;
 mod database;
 mod db;
 mod dsp_points;
+mod dsp_sheet;
 mod dsp_workbook;
 mod edit_lock;
 mod error;

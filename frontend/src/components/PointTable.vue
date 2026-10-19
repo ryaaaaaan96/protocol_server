@@ -3,12 +3,13 @@ import { computed, ref, watch, nextTick, onBeforeUnmount } from "vue";
 import { api, revisionConflict, type Row } from "../api";
 import {
   choiceLabel,
-  pointText,
+  isDspSheet,
   pointIsString,
   type PointKind,
   type PointTableData,
 } from "../domain/pointTables";
 import { Search, Plus, ChevronLeft, ChevronRight, GripVertical, Ellipsis, ChevronDown, Undo2, Redo2, Pencil, Check, Copy, CircleHelp } from "@lucide/vue";
+import { displayCell } from "../domain/pointGrid";
 import { usePointGrid } from "../composables/usePointGrid";
 import { pageSizeOptions, usePageSize } from "../composables/usePageSize";
 import { usePermissionContext } from "../composables/useProjectPermissions";
@@ -103,7 +104,11 @@ watch(
 );
 const def = computed(() => data.value?.definition);
 const columnSettings = ref(false), columns = ref<TableColumn[]>([]);
-const columnKey = computed(() => `point-columns:${props.pid}:${encodeURIComponent(props.boardKey)}:${props.kind}`);
+const columnKey = computed(() => {
+  const base = `point-columns:${props.pid}:${encodeURIComponent(props.boardKey)}:${props.kind}`;
+  return data.value && isDspSheet(data.value)
+    ? `${base}:layout:${encodeURIComponent(JSON.stringify(data.value.definition.columns))}` : base;
+});
 const { pageSize, setPageSize } = usePageSize(computed(() => `point-page-size:${props.pid}:${encodeURIComponent(props.boardKey)}:${props.kind}`));
 const displayColumns = computed(() => orderedColumns(columns.value).filter(c => c.visible));
 watch([() => def.value?.columns, columnKey], ([keys]) => {
@@ -161,7 +166,7 @@ const indexed = computed(() =>
   (data.value?.rows || []).map((row) => ({
     row,
     search: def
-      .value!.columns.map((key) => pointText(row[key]))
+      .value!.columns.map((key) => displayCell(data.value!, row, key, row.edit_values || {}))
       .join(" ")
       .toLowerCase(),
   })),
@@ -327,7 +332,7 @@ function cellHint(row: Row, column: string) {
   if (!scopeEditable(row)) return "未获此板卡或协议的编辑权限，可以查看和复制；请联系管理员授权。";
   if (!key) return "关联或计算字段，随来源数据更新。";
   if (!grid.editable(row, column)) return "此字段在当前分组中锁定，可通过记录详情查看。";
-  return `${def.value!.fields[key].hint || "双击或按 Enter 编辑"}${def.value!.fields[key].nullable ? "；留空表示未指定" : ""}`;
+  return `${def.value!.fields[key].hint || "双击或按 Enter 编辑"}${def.value!.fields[key].multiline ? "；Shift+Enter 换行" : ""}${def.value!.fields[key].nullable ? "；留空表示未指定" : ""}`;
 }
 function discardGrid() {
   if (grid.dirty.value && !window.confirm("放弃这些尚未保存的单元格修改？")) return;
@@ -341,7 +346,7 @@ async function previewGrid(mode: "check" | "save") {
   for (const row of rows) {
     for (const [key, value] of Object.entries(row.values)) {
       const field = def.value!.fields[key];
-      if ((field.reference && !field.nullable && value == null) || (["name", "enum_name"].includes(key) && !String(value ?? "").trim())) {
+      if ((field.reference && !field.nullable && value == null) || (["name", "enum_name", "variable_name"].includes(key) && !String(value ?? "").trim())) {
         actionError.value = `第 ${row.row} 行「${field.label}」不能为空，请补全后重新检查。`;
         return;
       }
@@ -497,7 +502,7 @@ function text(row: Row, key: string) {
           v-model="query"
           :disabled="busy || !!review || !!orderDraft || !!grid.editor.value"
           aria-label="搜索当前表格"
-          placeholder="搜索名称、sigID、地址或枚举…"
+          :placeholder="data && isDspSheet(data) ? '搜索名称、变量、类型或分类…' : '搜索名称、sigID、地址或枚举…'"
         />
       </div>
       <div class="inline">
@@ -542,7 +547,7 @@ function text(row: Row, key: string) {
               :title="`${columnLabel(column.key)} · 右键设置列，或按 Shift+F10`"
               @contextmenu.prevent.stop="openColumnMenu(column.key, $event)" @keydown="columnKeydown(column.key, $event)"
               :class="{ 'point-frozen': column.frozen }" :style="column.frozen ? { left: `${frozenLeft[column.key] ?? 0}px` } : undefined">
-              <span class="point-grid-column"><span class="point-field-type" aria-hidden="true">{{ !grid.field(column.key) ? 'ƒ' : def.fields[grid.field(column.key)!].reference ? '↗' : def.fields[grid.field(column.key)!].type === 'number' ? '#' : def.fields[grid.field(column.key)!].type === 'boolean' ? '☑' : 'Aa' }}</span>{{ columnLabel(column.key) }}<button class="icon-btn point-column-menu" :aria-label="`${columnLabel(column.key)}列菜单`" aria-haspopup="menu" :aria-expanded="tableMenu?.type === 'column' && tableMenu.key === column.key" :disabled="busy || !!review" @click.stop="openColumnMenu(column.key, $event)"><ChevronDown :size="13" /></button></span>
+              <span class="point-grid-column"><span class="point-field-type" aria-hidden="true">{{ !grid.field(column.key) ? 'ƒ' : def.fields[grid.field(column.key)!].reference ? '↗' : def.fields[grid.field(column.key)!].type === 'number' ? '#' : def.fields[grid.field(column.key)!].type === 'boolean' ? '☑' : 'Aa' }}</span><span class="point-column-label">{{ columnLabel(column.key) }}</span><button class="icon-btn point-column-menu" :aria-label="`${columnLabel(column.key)}列菜单`" aria-haspopup="menu" :aria-expanded="tableMenu?.type === 'column' && tableMenu.key === column.key" :disabled="busy || !!review" @click.stop="openColumnMenu(column.key, $event)"><ChevronDown :size="13" /></button></span>
             </th>
           </tr>
         </thead>
@@ -573,12 +578,14 @@ function text(row: Row, key: string) {
                   <template v-else-if="gridEditorDef.reference"><option value="">请选择</option><option v-for="choice in grid.choices.value" :key="choice.id" :value="String(choice.id)">{{ choiceLabel(choice) }}</option></template>
                   <template v-else><option v-if="gridEditorDef.nullable" value="">未指定</option><option v-for="option in gridEditorDef.options" :key="option" :value="option">{{ option }}</option></template>
                 </select>
+                <textarea v-else-if="gridEditorDef.multiline" v-model="gridInput" class="point-cell-editor" :aria-label="`编辑 ${gridEditorDef.label}`" :disabled="!canWrite || !scopeEditable(row)"
+                  @mousedown.stop @click.stop @dblclick.stop @keydown.stop="grid.editorKey" @blur="grid.finish" />
                 <input v-else v-model="gridInput" class="point-cell-editor" type="text" :inputmode="gridEditorDef.type === 'number' ? 'decimal' : undefined" :disabled="!canWrite || !scopeEditable(row)"
                   :aria-label="`编辑 ${gridEditorDef.label}`" :placeholder="gridEditorDef.nullable ? '留空表示未指定' : ''"
                   @mousedown.stop @click.stop @dblclick.stop @keydown.stop="grid.editorKey" @blur="grid.finish" />
               </template>
               <span
-                v-else class="point-cell-value" :class="{ 'record-name': column.key === def.columns[0], 'point-cell-boolean': typeof row[column.key] === 'boolean' }"
+                v-else class="point-cell-value" :class="{ 'record-name': column.key === def.columns[0], 'point-cell-boolean': typeof row[column.key] === 'boolean', 'point-cell-multiline': def.fields[column.key].multiline }"
 
                 >{{ text(row, column.key) }}</span
               >

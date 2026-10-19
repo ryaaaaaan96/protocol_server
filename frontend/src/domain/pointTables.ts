@@ -10,6 +10,7 @@ export type PointField = {
   nullable?: boolean;
   default?: unknown;
   hint?: string;
+  multiline?: boolean;
 };
 export type PointDefinition = {
   label: string;
@@ -49,10 +50,21 @@ export function isStringType(value: unknown): boolean {
   return normalizedDataType(value) === "STRING";
 }
 
+export function isDspSheet(data: PointTableData): boolean {
+  return data.kind === "process" && data.definition.columns.includes("sheet_type") &&
+    data.definition.columns.includes("variable_name");
+}
+
+export function sheetType(value: unknown): string | undefined {
+  const type = normalizedDataType(value)?.replace(/^SYS_/, "");
+  return type === "FLOAT" ? "F32" : type;
+}
+
 /** Resolve the internal type directly or through the selected process point. */
 export function pointDataType(data: PointTableData, values: Row, fallbackRow?: Row): string | undefined {
   const original = { ...fallbackRow, ...fallbackRow?.edit_values };
   const current = { ...original, ...values };
+  if (isDspSheet(data)) return sheetType(current.sheet_type);
   if (data.kind === "process") return normalizedDataType(current.internal_type ?? current.data_type);
   const signal = data.options.process_points?.find(item => item.id === current.process_point_id);
   if (signal) return normalizedDataType(signal.internal_type ?? signal.data_type);
@@ -99,4 +111,57 @@ export function pointText(value: unknown): string {
         ? "是"
         : "否"
       : String(value);
+}
+
+
+const sheetMetadataColumns: Record<string, string> = {
+  enum_table: "D", display_digits: "E", access: "M", ram: "N", flash: "O", eeprom: "P",
+  calibration: "Q", structure: "R", cpu: "S", upload_level: "V", category: "W",
+};
+
+function sheetChangeValues(row: Row): Row {
+  const projected = { ...row }, metadata = row.metadata || {};
+  const source = (key: string, column: string) => Object.hasOwn(metadata, key)
+    ? metadata[key] : metadata.source_cells?.values?.[column];
+  if (Object.hasOwn(row, "enum_name")) {
+    const variable = source("source_variable", "B");
+    const normalized = typeof variable === "string" ? variable.trim()
+      .replace(/([a-z0-9])([A-Z])/g, "$1_$2").replace(/([A-Z])([A-Z][a-z])/g, "$1_$2")
+      .replace(/[^A-Za-z0-9]+/g, "_").replace(/^_|_$/g, "").toUpperCase() : "";
+    projected.variable_name = normalized === row.enum_name && variable ? variable : row.enum_name;
+    delete projected.enum_name;
+  }
+  if (Object.hasOwn(row, "internal_type")) {
+    projected.sheet_type = `Sys_${row.internal_type}`;
+    delete projected.internal_type;
+  }
+  for (const [key, column] of Object.entries(sheetMetadataColumns)) {
+    const value = source(key, column);
+    if (value !== undefined) projected[key] = key === "display_digits" ? Number(value) : value;
+  }
+  const remaining = Object.fromEntries(Object.entries(metadata).filter(([key]) =>
+    key !== "source_cells" && key !== "source_variable" && !(key in sheetMetadataColumns)));
+  if (Object.keys(remaining).length) projected.metadata = remaining;
+  else delete projected.metadata;
+  return projected;
+}
+
+/** Render raw impact records using the editable sheet names without mixing related transmit rows. */
+export function pointChangeSummary(change: Row, fields?: Record<string, PointField>): string {
+  let before = change.before || {}, after = change.after || {};
+  const entity = change.entity;
+  const process = entity === "process_points" || entity === "points.process_points" ||
+    (!entity && [before, after].some(row => Object.hasOwn(row, "internal_type") &&
+      Object.hasOwn(row, "enum_name") && !Object.hasOwn(row, "process_point_id") && !Object.hasOwn(row, "wire_type")));
+  if (fields?.variable_name && fields.sheet_type && process) {
+    before = sheetChangeValues(before);
+    after = sheetChangeValues(after);
+  }
+  const text = (value: unknown) => value !== null && typeof value === "object"
+    ? JSON.stringify(value) : pointText(value);
+  const labels: Record<string, string> = { display_order: "显示顺序", ordinal: "协议排列", effective_address: "协议地址" };
+  return Object.keys({ ...before, ...after })
+    .filter(key => !["project_id", "raw_json"].includes(key) && JSON.stringify(before[key]) !== JSON.stringify(after[key]))
+    .map(key => `${fields?.[key]?.column_label || fields?.[key]?.label || labels[key] || key}：${text(before[key])} → ${text(after[key])}`)
+    .join("；");
 }

@@ -137,13 +137,17 @@ pub async fn apply(
     if !["create", "update", "delete"].contains(&c.operation.as_str()) {
         return Err(AppError::bad("点表操作无效"));
     }
-    let allowed: BTreeSet<_> = if kind == "process" {
+    let mut allowed: BTreeSet<_> = if kind == "process" {
         PROCESS_EDIT
     } else {
         TRANSMIT_EDIT
     }
     .split(',')
     .collect();
+    let worksheet = kind == "process" && crate::dsp_sheet::is_dsp(&board);
+    if worksheet {
+        allowed.extend(crate::dsp_sheet::EDIT_FIELDS.split(','));
+    }
     for key in fields.keys() {
         if !allowed.contains(key.as_str()) {
             return Err(AppError::bad(format!("{key} 是只读字段或不属于当前点表")));
@@ -176,8 +180,12 @@ pub async fn apply(
     if fields.is_empty() {
         return Err(AppError::bad("未提供修改字段"));
     }
+    let mut updates = if worksheet {
+        crate::dsp_sheet::normalize(fields, &old)?
+    } else {
+        fields.clone()
+    };
     let mut merged = old;
-    let mut updates = fields.clone();
     if kind == "process" {
         for key in ["unit", "default_value", "min_value", "max_value", "notes"] {
             if updates.get(key).is_some_and(Value::is_null) {
@@ -260,6 +268,9 @@ pub async fn table_rows(
     };
     let groups = groups(&board);
     for row in &mut result {
+        if kind == "process" && crate::dsp_sheet::is_dsp(&board) {
+            crate::dsp_sheet::project(row);
+        }
         if kind != "process" {
             if let Some(endpoint) = board["point_endpoints"].as_array().and_then(|endpoints| {
                 endpoints

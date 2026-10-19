@@ -60,9 +60,11 @@ erDiagram
   project_state ||--o{ releases : freezes
 ```
 
-转发以 `process_point_id` 关联内部点，避免修改枚举或 sigID 时断开关系。数据库外键防止跨项目引用，应用校验确保相同板卡且端点、分组在生效 JSON 中存在。移除被数据或授权引用的配置会被拒绝。
+转发以 `process_point_id` 关联内部点，修改变量名不会断开关系。数据库外键防止跨项目引用，应用校验确保相同板卡且端点、分组在生效 JSON 中存在。移除被数据或授权引用的配置会被拒绝。
 
-`address` 是明确的 UPP 字节偏移，拖动行只改 `display_order`。内部 F32 与线上 S32 可使用显式 `fixed_point` 转换；数组可用 `array_bytes` 映射。未知 DSP sigID 保持空值。
+`address` 是明确的 UPP 字节偏移，拖动行只改 `display_order`。内部 F32 与线上 S32 可使用显式 `fixed_point` 转换；数组可用 `array_bytes` 映射。DSP 内部没有 sigID；通用存储中的可空 `sig_id` 仅为兼容字段，不属于 DSP sheet 的显示或编辑定义。
+
+DSP 的 `process.json` 按原 sheet 的 25 列定义界面。`variable_name` 映射 `metadata.source_variable`，同步规范化的 `enum_name`；`sheet_type` 将 `Sys_U16` 等映射为 `internal_type`。`EnumTab`、显示位数、存储标志、STRUCT、CPU、上传等级和分类逐字段写入 `metadata` 白名单；RAM/FLASH/EEPROM/Calibration 与恢复默认值等旧布尔字段无关。原始 `source_cells` 保持不变用于追溯，网页读取当前业务值。派生列由当前参数计算；这层显示适配不新增数据库表，也不改写其他板卡或 DSP 转发映射。
 
 ## 统一历史事件
 

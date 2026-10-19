@@ -2,43 +2,54 @@
   "version": 1,
   "enabled": true,
   "label": "DSP内部数据",
-  "description": "维护 DSP 内部点的编号、枚举、类型、长度、默认值和范围。UPP 转发通过固定记录 ID 引用内部点；分组由项目 JSON 配置。",
+  "description": "按「DSP内部数据」sheet 的 A–Y 列定义显示和编辑；DSP 内部没有 sigID。长度、精度、数据类型和模型号由 sheet 规则推导，通讯映射在本板卡转发表独立配置。",
   "columns": [
     "name",
-    "group_name",
-    "resolved_sig_id",
-    "enum_name",
-    "data_type",
+    "variable_name",
+    "sheet_type",
+    "enum_table",
+    "display_digits",
+    "type_length",
     "element_count",
     "byte_length",
-    "unit",
     "default_value",
-    "min_value",
     "max_value",
-    "boot_restore",
-    "manual_restore",
-    "process_enabled",
-    "flags",
-    "callback",
-    "forward_count",
+    "min_value",
+    "unit",
+    "access",
+    "ram",
+    "flash",
+    "eeprom",
+    "calibration",
+    "structure",
+    "cpu",
+    "precision",
+    "sheet_data_type",
+    "upload_level",
+    "category",
+    "sheet_upp_model",
     "notes"
   ],
   "editor": [
     "name",
-    "group_key",
-    "enum_name",
-    "sig_id",
-    "internal_type",
+    "variable_name",
+    "sheet_type",
+    "enum_table",
+    "display_digits",
     "element_count",
-    "unit",
     "default_value",
-    "min_value",
     "max_value",
-    "boot_restore",
-    "manual_restore",
-    "process_enabled",
-    "flags",
-    "callback",
+    "min_value",
+    "unit",
+    "access",
+    "ram",
+    "flash",
+    "eeprom",
+    "calibration",
+    "structure",
+    "cpu",
+    "upload_level",
+    "category",
     "notes"
   ],
   "ordering": {
@@ -47,118 +58,183 @@
   },
   "inline": {
     "name": "name",
-    "enum_name": "enum_name",
+    "variable_name": "variable_name",
+    "sheet_type": "sheet_type",
+    "enum_table": "enum_table",
+    "display_digits": "display_digits",
     "element_count": "element_count",
-    "unit": "unit",
     "default_value": "default_value",
-    "min_value": "min_value",
     "max_value": "max_value",
-    "boot_restore": "boot_restore",
-    "manual_restore": "manual_restore",
-    "process_enabled": "process_enabled",
-    "flags": "flags",
-    "callback": "callback",
-    "notes": "notes",
-    "group_name": "group_key",
-    "resolved_sig_id": "sig_id",
-    "data_type": "internal_type"
+    "min_value": "min_value",
+    "unit": "unit",
+    "access": "access",
+    "ram": "ram",
+    "flash": "flash",
+    "eeprom": "eeprom",
+    "calibration": "calibration",
+    "structure": "structure",
+    "cpu": "cpu",
+    "upload_level": "upload_level",
+    "category": "category",
+    "notes": "notes"
   },
   "fields": {
     "name": {
-      "label": "信号名称"
+      "label": "数据名称"
     },
-    "group_name": {
-      "label": "点表分组"
+    "variable_name": {
+      "label": "VariateName",
+      "hint": "DSP 内部变量名；系统通过固定记录 ID 关联转发，修改变量名不会断开引用。"
     },
-    "group_key": {
-      "label": "点表分组",
-      "reference": "native_groups",
-      "default": "LOCAL"
-    },
-    "resolved_sig_id": {
-      "label": "sigID"
-    },
-    "sig_id": {
-      "label": "数字 sigID",
-      "type": "number",
-      "nullable": true,
-      "hint": "留空表示暂未分配；关联使用固定记录 ID，修改编号不会改变关联。"
-    },
-    "enum_name": {
-      "label": "枚举"
-    },
-    "data_type": {
-      "label": "内部类型"
-    },
-    "internal_type": {
-      "label": "内部类型",
+    "sheet_type": {
+      "label": "DateType",
       "options": [
-        "U8",
-        "U16",
-        "S16",
-        "U32",
-        "S32",
-        "F32",
-        "STRING"
+        "Sys_U8",
+        "Sys_U16",
+        "Sys_S16",
+        "Sys_U32",
+        "Sys_S32",
+        "Sys_F32"
       ],
-      "default": "F32"
+      "default": "Sys_F32"
+    },
+    "enum_table": {
+      "label": "EnumTab",
+      "default": "",
+      "multiline": true
+    },
+    "display_digits": {
+      "label": "DisplayDigit",
+      "type": "number",
+      "default": 0,
+      "hint": "显示小数位数，填写 0～8 的整数；精度按 10 的负次幂计算。"
+    },
+    "type_length": {
+      "label": "DataType\nLength",
+      "hint": "由 DateType 计算单个元素字节数。"
     },
     "element_count": {
-      "label": "元素数量",
+      "label": "ArrayCnt",
       "type": "number",
       "default": 1,
-      "hint": "数组填写元素个数，字符串填写字节容量；标量填 1。"
+      "hint": "数组元素数量；标量填写 1。"
     },
     "byte_length": {
-      "label": "内部字节数",
-      "hint": "根据内部类型和元素数量计算。"
-    },
-    "unit": {
-      "label": "单位",
-      "nullable": true
+      "label": "Total Length",
+      "hint": "由 DataType Length × ArrayCnt 计算。"
     },
     "default_value": {
-      "label": "默认值",
+      "label": "DefaultValue",
       "nullable": true,
-      "hint": "直接保存点默认值；留空表示未指定。"
-    },
-    "min_value": {
-      "label": "下限",
-      "nullable": true
+      "default": ""
     },
     "max_value": {
-      "label": "上限",
-      "nullable": true
+      "label": "MaxValue",
+      "nullable": true,
+      "default": ""
     },
-    "boot_restore": {
-      "label": "上电恢复默认值",
-      "type": "boolean",
-      "default": false
+    "min_value": {
+      "label": "MinValue",
+      "nullable": true,
+      "default": ""
     },
-    "manual_restore": {
-      "label": "允许手动恢复默认值",
-      "type": "boolean",
-      "default": false
+    "unit": {
+      "label": "Unit",
+      "nullable": true,
+      "default": ""
     },
-    "process_enabled": {
-      "label": "加入处理表",
-      "type": "boolean",
-      "default": true
+    "access": {
+      "label": "RW",
+      "options": [
+        "RO",
+        "RW"
+      ],
+      "default": "RW"
     },
-    "flags": {
-      "label": "处理标志",
-      "default": "0"
+    "ram": {
+      "label": "RAM",
+      "options": [
+        "Y",
+        "N"
+      ],
+      "default": "N"
     },
-    "callback": {
-      "label": "回调函数",
-      "default": "NULL"
+    "flash": {
+      "label": "FLASH",
+      "options": [
+        "Y",
+        "N"
+      ],
+      "default": "Y"
     },
-    "forward_count": {
-      "label": "转发绑定数"
+    "eeprom": {
+      "label": "EEPROM",
+      "options": [
+        "Y",
+        "N"
+      ],
+      "default": "N"
+    },
+    "calibration": {
+      "label": "Calibration",
+      "options": [
+        "Y",
+        "N"
+      ],
+      "default": "Y"
+    },
+    "structure": {
+      "label": "STRUCT",
+      "default": ""
+    },
+    "cpu": {
+      "label": "数据来自CPU",
+      "options": [
+        "CPU1",
+        "CPU2"
+      ],
+      "default": "CPU2"
+    },
+    "precision": {
+      "label": "精度",
+      "hint": "由 DisplayDigit 计算，与原 sheet 公式一致。"
+    },
+    "sheet_data_type": {
+      "label": "数据类型",
+      "hint": "原 sheet 推导值：数组为 STRING，标量 F32 对应 S32，其余沿用类型。实际转发映射在转发表配置。"
+    },
+    "upload_level": {
+      "label": "数据上传\n等级",
+      "options": [
+        "0：不上传",
+        "1：上传至UPM",
+        "2：UPM进行轮询",
+        "3：CSU进行轮询"
+      ],
+      "default": "0：不上传"
+    },
+    "category": {
+      "label": "数据分类",
+      "options": [
+        "",
+        "系统参数1",
+        "系统参数2",
+        "任务级观测量",
+        "中断级观测量",
+        "控制参数设置",
+        "任务级标定量"
+      ],
+      "default": ""
+    },
+    "sheet_upp_model": {
+      "label": "UPP\n模型号",
+      "hint": "按数据分类显示原 sheet 的模型号；实际协议映射由当前板卡转发表维护。"
     },
     "notes": {
       "label": "备注",
-      "nullable": true
+      "nullable": true,
+      "default": "",
+      "multiline": true
     }
   }
 }

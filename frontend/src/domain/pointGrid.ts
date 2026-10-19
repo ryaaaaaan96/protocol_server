@@ -1,6 +1,8 @@
 import type { Row } from "../api";
 import {
   choiceLabel,
+  isDspSheet,
+  sheetType,
   pointChoices,
   pointIsString,
   pointText,
@@ -180,7 +182,41 @@ export function displayCell(
     data.options[list]?.find((item) => item.id === values[key]);
   const projected = (record: Row | undefined, key: string) =>
     record && key in record ? pointText(record[key]) : PENDING;
-  const current = () => pointText(row[column]);
+  const sheet = isDspSheet(data);
+  const format = (value: unknown) => sheet && value == null ? "" : pointText(value);
+  const current = () => format(row[column]);
+
+  if (sheet) {
+    if (column === "type_length" && changed("sheet_type")) {
+      const widths: Record<string, number> = { U8: 1, U16: 2, S16: 2, U32: 4, S32: 4, F32: 4, STRING: 1 };
+      return String(widths[sheetType(values.sheet_type) || ""] || PENDING);
+    }
+    if (column === "byte_length" && changed("sheet_type", "element_count")) {
+      const widths: Record<string, number> = { U8: 1, U16: 2, S16: 2, U32: 4, S32: 4, F32: 4, STRING: 1 };
+      const width = widths[sheetType(values.sheet_type) || ""], count = Number(values.element_count);
+      return width && Number.isSafeInteger(count) && count > 0 && Number.isSafeInteger(width * count)
+        ? String(width * count) : PENDING;
+    }
+    if (column === "precision" && changed("display_digits")) {
+      const digits = Number(values.display_digits);
+      return Number.isInteger(digits) && digits >= 0 && digits <= 8
+        ? digits === 0 ? "1" : `0.${"0".repeat(digits - 1)}1` : PENDING;
+    }
+    if (column === "sheet_data_type" && changed("sheet_type", "element_count")) {
+      const type = sheetType(values.sheet_type), count = Number(values.element_count);
+      if (!type || !Number.isSafeInteger(count) || count < 1) return PENDING;
+      return count > 1 ? "STRING" : type === "F32" ? "S32" : type;
+    }
+    if (column === "sheet_upp_model" && changed("category")) {
+      const models: Record<string, number> = {
+        "系统参数1": 1, "系统参数2": 2, "任务级观测量": 99,
+        "中断级观测量": 100, "控制参数设置": 102, "任务级标定量": 103,
+      };
+      return values.category == null || values.category === "" ? "" : String(models[String(values.category)] ?? PENDING);
+    }
+    const key = fieldForColumn(data, column);
+    return key && changed(key) ? format(values[key]) : current();
+  }
 
   if (["min_value", "max_value"].includes(column) && pointIsString(data, values, row)) return "—";
   if (data.kind === "process") {
