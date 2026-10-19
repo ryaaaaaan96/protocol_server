@@ -199,7 +199,7 @@ async fn target(
         return Ok(None);
     };
     let mut business = db::read_snapshot_context(router, user, pid).await?;
-    let revision = sqlx::query_scalar("SELECT revision FROM project_state WHERE id=$1")
+    let revision = sqlx::query_scalar("SELECT revision FROM meta.project_state WHERE id=$1")
         .bind(pid)
         .fetch_one(&mut *business)
         .await?;
@@ -244,7 +244,7 @@ async fn apply(
         Value::Null
     };
     project_config::apply(tx, pid, &manifest["topology"]).await?;
-    sqlx::query("UPDATE project_state SET name=$2,description=$3 WHERE id=$1")
+    sqlx::query("UPDATE meta.project_state SET name=$2,description=$3 WHERE id=$1")
         .bind(pid)
         .bind(manifest["name"].as_str())
         .bind(manifest["description"].as_str().unwrap_or(""))
@@ -490,7 +490,7 @@ pub async fn commit(
         ));
     }
     if existing.is_none() {
-        let complete: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM audit_logs WHERE project_id=$1 AND action='project.create')")
+        let complete: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM history.events WHERE kind='audit' AND project_id=$1 AND action='project.create')")
             .bind(pid).fetch_one(&mut *tx).await?;
         if complete {
             return Err(AppError::conflict("项目已被创建，请重新预览"));
@@ -517,7 +517,7 @@ pub async fn commit(
         &history_after,
     )
     .await?;
-    let revision: i32 = sqlx::query_scalar("SELECT revision FROM project_state WHERE id=$1")
+    let revision: i32 = sqlx::query_scalar("SELECT revision FROM meta.project_state WHERE id=$1")
         .bind(pid)
         .fetch_one(&mut *tx)
         .await?;
@@ -593,7 +593,7 @@ pub async fn commit(
 }
 
 async fn was_committed(tx: &mut PgConnection, token: &str) -> Result<bool> {
-    Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM audit_logs WHERE action='project.folder_import' AND after_data->>'folder_import_token'=$1)")
+    Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM history.events WHERE kind='audit' AND action='project.folder_import' AND after_data->>'folder_import_token'=$1)")
         .bind(token).fetch_one(&mut *tx).await?)
 }
 fn finish_recovery(

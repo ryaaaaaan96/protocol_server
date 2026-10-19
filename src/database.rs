@@ -53,27 +53,43 @@ pub fn project_database_name(key: &str) -> Result<String> {
 
 pub async fn grant_runtime(pool: &PgPool, role: &str, platform: bool) -> Result<()> {
     let role = identifier(role);
-    let mutable = if platform {
-        "users,sessions,login_attempts,project_members,project_member_grants"
+    let grants = if platform {
+        format!(
+            "GRANT USAGE ON SCHEMA public TO {role}; GRANT SELECT,INSERT,UPDATE,DELETE ON public.users,public.sessions,public.login_attempts,public.project_members,public.project_member_grants TO {role}; GRANT SELECT,INSERT ON public.audit_logs TO {role}; REVOKE UPDATE,DELETE,TRUNCATE ON public.audit_logs FROM {role}; GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA public TO {role}; GRANT SELECT,INSERT,UPDATE ON public.projects TO {role};"
+        )
     } else {
-        "process_points,transmit_points,imports,import_previews,change_previews,project_edit_locks"
+        format!(
+            "GRANT USAGE ON SCHEMA public,points,history,meta TO {role}; REVOKE CREATE ON SCHEMA public,points,history,meta FROM {role}; GRANT SELECT,INSERT,UPDATE,DELETE ON points.process_points,points.transmit_points,meta.previews TO {role}; GRANT SELECT,UPDATE ON meta.project_state TO {role}; GRANT SELECT,INSERT ON history.events,history.releases TO {role}; REVOKE UPDATE,DELETE,TRUNCATE ON history.events,history.releases FROM {role}; GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA points,history,meta TO {role};"
+        )
     };
-    let readonly_history = if platform {
-        "audit_logs"
-    } else {
-        "point_history,audit_logs,releases"
-    };
-    sqlx::raw_sql(&format!("GRANT USAGE ON SCHEMA public TO {role}; GRANT SELECT,INSERT,UPDATE,DELETE ON {mutable} TO {role}; GRANT SELECT,INSERT ON {readonly_history} TO {role}; REVOKE UPDATE,DELETE,TRUNCATE ON {readonly_history} FROM {role}; GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA public TO {role};"))
-        .execute(pool).await?;
-    let state_grant = if platform {
-        "SELECT,INSERT,UPDATE ON projects"
-    } else {
-        "SELECT,UPDATE ON project_state"
-    };
-    sqlx::raw_sql(&format!("GRANT {state_grant} TO {role};"))
-        .execute(pool)
-        .await?;
+    sqlx::raw_sql(&grants).execute(pool).await?;
     Ok(())
+}
+
+// Administrative migration connections must keep SQLx's unqualified migration
+// ledger in public, even when a role has a custom default search path.
+fn admin_project_options(max_connections: u32) -> PgPoolOptions {
+    PgPoolOptions::new()
+        .max_connections(max_connections)
+        .after_connect(|conn, _| {
+            Box::pin(async move {
+                sqlx::query("SET search_path TO public,pg_catalog,pg_temp")
+                    .execute(conn)
+                    .await?;
+                Ok(())
+            })
+        })
+}
+
+async fn project_state_table(pool: &PgPool) -> Result<Option<&'static str>> {
+    let (old, grouped): (bool, bool) = sqlx::query_as("SELECT to_regclass('public.project_state') IS NOT NULL,to_regclass('meta.project_state') IS NOT NULL")
+        .fetch_one(pool).await?;
+    match (old, grouped) {
+        (true, true) => Err(AppError::conflict("项目存在重复身份表，拒绝迁移")),
+        (true, false) => Ok(Some("public.project_state")),
+        (false, true) => Ok(Some("meta.project_state")),
+        (false, false) => Ok(None),
+    }
 }
 
 impl DatabaseRouter {
@@ -154,10 +170,11 @@ impl DatabaseRouter {
                     "项目数据库路由已改变，请重启服务重新验证",
                 ));
             }
-            let identity: Option<(i64, String, String)> =
-                sqlx::query_as("SELECT id,config_key,project_uid FROM app_project_identity()")
-                    .fetch_optional(pool)
-                    .await?;
+            let identity: Option<(i64, String, String)> = sqlx::query_as(
+                "SELECT id,config_key,project_uid FROM public.app_project_identity()",
+            )
+            .fetch_optional(pool)
+            .await?;
             if identity
                 != Some((
                     registry.id,
@@ -177,6 +194,14 @@ impl DatabaseRouter {
             .max_connections(5)
             .idle_timeout(Duration::from_secs(120))
             .acquire_timeout(Duration::from_secs(10))
+            .after_connect(|conn, _| {
+                Box::pin(async move {
+                    sqlx::query("SET search_path TO pg_catalog,points,history,meta,public,pg_temp")
+                        .execute(conn)
+                        .await?;
+                    Ok(())
+                })
+            })
             .connect_with(connect)
             .await?;
         let role_safe: bool = sqlx::query_scalar(
@@ -188,9 +213,20 @@ impl DatabaseRouter {
             pool.close().await;
             return Err(AppError::bad("项目运行账号不得拥有 superuser 或 BYPASSRLS"));
         }
+        let grouped: bool = sqlx::query_scalar(
+            "SELECT to_regclass('meta.project_state') IS NOT NULL AND to_regclass('history.events') IS NOT NULL",
+        )
+        .fetch_one(&pool)
+        .await?;
+        if !grouped {
+            pool.close().await;
+            return Err(AppError::conflict(
+                "项目数据库尚未升级，请先运行 cargo run -- migrate",
+            ));
+        }
         // A restricted function exposes only the immutable routing identity.
         let identity: Option<(i64, String, String)> =
-            sqlx::query_as("SELECT id,config_key,project_uid FROM app_project_identity()")
+            sqlx::query_as("SELECT id,config_key,project_uid FROM public.app_project_identity()")
                 .fetch_optional(&pool)
                 .await?;
         if identity
@@ -231,10 +267,7 @@ impl DatabaseRouter {
                 "DATABASE_URL 与 MIGRATION_DATABASE_URL 必须指向同一主机、端口和平台数据库，只允许账号不同",
             ));
         }
-        Ok(PgPoolOptions::new()
-            .max_connections(2)
-            .connect_with(admin)
-            .await?)
+        Ok(admin_project_options(2).connect_with(admin).await?)
     }
     pub async fn provision_project(&self, pid: i64) -> Result<()> {
         let registry = self.registry(pid).await?;
@@ -281,21 +314,19 @@ impl DatabaseRouter {
         .fetch_one(admin)
         .await?;
         let url = self.migration_url.as_ref().unwrap();
-        let project = PgPoolOptions::new()
-            .max_connections(2)
+        let project = admin_project_options(2)
             .connect_with(options(url)?.database(&registry.database_name))
             .await?;
         let result = async {
-            let state: bool = sqlx::query_scalar("SELECT to_regclass('public.project_state') IS NOT NULL").fetch_one(&project).await?;
-            if state {
-                let identity: Option<(i64,String,String)> = sqlx::query_as("SELECT id,config_key,project_uid::text FROM project_state").fetch_optional(&project).await?;
+            if let Some(table) = project_state_table(&project).await? {
+                let identity: Option<(i64,String,String)> = sqlx::query_as(&format!("SELECT id,config_key,project_uid::text FROM {table}")).fetch_optional(&project).await?;
                 if identity != Some((registry.id,registry.config_key.clone(),registry.project_uid.clone())) && !(identity.is_none() && marker.as_deref()==Some(&format!("protocol-project:{}",registry.project_uid))) { return Err(AppError::conflict("同名数据库已经属于另一个项目，未修改其内容")); }
             } else {
-                let occupied: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_tables WHERE schemaname='public')").fetch_one(&project).await?;
+                let occupied: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_tables WHERE schemaname NOT IN ('pg_catalog','information_schema') AND schemaname NOT LIKE 'pg_toast%' AND schemaname NOT LIKE 'pg_temp%')").fetch_one(&project).await?;
                 if occupied || marker.as_deref()!=Some(&format!("protocol-project:{}",registry.project_uid)) { return Err(AppError::conflict("同名数据库不属于此项目，不能接管其内容")); }
             }
             PROJECT_MIGRATOR.run(&project).await.map_err(|e| { tracing::error!(error=%e,"project schema migration failed"); AppError::bad("项目数据库结构升级失败，请查看服务日志") })?;
-            sqlx::query("INSERT INTO project_state(id,config_key,name,description,project_uid) VALUES($1,$2,$3,$4,$5::text::uuid) ON CONFLICT(id) DO NOTHING")
+            sqlx::query("INSERT INTO meta.project_state(id,config_key,name,description,project_uid) VALUES($1,$2,$3,$4,$5::text::uuid) ON CONFLICT(id) DO NOTHING")
                 .bind(registry.id).bind(&registry.config_key).bind(&registry.name).bind(&registry.description).bind(&registry.project_uid).execute(&project).await?;
             grant_runtime(&project, options(&self.runtime_url)?.get_username(), false).await?;
             Ok(())
@@ -307,14 +338,13 @@ impl DatabaseRouter {
     pub async fn finish_project(&self, pid: i64) -> Result<()> {
         let admin = self.admin_pool().await?;
         let registry = self.registry(pid).await?;
-        let project = PgPoolOptions::new()
-            .max_connections(1)
+        let project = admin_project_options(1)
             .connect_with(
                 options(self.migration_url.as_ref().unwrap())?.database(&registry.database_name),
             )
             .await?;
         let result = async {
-            let row: Option<(String,String)> = sqlx::query_as("SELECT name,description FROM project_state WHERE id=$1 AND config_key=$2 AND project_uid=$3::text::uuid AND topology_config IS NOT NULL AND EXISTS(SELECT 1 FROM audit_logs WHERE project_id=$1 AND action='project.create')")
+            let row: Option<(String,String)> = sqlx::query_as("SELECT name,description FROM meta.project_state WHERE id=$1 AND config_key=$2 AND project_uid=$3::text::uuid AND topology_config IS NOT NULL AND EXISTS(SELECT 1 FROM history.events WHERE project_id=$1 AND kind='audit' AND action='project.create')")
                 .bind(pid).bind(&registry.config_key).bind(&registry.project_uid).fetch_optional(&project).await?;
             let (name,description) = row.ok_or_else(|| AppError::conflict("项目创建事务尚未完成，数据库保持未就绪状态"))?;
             let updated=sqlx::query("UPDATE projects SET name=$2,description=$3,status='ready',updated_at=now() WHERE id=$1 AND project_uid=$4::text::uuid AND config_key=$5")
@@ -332,14 +362,13 @@ impl DatabaseRouter {
             return self.finish_project(pid).await;
         }
         let admin = self.admin_pool().await?;
-        let project = PgPoolOptions::new()
-            .max_connections(1)
+        let project = admin_project_options(1)
             .connect_with(
                 options(self.migration_url.as_ref().unwrap())?.database(&registry.database_name),
             )
             .await?;
         let result = async {
-            let (name,description): (String,String) = sqlx::query_as("SELECT name,description FROM project_state WHERE id=$1 AND config_key=$2 AND project_uid=$3::text::uuid").bind(pid).bind(&registry.config_key).bind(&registry.project_uid).fetch_one(&project).await?;
+            let (name,description): (String,String) = sqlx::query_as("SELECT name,description FROM meta.project_state WHERE id=$1 AND config_key=$2 AND project_uid=$3::text::uuid").bind(pid).bind(&registry.config_key).bind(&registry.project_uid).fetch_one(&project).await?;
             let updated=sqlx::query("UPDATE projects SET name=$2,description=$3,updated_at=now() WHERE id=$1 AND project_uid=$4::text::uuid AND config_key=$5").bind(pid).bind(name).bind(description).bind(&registry.project_uid).bind(&registry.config_key).execute(&admin).await?;
             if updated.rows_affected()!=1 { return Err(AppError::conflict("平台项目身份已改变，未更新项目登记")); }
             Ok(())
@@ -383,17 +412,14 @@ impl DatabaseRouter {
 
 pub async fn migrate(url: &str) -> anyhow::Result<()> {
     let opts = PgConnectOptions::from_str(url)?;
-    let admin = PgPoolOptions::new()
-        .max_connections(2)
-        .connect_with(opts.clone())
-        .await?;
+    let admin = admin_project_options(2).connect_with(opts.clone()).await?;
     let legacy: bool =
-        sqlx::query_scalar("SELECT to_regclass('public.process_points') IS NOT NULL")
+        sqlx::query_scalar("SELECT to_regclass('public.process_points') IS NOT NULL OR to_regclass('public.project_state') IS NOT NULL OR to_regclass('meta.project_state') IS NOT NULL")
             .fetch_one(&admin)
             .await?;
     anyhow::ensure!(
         !legacy,
-        "当前连接仍是旧单库，请先运行 scripts/split-databases.mjs 迁移到平台库和项目库"
+        "迁移连接必须指向平台库；旧单库请先运行 scripts/split-databases.mjs，项目库由平台登记统一升级"
     );
     PLATFORM_MIGRATOR.run(&admin).await?;
     let runtime = PgConnectOptions::from_str(&std::env::var("DATABASE_URL")?)?;
@@ -407,14 +433,18 @@ pub async fn migrate(url: &str) -> anyhow::Result<()> {
                 == project_database_name(&entry.config_key).map_err(|e| anyhow::anyhow!(e.1))?,
             "项目数据库登记名称不匹配"
         );
-        let project = PgPoolOptions::new()
-            .max_connections(1)
+        let project = admin_project_options(1)
             .connect_with(opts.clone().database(&entry.database_name))
             .await?;
-        let identity: Option<(i64, String, String)> =
-            sqlx::query_as("SELECT id,config_key,project_uid::text FROM project_state")
-                .fetch_optional(&project)
-                .await?;
+        let table = project_state_table(&project)
+            .await
+            .map_err(|e| anyhow::anyhow!(e.1))?
+            .ok_or_else(|| anyhow::anyhow!("项目数据库缺少身份表，已停止迁移"))?;
+        let identity: Option<(i64, String, String)> = sqlx::query_as(&format!(
+            "SELECT id,config_key,project_uid::text FROM {table}"
+        ))
+        .fetch_optional(&project)
+        .await?;
         anyhow::ensure!(
             identity
                 == Some((

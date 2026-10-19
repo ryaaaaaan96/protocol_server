@@ -170,7 +170,7 @@ pub async fn apply(
         return Err(AppError::bad("顺序未改变"));
     }
     let table = point_tables::entity(kind)?;
-    sqlx::query(&format!("UPDATE {table} t SET display_order=ordered.position FROM unnest($3::bigint[]) WITH ORDINALITY AS ordered(id,position) WHERE t.project_id=$1 AND t.board_key=$2 AND t.id=ordered.id"))
+    sqlx::query(&format!("UPDATE points.{table} t SET display_order=ordered.position FROM unnest($3::bigint[]) WITH ORDINALITY AS ordered(id,position) WHERE t.project_id=$1 AND t.board_key=$2 AND t.id=ordered.id"))
         .bind(pid).bind(board_key).bind(&ids).execute(&mut *tx).await?;
     Ok(json!({"board_key":board_key,"kind":kind,"mode":rule["mode"],"before_ids":before,"ids":ids}))
 }

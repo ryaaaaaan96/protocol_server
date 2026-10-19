@@ -124,7 +124,7 @@ pub async fn read(State(s): State<AppState>, u: User, Path(pid): Path<i64>) -> R
 }
 pub async fn catalog(tx: &mut PgConnection, pid: i64) -> Result<Value> {
     let config = sqlx::query_scalar::<_, Option<Value>>(
-        "SELECT topology_config FROM project_state WHERE id=$1",
+        "SELECT topology_config FROM meta.project_state WHERE id=$1",
     )
     .bind(pid)
     .fetch_one(&mut *tx)

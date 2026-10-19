@@ -37,8 +37,8 @@ function json(files, name, update) {
 }
 
 // Modify a trusted archive produced above inside an isolated scratch database,
-// then use pg_dump to generate a real incompatible archive for rejection checks.
-async function incompatibleArchive(source, destination, testEnv) {
+// then generate real legacy-compatible and incompatible archives for HTTP checks.
+async function archiveVariant(source, destination, testEnv, versions) {
   const adminUrl = new URL(testEnv.MIGRATION_DATABASE_URL);
   adminUrl.pathname = "/postgres";
   const temporaryName = `protocol_folder_archive_${crypto.randomBytes(8).toString("hex")}`;
@@ -57,7 +57,7 @@ async function incompatibleArchive(source, destination, testEnv) {
     created = true;
     native(testEnv.PG_RESTORE_BIN || "pg_restore", ["--exit-on-error", "--no-owner", `--dbname=${nativeUrl}`, source]);
     await database.connect();
-    await database.query("UPDATE public.protocol_studio_project_dump SET payload=jsonb_set(payload::jsonb,'{migration_version}','999999'::jsonb)::text");
+    await database.query("UPDATE public.protocol_studio_project_dump SET payload=(payload::jsonb || $1::jsonb)::text", [JSON.stringify(versions)]);
     native(testEnv.PG_DUMP_BIN || "pg_dump", ["--format=custom", "--no-owner", "--no-privileges", "--table=public.protocol_studio_project_dump", `--file=${destination}`, `--dbname=${nativeUrl}`]);
   } finally {
     await database.end();
@@ -215,7 +215,11 @@ export async function checkProjectFolders({ client, engineer, viewer, engineerId
     await edit("process_points", { name: "New after export", enum_name: "NEW_AFTER_EXPORT", sig_id: 2 });
     const mutated = await graph(), members = await client.call(`${url}/members`);
     const history = await client.call(`${url}/audit`), filesBeforeDump = fingerprint(directory);
-    const dumpPreview = await checked(dumpFiles);
+    const legacy = path.join(exportParent, "legacy-v4.dump");
+    await archiveVariant(archive, legacy, testEnv, { schema_version: 4, migration_version: 1 });
+    const legacyFiles = new Map(dumpFiles);
+    legacyFiles.set("project.dump", fs.readFileSync(legacy));
+    const dumpPreview = await checked(legacyFiles);
     equal(dumpPreview.replace_data, true);
     equal(dumpPreview.summary.signal_count, exportedGraph.process_points.length);
     equal(JSON.stringify(await graph()), JSON.stringify(mutated));
@@ -251,7 +255,7 @@ export async function checkProjectFolders({ client, engineer, viewer, engineerId
     corrupt.set("project.dump", Buffer.from("not a database archive"));
     equal((await preview(corrupt)).status, 400);
     const incompatible = path.join(exportParent, "incompatible.dump");
-    await incompatibleArchive(archive, incompatible, testEnv);
+    await archiveVariant(archive, incompatible, testEnv, { migration_version: 999999 });
     const mismatched = new Map(dumpFiles);
     mismatched.set("project.dump", fs.readFileSync(incompatible));
     const rejected = await preview(mismatched);

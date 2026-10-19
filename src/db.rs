@@ -166,12 +166,39 @@ pub async fn audit(
     before: Option<Value>,
     after: Option<Value>,
 ) -> Result<()> {
-    sqlx::query("INSERT INTO audit_logs(project_id,user_id,actor_name,action,entity,before_data,after_data) VALUES($1,$2,COALESCE(current_setting('app.actor_name',true),''),$3,$4,$5,$6)")
-        .bind(project).bind(user).bind(action).bind(entity).bind(before).bind(after).execute(tx).await?;
+    // Platform membership changes also carry a project ID. The connection's
+    // transaction context, not the audit subject, decides which database owns it.
+    let local_project: Option<i64> =
+        sqlx::query_scalar("SELECT NULLIF(current_setting('app.project_id',true),'')::bigint")
+            .fetch_one(&mut *tx)
+            .await?;
+    if let Some(pid) = local_project {
+        if project != Some(pid) {
+            return Err(AppError::bad("审计对象与当前项目不一致"));
+        }
+        sqlx::query("INSERT INTO history.events(project_id,kind,actor_id,actor_name,action,entity,before_data,after_data,project_revision) SELECT $1,'audit',$2,COALESCE(current_setting('app.actor_name',true),''),$3,$4,$5,$6,revision FROM meta.project_state WHERE id=$1")
+            .bind(pid).bind(user).bind(action).bind(entity).bind(before).bind(after).execute(tx).await?;
+    } else {
+        sqlx::query("INSERT INTO public.audit_logs(project_id,user_id,actor_name,action,entity,before_data,after_data) VALUES($1,$2,COALESCE(current_setting('app.actor_name',true),''),$3,$4,$5,$6)")
+            .bind(project).bind(user).bind(action).bind(entity).bind(before).bind(after).execute(tx).await?;
+    }
+    Ok(())
+}
+pub async fn record_import(
+    tx: &mut PgConnection,
+    pid: i64,
+    user: i64,
+    filename: &str,
+    sha256: &str,
+    report: &Value,
+) -> Result<()> {
+    let metadata = json!({"filename":filename,"sha256":sha256,"report":report});
+    sqlx::query("INSERT INTO history.events(project_id,kind,action,entity,actor_id,actor_name,metadata,project_revision) SELECT $1,'import','import.complete','workbook',$2,COALESCE(current_setting('app.actor_name',true),''),$3,revision FROM meta.project_state WHERE id=$1")
+        .bind(pid).bind(user).bind(metadata).execute(tx).await?;
     Ok(())
 }
 pub async fn touch(tx: &mut PgConnection, pid: i64) -> Result<()> {
-    sqlx::query("UPDATE project_state SET revision=revision+1,updated_at=now() WHERE id=$1")
+    sqlx::query("UPDATE meta.project_state SET revision=revision+1,updated_at=now() WHERE id=$1")
         .bind(pid)
         .execute(tx)
         .await?;
@@ -189,7 +216,7 @@ pub async fn require_admin(tx: &mut PgConnection) -> Result<()> {
 }
 pub async fn lock_project(tx: &mut PgConnection, pid: i64) -> Result<i32> {
     Ok(
-        sqlx::query_scalar("SELECT revision FROM project_state WHERE id=$1 FOR UPDATE")
+        sqlx::query_scalar("SELECT revision FROM meta.project_state WHERE id=$1 FOR UPDATE")
             .bind(pid)
             .fetch_one(tx)
             .await?,

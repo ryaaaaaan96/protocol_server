@@ -160,12 +160,11 @@ async function runIntegration(){
       const url=new URL(migration);url.pathname=`/${entry.database_name}`;
       const business=new pg.Client({connectionString:url.toString()});await business.connect();
       try{
-        const tables=(await business.query("SELECT tablename FROM pg_tables WHERE schemaname='public'")).rows.map(row=>row.tablename);
-        for(const name of ["project_state","process_points","transmit_points","point_history","releases"])
+        const tables=(await business.query("SELECT schemaname||'.'||tablename AS name FROM pg_tables WHERE schemaname IN ('public','points','history','meta') ORDER BY 1")).rows.map(row=>row.name);
+        equal(tables.length,7);
+        for(const name of ["public._sqlx_migrations","meta.project_state","meta.previews","points.process_points","points.transmit_points","history.events","history.releases"])
           ok(tables.includes(name),`project contains ${name}`);
-        for(const name of ["users","sessions","projects","project_members","project_member_grants"])
-          ok(!tables.includes(name),`project excludes ${name}`);
-        const state=(await business.query("SELECT id,config_key,project_uid FROM project_state")).rows;
+        const state=(await business.query("SELECT id,config_key,project_uid FROM meta.project_state")).rows;
         equal(state.length,1);equal(state[0].id,entry.id);equal(state[0].config_key,entry.config_key);equal(state[0].project_uid,entry.project_uid);
       }finally{await business.end();}
     }

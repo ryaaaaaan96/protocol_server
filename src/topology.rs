@@ -27,14 +27,16 @@ pub fn find<'a>(g: &'a Value, t: &str, id: i64) -> Option<&'a Value> {
     rows(g, t).iter().find(|v| num(v, "id") == id)
 }
 pub async fn snapshot(tx: &mut PgConnection, pid: i64, _computed: bool) -> Result<Value> {
-    let project: Value = sqlx::query_scalar("SELECT jsonb_build_object('project_config',topology_config,'revision',revision,'schema_version',schema_version) FROM project_state WHERE id=$1")
+    let project: Value = sqlx::query_scalar("SELECT jsonb_build_object('project_config',topology_config,'revision',revision,'schema_version',schema_version) FROM meta.project_state WHERE id=$1")
         .bind(pid).fetch_one(&mut *tx).await?;
     let mut graph = project;
     for table in TABLES {
         graph[*table] = json!(
             db::all_json(
                 tx,
-                &format!("SELECT to_jsonb(t) FROM {table} t WHERE project_id=$1 ORDER BY id"),
+                &format!(
+                    "SELECT to_jsonb(t) FROM points.{table} t WHERE project_id=$1 ORDER BY id"
+                ),
                 pid
             )
             .await?
@@ -187,11 +189,12 @@ pub async fn preview(
     }
     let base = crate::change_merge::document(&before);
     let patch = json_patch::diff(&base, &crate::change_merge::document(&after));
-    sqlx::query("DELETE FROM change_previews WHERE project_id=$1 AND expires_at<=now()")
+    sqlx::query("DELETE FROM meta.previews WHERE kind='change' AND project_id=$1 AND created_by=$2 AND expires_at<=now()")
         .bind(pid)
+        .bind(u.id)
         .execute(&mut *tx)
         .await?;
-    let id:i64=sqlx::query_scalar("INSERT INTO change_previews(project_id,created_by,revision,change,merge_base,merge_patch) VALUES($1,$2,$3,$4,$5,$6) RETURNING id")
+    let id:i64=sqlx::query_scalar("INSERT INTO meta.previews(kind,project_id,created_by,revision,payload,merge_base,merge_patch) VALUES('change',$1,$2,$3,$4,$5,$6) RETURNING id")
         .bind(pid).bind(u.id).bind(revision).bind(serde_json::to_value(&c)?)
         .bind(base).bind(serde_json::to_value(patch)?).fetch_one(&mut *tx).await?;
     tx.commit().await?;
@@ -206,8 +209,8 @@ pub async fn commit(
 ) -> Result<Json<Value>> {
     let mut tx = db::context(&s.pool, &u, Some(pid), true).await?;
     let revision = db::lock_project(&mut tx, pid).await?;
-    let pending:Value=sqlx::query_scalar("SELECT to_jsonb(p) FROM change_previews p WHERE project_id=$1 AND id=$2 AND created_by=$3 AND expires_at>now() FOR UPDATE").bind(pid).bind(id).bind(u.id).fetch_optional(&mut *tx).await?.ok_or(AppError::bad("变更预览已过期、已提交或不属于当前用户"))?;
-    let c: Change = serde_json::from_value(pending["change"].clone())?;
+    let pending:Value=sqlx::query_scalar("SELECT to_jsonb(p) FROM meta.previews p WHERE kind='change' AND project_id=$1 AND id=$2 AND created_by=$3 AND expires_at>now() FOR UPDATE").bind(pid).bind(id).bind(u.id).fetch_optional(&mut *tx).await?.ok_or(AppError::bad("变更预览已过期、已提交或不属于当前用户"))?;
+    let c: Change = serde_json::from_value(pending["payload"].clone())?;
     let access = crate::permissions::load(&mut tx, pid).await?;
     if c.entity == "project_config" {
         access.require_all()?;
@@ -297,13 +300,13 @@ pub async fn commit(
     } else {
         find(&before, &c.entity, num(&row, "id")).cloned()
     };
+    db::touch(&mut tx, pid).await?;
     db::audit(
         &mut tx, u.id, Some(pid), &format!("topology.{}", c.operation),
         &format!("{}:{}", c.entity, row["id"]),
         Some(json!({"record":before_record,"revision":revision})),
         Some(json!({"record":if c.operation == "delete" {Value::Null} else {row.clone()},"impact":effects,"merged":merged,"base_revision":c.revision})),
     ).await?;
-    db::touch(&mut tx, pid).await?;
     crate::dsp_points::history(
         &mut tx,
         pid,
@@ -313,8 +316,10 @@ pub async fn commit(
         &after,
     )
     .await?;
-    sqlx::query("DELETE FROM change_previews WHERE id=$1")
+    sqlx::query("DELETE FROM meta.previews WHERE kind='change' AND id=$1 AND project_id=$2 AND created_by=$3")
         .bind(id)
+        .bind(pid)
+        .bind(u.id)
         .execute(&mut *tx)
         .await?;
     crate::edit_lock::release_owned(&mut tx, pid, u.id).await?;
@@ -327,7 +332,7 @@ pub async fn commit(
 async fn apply_change(s: &AppState, tx: &mut PgConnection, pid: i64, c: &Change) -> Result<Value> {
     if c.entity == "project_config" {
         let key: Option<String> =
-            sqlx::query_scalar("SELECT config_key FROM project_state WHERE id=$1")
+            sqlx::query_scalar("SELECT config_key FROM meta.project_state WHERE id=$1")
                 .bind(pid)
                 .fetch_one(&mut *tx)
                 .await?;

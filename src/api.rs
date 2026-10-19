@@ -29,7 +29,7 @@ pub async fn projects(State(s): State<AppState>, u: User) -> Result<Json<Value>>
             .as_i64()
             .ok_or(AppError::bad("项目登记无效"))?;
         let mut business = db::read_snapshot_context(&s.pool, &u, pid).await?;
-        let state: Value = sqlx::query_scalar("SELECT to_jsonb(p) || jsonb_build_object('point_count',(SELECT count(*) FROM process_points WHERE project_id=$1)) FROM project_state p WHERE p.id=$1")
+        let state: Value = sqlx::query_scalar("SELECT (to_jsonb(p)-'edit_owner_id'-'edit_owner_name'-'edit_owner_username'-'edit_expires_at') || jsonb_build_object('point_count',(SELECT count(*) FROM points.process_points WHERE project_id=$1)) FROM meta.project_state p WHERE p.id=$1")
             .bind(pid).fetch_one(&mut *business).await?;
         project
             .as_object_mut()
@@ -90,7 +90,7 @@ pub async fn overview(
     Path(pid): Path<i64>,
 ) -> Result<Json<Value>> {
     let mut tx = db::read_snapshot_context(&s.pool, &u, pid).await?;
-    let project: Value = sqlx::query_scalar("SELECT to_jsonb(p) FROM project_state p WHERE id=$1")
+    let project: Value = sqlx::query_scalar("SELECT to_jsonb(p)-'edit_owner_id'-'edit_owner_name'-'edit_owner_username'-'edit_expires_at' FROM meta.project_state p WHERE id=$1")
         .bind(pid)
         .fetch_one(&mut *tx)
         .await?;
@@ -99,7 +99,7 @@ pub async fn overview(
     let stats = json!({"total":topology::rows(&g,"process_points").len(),"boards":config.board_types.len(),"signals":topology::rows(&g,"process_points").len(),"links":config.mounts.len()});
     let transmit = topology::rows(&g, "transmit_points").len();
     let report = topology_validation::validate(&g);
-    let activity=db::all_json(&mut tx,"SELECT to_jsonb(t) FROM (SELECT a.id,a.action,a.entity,a.created_at,a.actor_name AS display_name FROM audit_logs a WHERE project_id=$1 ORDER BY a.id DESC LIMIT 8) t",pid).await?;
+    let activity=db::all_json(&mut tx,"SELECT to_jsonb(t) FROM (SELECT a.id,a.action,a.entity,a.created_at,a.actor_name AS display_name FROM history.events a WHERE kind='audit' AND project_id=$1 ORDER BY a.id DESC LIMIT 8) t",pid).await?;
     Ok(Json(
         json!({"project":project,"has_configuration":topology::TABLES.iter().any(|t|g[*t].as_array().is_some_and(|a|!a.is_empty())),"stats":stats,"transmit_count":transmit,"validation":report,"activity":activity}),
     ))
@@ -110,7 +110,7 @@ pub async fn validate(
     Path(pid): Path<i64>,
 ) -> Result<Json<Value>> {
     let mut tx = db::context(&s.pool, &u, Some(pid), false).await?;
-    sqlx::query("SELECT id FROM project_state WHERE id=$1 FOR SHARE")
+    sqlx::query("SELECT id FROM meta.project_state WHERE id=$1 FOR SHARE")
         .bind(pid)
         .execute(&mut *tx)
         .await?;
@@ -126,7 +126,7 @@ pub async fn preview_import(
 ) -> Result<Json<Value>> {
     let mut tx = db::context(&s.pool, &u, Some(pid), true).await?;
     crate::permissions::require_all(&mut tx, pid).await?;
-    let dsp_only: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM project_state p CROSS JOIN LATERAL jsonb_array_elements(p.topology_config->'board_types') b WHERE p.id=$1 AND b->>'model_code'='DSP' AND b->>'point_storage'='native')")
+    let dsp_only: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM meta.project_state p CROSS JOIN LATERAL jsonb_array_elements(p.topology_config->'board_types') b WHERE p.id=$1 AND b->>'model_code'='DSP' AND b->>'point_storage'='native')")
         .bind(pid).fetch_one(&mut *tx).await?;
     tx.rollback().await?;
     let field = multipart
@@ -153,12 +153,14 @@ pub async fn preview_import(
     let mut tx = db::context(&s.pool, &u, Some(pid), true).await?;
     crate::permissions::require_all(&mut tx, pid).await?;
     let revision = db::lock_project(&mut tx, pid).await?;
-    sqlx::query("DELETE FROM import_previews WHERE created_by=$1 AND project_id=$2")
-        .bind(u.id)
-        .bind(pid)
-        .execute(&mut *tx)
-        .await?;
-    let id: i64 = sqlx::query_scalar("INSERT INTO import_previews(project_id,created_by,filename,sha256,revision,payload) VALUES($1,$2,$3,$4,$5,$6) RETURNING id")
+    sqlx::query(
+        "DELETE FROM meta.previews WHERE kind='import' AND created_by=$1 AND project_id=$2",
+    )
+    .bind(u.id)
+    .bind(pid)
+    .execute(&mut *tx)
+    .await?;
+    let id: i64 = sqlx::query_scalar("INSERT INTO meta.previews(kind,project_id,created_by,filename,sha256,revision,payload,expires_at) VALUES('import',$1,$2,$3,$4,$5,$6,now()+interval '1 hour') RETURNING id")
         .bind(pid).bind(u.id).bind(&filename).bind(&hash).bind(revision)
         .bind(json!({"kind":"dsp_native","data":data})).fetch_one(&mut *tx).await?;
     tx.commit().await?;
@@ -184,7 +186,7 @@ pub async fn commit_import(
     let mut tx = db::context(&s.pool, &u, Some(pid), true).await?;
     crate::permissions::require_all(&mut tx, pid).await?;
     let rev = db::lock_project(&mut tx, pid).await?;
-    let row:Value=sqlx::query_scalar("SELECT to_jsonb(i) FROM import_previews i WHERE project_id=$1 AND id=$2 AND created_by=$3 AND expires_at>now() FOR UPDATE").bind(pid).bind(id).bind(u.id).fetch_optional(&mut *tx).await?.ok_or(AppError::bad("预览已过期或已使用，请重新上传"))?;
+    let row:Value=sqlx::query_scalar("SELECT to_jsonb(i) FROM meta.previews i WHERE kind='import' AND project_id=$1 AND id=$2 AND created_by=$3 AND expires_at>now() FOR UPDATE").bind(pid).bind(id).bind(u.id).fetch_optional(&mut *tx).await?.ok_or(AppError::bad("预览已过期或已使用，请重新上传"))?;
     if row["revision"] != rev {
         return Err(AppError::revision_conflict(
             row["revision"].as_i64().unwrap_or_default() as i32,
@@ -207,7 +209,6 @@ pub async fn commit_import(
     if !input.replace
         && topology::TABLES
             .iter()
-            .filter(|t| **t != "change_previews")
             .any(|t| before[*t].as_array().is_some_and(|a| !a.is_empty()))
     {
         return Err(AppError::conflict("项目已有配置，必须明确确认替换"));
@@ -224,21 +225,26 @@ pub async fn commit_import(
         return Err(error);
     }
     let point_count = data.process.len();
-    sqlx::query(
-        "INSERT INTO imports(project_id,filename,sha256,report,created_by,created_by_name) VALUES($1,$2,$3,$4,$5,current_setting('app.actor_name',true))",
+    db::touch(&mut tx, pid).await?;
+    db::record_import(
+        &mut tx,
+        pid,
+        u.id,
+        row["filename"]
+            .as_str()
+            .ok_or(AppError::bad("导入预览缺少文件名"))?,
+        row["sha256"]
+            .as_str()
+            .ok_or(AppError::bad("导入预览缺少文件校验值"))?,
+        &report,
     )
-    .bind(pid)
-    .bind(row["filename"].as_str())
-    .bind(row["sha256"].as_str())
-    .bind(&report)
-    .bind(u.id)
-    .execute(&mut *tx)
     .await?;
-    sqlx::query("DELETE FROM import_previews WHERE id=$1")
+    sqlx::query("DELETE FROM meta.previews WHERE kind='import' AND id=$1 AND project_id=$2 AND created_by=$3")
         .bind(id)
+        .bind(pid)
+        .bind(u.id)
         .execute(&mut *tx)
         .await?;
-    db::touch(&mut tx, pid).await?;
     let after = topology::snapshot(&mut tx, pid, true).await?;
     crate::dsp_points::history(&mut tx, pid, u.id, "workbook.import", &before, &after).await?;
     db::audit(&mut tx,u.id,Some(pid),"import.commit","workbook",Some(before),Some(json!({"filename":row["filename"],"sha256":row["sha256"],"point_count":point_count,"validation":report}))).await?;
@@ -261,7 +267,7 @@ pub async fn releases(
     Path(pid): Path<i64>,
 ) -> Result<Json<Value>> {
     let mut tx = db::context(&s.pool, &u, Some(pid), false).await?;
-    Ok(Json(json!(db::all_json(&mut tx,"SELECT to_jsonb(r)-'snapshot'-'files' FROM releases r WHERE project_id=$1 ORDER BY id DESC",pid).await?)))
+    Ok(Json(json!(db::all_json(&mut tx,"SELECT to_jsonb(r)-'snapshot'-'files' FROM history.releases r WHERE project_id=$1 ORDER BY id DESC",pid).await?)))
 }
 #[derive(Deserialize)]
 pub struct ReleaseInput {
@@ -291,7 +297,7 @@ pub async fn release(
     }
     let snapshot = db::snapshot(&mut tx, pid).await?;
     let hash = hex::encode(Sha256::digest(serde_json::to_vec(&generated["files"])?));
-    let row:Value=sqlx::query_scalar("INSERT INTO releases(project_id,name,revision,snapshot,files,sha256,created_by,created_by_name) VALUES($1,$2,$3,$4,$5,$6,$7,current_setting('app.actor_name',true)) RETURNING to_jsonb(releases.*)-'snapshot'-'files'").bind(pid).bind(input.name.trim()).bind(rev).bind(snapshot).bind(&generated["files"]).bind(hash).bind(u.id).fetch_one(&mut *tx).await?;
+    let row:Value=sqlx::query_scalar("INSERT INTO history.releases AS inserted(project_id,name,revision,snapshot,files,sha256,created_by,created_by_name) VALUES($1,$2,$3,$4,$5,$6,$7,current_setting('app.actor_name',true)) RETURNING to_jsonb(inserted.*)-'snapshot'-'files'").bind(pid).bind(input.name.trim()).bind(rev).bind(snapshot).bind(&generated["files"]).bind(hash).bind(u.id).fetch_one(&mut *tx).await?;
     db::audit(
         &mut tx,
         u.id,
@@ -312,13 +318,14 @@ pub async fn download_release(
     Path((pid, id)): Path<(i64, i64)>,
 ) -> Result<impl IntoResponse> {
     let mut tx = db::context(&s.pool, &u, Some(pid), false).await?;
-    let row: Value =
-        sqlx::query_scalar("SELECT to_jsonb(r) FROM releases r WHERE project_id=$1 AND id=$2")
-            .bind(pid)
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await?
-            .ok_or(AppError::not_found())?;
+    let row: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(r) FROM history.releases r WHERE project_id=$1 AND id=$2",
+    )
+    .bind(pid)
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(AppError::not_found())?;
     let bytes = codegen::zip_files(
         &row["files"],
         &json!({"project_id":pid,"release_id":id,"name":row["name"],"revision":row["revision"],"sha256":row["sha256"],"created_at":row["created_at"]}),
@@ -340,7 +347,7 @@ pub async fn export_json(
     Path(pid): Path<i64>,
 ) -> Result<impl IntoResponse> {
     let mut tx = db::context(&s.pool, &u, Some(pid), false).await?;
-    sqlx::query("SELECT id FROM project_state WHERE id=$1 FOR SHARE")
+    sqlx::query("SELECT id FROM meta.project_state WHERE id=$1 FOR SHARE")
         .bind(pid)
         .execute(&mut *tx)
         .await?;
@@ -365,7 +372,7 @@ pub async fn audit(
     Path(pid): Path<i64>,
 ) -> Result<Json<Value>> {
     let mut tx = db::context(&s.pool, &u, Some(pid), false).await?;
-    Ok(Json(json!(db::all_json(&mut tx,"SELECT to_jsonb(t) FROM (SELECT a.*,a.actor_name AS display_name FROM audit_logs a WHERE project_id=$1 ORDER BY a.id DESC LIMIT 200) t",pid).await?)))
+    Ok(Json(json!(db::all_json(&mut tx,"SELECT to_jsonb(t) FROM (SELECT a.id,a.project_id,a.actor_id AS user_id,a.actor_name,a.action,a.entity,a.before_data,a.after_data,a.created_at,a.actor_name AS display_name FROM history.events a WHERE kind='audit' AND project_id=$1 ORDER BY a.id DESC LIMIT 200) t",pid).await?)))
 }
 pub async fn members(
     State(s): State<AppState>,
@@ -429,7 +436,7 @@ pub async fn set_member(
             .bind(json!({"role":"admin","edit_scope":"all","grants":[]}).to_string())
             .execute(&mut *business).await?;
         let config: Value =
-            sqlx::query_scalar("SELECT topology_config FROM project_state WHERE id=$1")
+            sqlx::query_scalar("SELECT topology_config FROM meta.project_state WHERE id=$1")
                 .bind(pid)
                 .fetch_one(&mut *business)
                 .await?;

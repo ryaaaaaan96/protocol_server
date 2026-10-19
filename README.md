@@ -9,7 +9,7 @@
 ```bash
 ./scripts/check-env.sh               # 检查缺少的工具、依赖和配置，不安装、不连接数据库
 ./scripts/init-db.sh                 # 初始化 PostgreSQL 18、账号和表结构，不创建项目
-./scripts/create-project.sh dc-ups      # 从 config/dc-ups/ 创建 DC-UPS，重复执行保留已有数据
+./scripts/create-project.sh dc-ups   # 从 config/dc-ups/ 创建 DC-UPS，重复执行保留已有数据
 ./scripts/dev.sh                     # 构建前后端并启动 HTTP 服务
 ```
 
@@ -47,7 +47,14 @@ JSON 是组织配置的编辑来源。服务器文件修改后，通过网页读
 数据库采用 **一个平台库 + 每项目一个业务库**，共用一个 PostgreSQL 实例：
 
 - `protocol_platform`：账号、登录会话、项目登记、成员权限及平台审计。
-- `protocol_project_dc_ups`：DC-UPS 的 `process_points`、`transmit_points`、`point_history`、生效配置快照、版本、编辑锁、导入和发布。
+- `protocol_project_dc_ups`：DC-UPS 的点表、历史、配置快照和发布，按 Schema 分组，共 7 张表。
+
+| 分组 | 表 | 用途 |
+| --- | --- | --- |
+| `points` | `process_points`、`transmit_points` | 当前内部点和转发映射 |
+| `history` | `events`、`releases` | 统一修改/审计/导入事件，以及不可变发布 |
+| `meta` | `project_state`、`previews` | 项目版本、生效配置和编辑权，以及待确认修改/导入 |
+| `public` | `_sqlx_migrations` | 数据库结构升级记录，必须保留 |
 
 新项目按 `protocol_project_<key>` 建库，短横线转为下划线。板卡不单独建库；业务库中没有账号或成员权限表。具体字段见 [数据库结构](docs/architecture.md)。
 
@@ -83,7 +90,9 @@ node scripts/export-project.mjs dc-ups
 - 带 Dump：替换该项目当前点表，追加修改历史，保留账号、授权、原历史和发布。
 - 不带 Dump：保留当前点表；新项目点表为空。文件夹中的 XLSX 不会自动导入。
 
-CLI 创建优先使用 Dump，否则只支持 `workbook_boards: ["DSP"]` 的 DSP 来源导入。项目 Dump 不携带历史、账号和发布，完整迁移分别备份平台库、全部项目库和配置目录。新版本只接受 schema_version 4 且迁移版本匹配的专用归档；旧归档需在匹配旧环境中处理后重新导出。
+CLI 创建优先使用 Dump，否则只支持 `workbook_boards: ["DSP"]` 的 DSP 来源导入。项目 Dump 不携带历史、账号和发布，完整迁移分别备份平台库、全部项目库和配置目录。新导出的专用归档使用 `(schema_version, migration_version) = (5, 2)`，同时兼容旧 `(4, 1)` 归档；只导入白名单中的两张点表，其他版本拒绝导入。
+
+已有独立项目库升级到分组结构时，迁移完整保留当前点、历史和发布，合并编辑权及预览存储。旧修改/导入预览失效，项目 `revision` 增加 1、`schema_version` 更新为 5；升级后刷新网页并重新预览尚未提交的修改。
 
 逐表 Excel 追加示例见 [批量添加](docs/batch-add.md)。
 

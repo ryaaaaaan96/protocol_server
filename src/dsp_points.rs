@@ -27,7 +27,7 @@ pub async fn native_board(
     board_key: &str,
 ) -> Result<Option<Value>> {
     let config: Option<Value> =
-        sqlx::query_scalar("SELECT topology_config FROM project_state WHERE id=$1")
+        sqlx::query_scalar("SELECT topology_config FROM meta.project_state WHERE id=$1")
             .bind(pid)
             .fetch_optional(&mut *tx)
             .await?
@@ -50,8 +50,8 @@ fn groups(board: &Value) -> Vec<Value> {
 
 fn table(kind: &str) -> Result<&'static str> {
     match kind {
-        "process" => Ok("process_points"),
-        "forward" | "transmit" => Ok("transmit_points"),
+        "process" => Ok("points.process_points"),
+        "forward" | "transmit" => Ok("points.transmit_points"),
         _ => Err(AppError::bad("此板卡尚未启用采集点表")),
     }
 }
@@ -115,7 +115,7 @@ async fn insert(
         .collect::<Vec<_>>()
         .join(",");
     Ok(sqlx::query_scalar(&format!(
-        "INSERT INTO {table}(project_id,board_key,{cols}) SELECT $1,$2,{selected} FROM jsonb_populate_record(NULL::{table},$3) x RETURNING to_jsonb({table})"
+        "INSERT INTO {table} AS inserted(project_id,board_key,{cols}) SELECT $1,$2,{selected} FROM jsonb_populate_record(NULL::{table},$3) x RETURNING to_jsonb(inserted)"
     )).bind(pid).bind(board_key).bind(values).fetch_one(&mut *tx).await?)
 }
 
@@ -206,7 +206,7 @@ pub async fn apply(
         {
             return Err(AppError::bad("转发端点不在已应用 JSON 的 UPP 端点配置中"));
         }
-        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM process_points WHERE project_id=$1 AND board_key=$2 AND id=$3)")
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM points.process_points WHERE project_id=$1 AND board_key=$2 AND id=$3)")
             .bind(pid).bind(board_key).bind(merged["process_point_id"].as_i64()).fetch_one(&mut *tx).await?;
         if !exists {
             return Err(AppError::bad("转发必须关联当前板卡的内部数据点"));
@@ -242,8 +242,8 @@ pub async fn table_rows(
         sqlx::query_scalar(r#"SELECT to_jsonb(p) || jsonb_build_object(
             'edit_values',to_jsonb(p),'data_type',p.internal_type,
             'resolved_sig_id',p.sig_id,
-            'forward_count',(SELECT count(*) FROM transmit_points t WHERE t.project_id=p.project_id AND t.process_point_id=p.id))
-            FROM process_points p WHERE p.project_id=$1 AND p.board_key=$2 ORDER BY p.display_order,p.id"#)
+            'forward_count',(SELECT count(*) FROM points.transmit_points t WHERE t.project_id=p.project_id AND t.process_point_id=p.id))
+            FROM points.process_points p WHERE p.project_id=$1 AND p.board_key=$2 ORDER BY p.display_order,p.id"#)
             .bind(pid).bind(board_key).fetch_all(&mut *tx).await?
     } else {
         sqlx::query_scalar(r#"SELECT to_jsonb(t) || jsonb_build_object(
@@ -254,7 +254,7 @@ pub async fn table_rows(
             'field_name',t.name,'effective_address',t.address,'effective_type',t.wire_type,
             'effective_length',t.wire_length,'address_length',t.wire_length,
             'endpoint_name',t.endpoint_key,'protocol','UPP')
-            FROM transmit_points t JOIN process_points p ON p.project_id=t.project_id AND p.board_key=t.board_key AND p.id=t.process_point_id
+            FROM points.transmit_points t JOIN points.process_points p ON p.project_id=t.project_id AND p.board_key=t.board_key AND p.id=t.process_point_id
             WHERE t.project_id=$1 AND t.board_key=$2 ORDER BY t.display_order,t.id"#)
             .bind(pid).bind(board_key).fetch_all(&mut *tx).await?
     };
@@ -281,7 +281,7 @@ pub async fn table_rows(
 
 pub async fn import(tx: &mut PgConnection, pid: i64, data: &DspImport) -> Result<()> {
     let config: Option<Value> =
-        sqlx::query_scalar("SELECT topology_config FROM project_state WHERE id=$1")
+        sqlx::query_scalar("SELECT topology_config FROM meta.project_state WHERE id=$1")
             .bind(pid)
             .fetch_one(&mut *tx)
             .await?;
@@ -299,12 +299,12 @@ pub async fn import(tx: &mut PgConnection, pid: i64, data: &DspImport) -> Result
         return Err(AppError::bad("DSP 工作簿没有可导入的内部数据"));
     }
     let board_key = strv(board, "code");
-    sqlx::query("DELETE FROM transmit_points WHERE project_id=$1 AND board_key=$2")
+    sqlx::query("DELETE FROM points.transmit_points WHERE project_id=$1 AND board_key=$2")
         .bind(pid)
         .bind(board_key)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("DELETE FROM process_points WHERE project_id=$1 AND board_key=$2")
+    sqlx::query("DELETE FROM points.process_points WHERE project_id=$1 AND board_key=$2")
         .bind(pid)
         .bind(board_key)
         .execute(&mut *tx)
@@ -714,12 +714,12 @@ pub async fn history(
     }
     let count = changes.len() as u64;
     let result = sqlx::query(r#"WITH batch AS (SELECT gen_random_uuid() AS id), actor AS (SELECT current_setting('app.actor_name',true) AS display_name)
-        INSERT INTO point_history(project_id,batch_id,batch_label,entity_type,record_id,board_key,group_key,action,before_data,after_data,actor_id,actor_name,project_revision,config_snapshot)
-        SELECT $1,batch.id,$3,c.entity_type,c.record_id,c.board_key,c.group_key,c.action,
+        INSERT INTO history.events(kind,project_id,batch_id,batch_label,entity,entity_type,record_id,board_key,group_key,action,before_data,after_data,actor_id,actor_name,project_revision,config_snapshot)
+        SELECT 'point',$1,batch.id,$3,c.entity_type,c.entity_type,c.record_id,c.board_key,c.group_key,c.action,
             NULLIF(c.before_data,'null'::jsonb),NULLIF(c.after_data,'null'::jsonb),$2,actor.display_name,p.revision,
             jsonb_build_object('before',$5::jsonb,'after',p.topology_config)
         FROM jsonb_to_recordset($4) AS c(entity_type text,record_id bigint,board_key text,group_key text,action text,before_data jsonb,after_data jsonb)
-        CROSS JOIN batch CROSS JOIN actor JOIN project_state p ON p.id=$1"#)
+        CROSS JOIN batch CROSS JOIN actor JOIN meta.project_state p ON p.id=$1"#)
         .bind(pid).bind(user_id).bind(batch_label).bind(json!(changes)).bind(&before["project_config"]).execute(&mut *tx).await?;
     if result.rows_affected() != count {
         return Err(AppError::bad("操作者或项目状态无效，无法完整保存点表历史"));

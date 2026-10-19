@@ -1,5 +1,9 @@
 #!/usr/bin/env node
-// One-time, resumable v15 migration. Source and backups are never deleted.
+// One-time, resumable v15 → split-schema v1 migration. Run the current binary's
+// `migrate` command afterwards to apply grouped-schema v2 and later migrations.
+// Keep this intermediate schema fixed so interrupted copies can be verified
+// against their original source without reinterpreting historical records.
+// Source and backups are never deleted.
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -76,7 +80,7 @@ async function grantRuntime(db, kind, role) {
 async function migrate(db, kind) {
   await db.query(sqlxTable);
   const directory = path.join(root, "migrations", kind);
-  for (const file of fs.readdirSync(directory).filter(file => /^\d+_.*\.sql$/.test(file)).sort()) {
+  for (const file of fs.readdirSync(directory).filter(file => /^0001_.*\.sql$/.test(file)).sort()) {
     const sql = fs.readFileSync(path.join(directory, file));
     await db.query(sql.toString());
     await db.query("INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time) VALUES($1,$2,true,$3,0)", [Number(file.split("_")[0]), file.replace(/^\d+_/, "").replace(/\.sql$/, "").replaceAll("_", " "), crypto.createHash("sha384").update(sql).digest()]);
@@ -126,7 +130,8 @@ export async function splitDatabases(options = {}) {
         if (!registration || registration.project_uid !== project.uid || registration.config_key !== project.key || registration.database_name !== project.database || registration.status !== "ready") throw new Error("已迁移的项目登记身份发生变化，请人工检查。");
         const db = await connect(pg, dbUrl(sourceUrl, project.database));
         clients.push(db);
-        const states = (await db.query("SELECT id,project_uid,config_key FROM project_state")).rows;
+        const grouped = (await db.query("SELECT to_regclass('meta.project_state') IS NOT NULL AS ready")).rows[0].ready;
+        const states = (await db.query(`SELECT id,project_uid,config_key FROM ${grouped ? "meta" : "public"}.project_state`)).rows;
         if (states.length !== 1 || states[0].id !== project.id || states[0].project_uid !== project.uid || states[0].config_key !== project.key) throw new Error("已迁移的项目数据库身份与登记不一致，请人工检查。");
       }
       return { journalPath, backup: journal.backup?.file, platformName, projects: journal.projects, alreadyComplete: true };
@@ -236,6 +241,10 @@ export async function splitDatabases(options = {}) {
       const db = await connect(pg, dbUrl(sourceUrl, name));
       clients.push(db);
       const initialized = (await db.query("SELECT to_regclass('public._sqlx_migrations') IS NOT NULL AS yes")).rows[0].yes;
+      if (initialized) {
+        const version = (await db.query("SELECT max(version)::int AS version FROM public._sqlx_migrations WHERE success")).rows[0].version;
+        if (version !== 1) throw new Error(`未完成拆分的目标库 ${name} 已升级或结构未知，不能按旧表接续校验。请先恢复拆分现场，再执行新版 migrate。`);
+      }
       if (!initialized) {
         await db.query("BEGIN");
         try {

@@ -10,17 +10,16 @@
 | 平台库 | `projects` | 项目 ID、不可变 UUID、config_key、名称、数据库名和创建状态 |
 | 平台库 | `project_members` / `project_member_grants` | 项目成员及板卡、端点编辑范围 |
 | 平台库 | `audit_logs` | 成员与权限操作审计 |
-| 每项目业务库 | `project_state` | 单行项目身份、UUID、revision、schema_version、生效 topology_config |
-| 项目库 | `process_points` / `transmit_points` | 当前 DSP 内部数据及 UPP 转发映射 |
-| 项目库 | `point_history` | 业务行的追加式修改历史 |
-| 项目库 | `project_edit_locks` | 有期限的编辑权，持有人名称快照 |
-| 项目库 | `imports` / `import_previews` / `change_previews` | 导入记录及修改预览 |
-| 项目库 | `audit_logs` / `releases` | 项目操作审计、不可变发布快照 |
-| 每个库 | `_sqlx_migrations` | 各自的迁移版本和校验和 |
+| 每项目业务库 | `points.process_points` / `points.transmit_points` | 当前 DSP 内部数据及 UPP 转发映射 |
+| 项目库 | `history.events` | 追加式点修改、项目审计和导入事件 |
+| 项目库 | `history.releases` | 不可变发布快照及生成文件 |
+| 项目库 | `meta.project_state` | 单行项目身份、UUID、版本、生效配置和编辑权 |
+| 项目库 | `meta.previews` | 待确认的修改或工作簿导入 |
+| 每个库 | `public._sqlx_migrations` | 各自的迁移版本和校验和 |
 
-平台库共 8 张表，每个项目库共 11 张表（包含迁移记录表）。组织配置没有独立 SQL 表，板卡也不单独建库。业务库不保存账号密码或权限副本；历史记录保存操作者 ID 和名称快照，不跨数据库建用户外键。
+平台库共 8 张表，每个项目库共 7 张表（包含迁移记录表）。`points`、`history`、`meta` 是同一数据库中的 Schema；在 DBeaver 中按 Schema 展开即可查看。它们共用事务和外键，板卡不单独建库。业务库不保存账号密码或权限副本；历史保存操作者 ID 和名称快照，不跨数据库建用户外键。
 
-`config/dc-ups/project.json` 是可编辑来源，业务库 `project_state.topology_config` 是校验导入后的生效快照。平台登记仅负责定位项目，不能用 JSON 中任意数据库地址替换路由。路由同时核验项目 ID、key 和 UUID，避免同名数据库被误用。
+`config/dc-ups/project.json` 是可编辑来源，业务库 `meta.project_state.topology_config` 是校验导入后的生效快照。平台登记仅负责定位项目，不能用 JSON 中任意数据库地址替换路由。路由同时核验项目 ID、key 和 UUID，避免同名数据库被误用。
 
 ## JSON 组织
 
@@ -44,9 +43,9 @@
 
 | 表 | 主要字段 |
 | --- | --- |
-| `process_points` | `group_key`、`name`、`enum_name`、可空 `sig_id`、`internal_type`、`element_count`、`byte_length`、`unit` |
+| `points.process_points` | `group_key`、`name`、`enum_name`、可空 `sig_id`、`internal_type`、`element_count`、`byte_length`、`unit` |
 | 内部点参数 | `default_value`、`min_value`、`max_value`、`boot_restore`、`manual_restore`、`process_enabled`、`flags`、`callback`、`notes` |
-| `transmit_points` | `process_point_id`、`endpoint_key`、`name`、`upp_model`、`address`、`wire_type`、`wire_length`、`scale`、`access`、`byte_order`、`conversion`、`enabled` |
+| `points.transmit_points` | `process_point_id`、`endpoint_key`、`name`、`upp_model`、`address`、`wire_type`、`wire_length`、`scale`、`access`、`byte_order`、`conversion`、`enabled` |
 | 两表追溯信息 | `display_order`、`source_sheet`、`source_row`；内部点另有 `metadata` |
 
 ```mermaid
@@ -54,19 +53,46 @@ erDiagram
   project_state ||--o{ process_points : owns
   project_state ||--o{ transmit_points : owns
   process_points ||--o{ transmit_points : maps
-  project_state ||--o{ point_history : records
+  project_state ||--o{ events : records
+  project_state ||--o{ previews : stages
+  project_state ||--o{ releases : freezes
 ```
 
 转发以 `process_point_id` 关联内部点，避免修改枚举或 sigID 时断开关系。数据库外键防止跨项目引用，应用校验确保相同板卡且端点、分组在生效 JSON 中存在。移除被数据或授权引用的配置会被拒绝。
 
 `address` 是明确的 UPP 字节偏移，拖动行只改 `display_order`。内部 F32 与线上 S32 可使用显式 `fixed_point` 转换；数组可用 `array_bytes` 映射。未知 DSP sigID 保持空值。
 
-## 历史、并发和发布
+## 统一历史事件
 
-业务数据与历史分表：前两张存当前状态，`point_history` 按修改追加。字段包含项目、批次、记录类型/ID、板卡/分组、动作、前后 JSON、操作者、项目 revision、配置快照和时间。点删除后历史仍保留；相同值不产生点变化记录。
+`history.events` 按 `kind` 区分事件，业务表只保存当前状态：
+
+| kind | 内容及字段 |
+| --- | --- |
+| `point` | 单个点的 `entity_type`、`record_id`、板卡/分组、`action`（insert/update/delete）、前后 JSON、批次、配置快照及项目版本 |
+| `audit` | 项目操作的 `action`、`entity`、前后内容，例如创建项目、导入配置、发布 |
+| `import` | `action=import.complete`，`metadata` 保存文件名、SHA-256 和校验报告 |
+
+公共字段包括 `id`、`project_id`、`actor_id`、`actor_name`、`created_at`。同次点修改使用同一个 `batch_id`；删除点仍保留历史，相同值不产生点变化事件。发布快照保存在独立的 `history.releases`，避免混入每次编辑的差异记录。
+
+旧 `point_history`、项目 `audit_logs`、`imports` 完整迁入统一事件表，`legacy_source` / `legacy_id` 保存原表名和原 ID；点历史 ID 保持不变，旧审计和导入获得新的事件 ID。旧审计和导入没有记录项目版本，迁移后 `project_revision` 保持空值；新事件记录实际提交版本。平台库的 `audit_logs` 仍独立保留。
+
+```sql
+SELECT * FROM history.events WHERE kind = 'point' ORDER BY id DESC LIMIT 100;
+SELECT metadata FROM history.events WHERE kind = 'import' ORDER BY id DESC;
+```
+
+## 项目状态、预览与并发
+
+`meta.project_state` 每项目只有一行，包含身份、`revision`、`schema_version` 和 `topology_config`。原独立编辑锁并入 `edit_owner_id`、`edit_owner_name`、`edit_owner_username`、`edit_expires_at`；数据库统一仲裁编辑权，到期或提交后释放。租约续期不增加业务 revision，锁字段不出现在项目导出或发布快照中。
+
+`meta.previews` 允许同项目同时存在多条预览，`kind=change` 存修改内容及 `merge_base` / `merge_patch`，`kind=import` 存解析后的工作簿以及文件名、SHA-256。每条记录带创建人、基准版本和到期时间；修改预览 15 分钟、工作簿预览 1 小时有效。查询、提交和删除同时检查项目、种类及创建人，不能拿导入预览提交修改，也不能清除他人的预览。
 
 预览在事务内试写后回滚。提交再次校验编辑权、revision、字段冲突、关联和权限，业务修改、历史、审计及 revision 在同一事务提交。`json-patch` 比较基线与最新状态，无关字段可合并；同字段或依赖冲突不覆盖。项目编辑租约降低同时修改概率，版本检查处理过期草稿。
 
-PostgreSQL 的事务/MVCC 不替代这些应用历史记录。运行角色不能修改或删除既有 `point_history` 和发布记录；RLS 校验当前项目与事务内权限。服务器先在平台库锁定账号及项目权限，再把授权快照设置到业务事务；直到业务提交完成才释放平台锁。撤权与提交按锁顺序执行，数据库不使用跨库用户查询。`project_member_grants` 使用稳定 `board_key` / `endpoint_key`，全板卡授权覆盖内部点与该板卡协议授权。
+PostgreSQL 的事务/MVCC 不替代这些应用历史记录。运行角色不能修改或删除既有事件和发布记录；RLS 校验当前项目与事务内权限。服务器先在平台库锁定账号及项目权限，再把授权快照设置到业务事务；直到业务提交完成才释放平台锁。撤权与提交按锁顺序执行，数据库不使用跨库用户查询。`project_member_grants` 使用稳定 `board_key` / `endpoint_key`，全板卡授权覆盖内部点与该板卡协议授权。
 
-项目 Dump 只包含两张当前业务表，导入时重新分配 ID 并重建引用，保留目标已有历史；完整迁移必须停写，分别备份平台库、各项目库和 config 目录，并一起恢复，保留相同 UUID。旧关系图与旧 C 生成流程已移除，当前仅实现 DSP，UPM 采集留待后续。
+## 升级与项目归档
+
+项目迁移 `0002_grouped_project.sql` 将现有库整理为 7 张表，完整保留点数据、历史、发布和已有编辑权。旧预览全部失效，现有项目 `revision` 增加 1，`schema_version` 更新为 5。刷新客户端后重新检查待提交草稿；不要删除 `_sqlx_migrations` 或修改已应用的迁移文件。
+
+项目 Dump 只包含两张当前业务表，导入时重新分配 ID 并重建引用，保留目标已有历史。新归档版本为 `(schema_version, migration_version)=(5,2)`，兼容旧 `(4,1)`，仍只解析白名单内的两张点表，不执行上传 SQL。完整迁移须停写，分别备份平台库、各项目库和 config 目录，并一起恢复，保留相同 UUID。旧共享库 v15 必须先拆分为项目迁移 v1，再运行 `cargo run -- migrate` 升级到当前结构。当前仅实现 DSP，UPM 采集留待后续。

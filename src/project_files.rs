@@ -590,9 +590,7 @@ impl ProjectFiles {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("project.dump");
-            sqlx::query("INSERT INTO imports(project_id,filename,sha256,report,created_by,created_by_name) VALUES($1,$2,$3,$4,$5,current_setting('app.actor_name',true))")
-                .bind(pid).bind(filename).bind(&hash).bind(&report).bind(user.id)
-                .execute(&mut *tx).await?;
+            db::record_import(tx, pid, user.id, filename, &hash, &report).await?;
             return Ok(
                 json!({"filename":filename,"sha256":hash,"validation":report,"restored":restored}),
             );
@@ -633,8 +631,7 @@ impl ProjectFiles {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("points.xlsx");
-            sqlx::query("INSERT INTO imports(project_id,filename,sha256,report,created_by,created_by_name) VALUES($1,$2,$3,$4,$5,current_setting('app.actor_name',true))")
-                .bind(pid).bind(filename).bind(&hash).bind(&report).bind(user.id).execute(&mut *tx).await?;
+            db::record_import(tx, pid, user.id, filename, &hash, &report).await?;
             return Ok(
                 json!({"filename":filename,"sha256":hash,"boards":["DSP"],"process_count":data.process.len(),"transmit_count":data.transmit.len(),"validation":report}),
             );
@@ -684,11 +681,11 @@ impl ProjectFiles {
         router.provision_project(pid).await?;
         let mut tx = db::creation_context(router, user, pid).await?;
         db::lock_project(&mut tx, pid).await?;
-        let complete: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM audit_logs WHERE project_id=$1 AND action='project.create')")
+        let complete: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM history.events WHERE kind='audit' AND project_id=$1 AND action='project.create')")
             .bind(pid).fetch_one(&mut *tx).await?;
         if !complete {
             project_config::apply(&mut tx, pid, config).await?;
-            sqlx::query("UPDATE project_state SET name=$2,description=$3 WHERE id=$1")
+            sqlx::query("UPDATE meta.project_state SET name=$2,description=$3 WHERE id=$1")
                 .bind(pid)
                 .bind(name)
                 .bind(description)
@@ -699,7 +696,7 @@ impl ProjectFiles {
                 Some(json!({"id":pid,"config_key":key,"name":name,"topology":config,"import":imported}))).await?;
         }
         let project: Value =
-            sqlx::query_scalar("SELECT to_jsonb(p) FROM project_state p WHERE id=$1")
+            sqlx::query_scalar("SELECT to_jsonb(p)-'edit_owner_id'-'edit_owner_name'-'edit_owner_username'-'edit_expires_at' FROM meta.project_state p WHERE id=$1")
                 .bind(pid)
                 .fetch_one(&mut *tx)
                 .await?;

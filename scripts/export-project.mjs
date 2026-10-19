@@ -118,7 +118,7 @@ function entryExists(filename) {
 
 /** Destination is a parent directory; the result is destination/<project key>. */
 export async function exportProject(key, destination, overrides = {}) {
-  if (!/^[a-z][a-z0-9_-]{0,63}$/.test(key || "")) throw new Error("项目 key 格式无效。");
+  if (!/^[a-z][a-z0-9_-]{0,39}$/.test(key || "")) throw new Error("项目 key 格式无效。");
   const env = { ...environment(), ...overrides };
   const configRoot = path.resolve(root, env.PROJECT_CONFIG_DIR || "config");
   const requestedSource = path.join(configRoot, key);
@@ -179,22 +179,24 @@ export async function exportProject(key, destination, overrides = {}) {
     sourceDb = new pg.Client({ connectionString: projectUrl.toString() });
     await sourceDb.connect();
     await sourceDb.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
-    const { rows: projects } = await sourceDb.query("SELECT id,project_uid,config_key,revision,schema_version,topology_config FROM project_state");
+    const { rows: stateSchema } = await sourceDb.query("SELECT to_regclass('meta.project_state') IS NOT NULL AS ready");
+    if (!stateSchema[0].ready) throw new Error("请先运行 cargo run -- migrate，将项目数据库迁移到 v5 后导出。");
+    const { rows: projects } = await sourceDb.query("SELECT id,project_uid,config_key,revision,schema_version,topology_config FROM meta.project_state");
     if (projects.length !== 1 || projects[0].id !== registry.id || projects[0].project_uid !== registry.project_uid || projects[0].config_key !== key) throw new Error("项目数据库与平台登记的身份不一致。");
     const project = projects[0];
-    if (project.schema_version !== 4) throw new Error("请先迁移项目数据库到 v4。");
+    if (project.schema_version !== 5) throw new Error("请先迁移项目数据库到 v5。");
     if (comparableTopology(manifest.topology) !== comparableTopology(project.topology_config)) {
       throw new Error("服务器 project.json 与已应用的项目拓扑不同，请先在网页检查并导入配置后再导出。");
     }
-    const { rows: migrations } = await sourceDb.query("SELECT max(version)::int AS version FROM _sqlx_migrations WHERE success");
+    const { rows: migrations } = await sourceDb.query("SELECT max(version)::int AS version FROM public._sqlx_migrations WHERE success");
     const payload = {
-      format: "protocol-studio-project", version: 1, key, schema_version: 4,
+      format: "protocol-studio-project", version: 1, key, schema_version: 5,
       migration_version: migrations[0].version, source_revision: project.revision,
       tables: {},
     };
     let total = 0;
     for (const table of tables) {
-      const { rows } = await sourceDb.query(`SELECT to_jsonb(t) AS row FROM ${table} t WHERE project_id=$1 ORDER BY id`, [project.id]);
+      const { rows } = await sourceDb.query(`SELECT to_jsonb(t) AS row FROM points.${table} t WHERE project_id=$1 ORDER BY id`, [project.id]);
       payload.tables[table] = rows.map(({ row }) => { assertSafeIds(row); return row; });
       total += rows.length;
     }

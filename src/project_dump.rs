@@ -16,15 +16,15 @@ use tokio::{io::AsyncReadExt, process::Command};
 const MAX_DECODED: u64 = 64 * 1024 * 1024;
 const MAX_ROWS: usize = 100_000;
 
-fn supported_migration_version() -> i64 {
-    sqlx::migrate!("./migrations/project")
-        .iter()
-        .map(|migration| migration.version)
-        .max()
-        .expect("application includes database migrations")
-}
 // Restore processing rows before their forwarding references.
 const INSERT_ORDER: &[&str] = &["process_points", "transmit_points"];
+
+// Grouping tables and consolidating operational records leaves the portable
+// point columns unchanged. Accept only the two explicitly compatible formats.
+fn supported_archive(payload: &Value) -> bool {
+    (payload["schema_version"] == 4 && payload["migration_version"] == 1)
+        || (payload["schema_version"] == 5 && payload["migration_version"] == 2)
+}
 
 fn columns(table: &str) -> String {
     let fields = match table {
@@ -49,12 +49,16 @@ fn positive(value: &Value) -> Option<i64> {
 pub fn validate(payload: &Value, expected_key: &str) -> Result<()> {
     if payload["format"] != "protocol-studio-project"
         || payload["version"] != 1
-        || payload["schema_version"] != 4
         || payload["key"] != expected_key
         || positive(&payload["migration_version"]).is_none()
     {
         return Err(AppError::bad(
             "Dump 格式、版本或项目 key 不匹配；请使用 scripts/export-project.mjs 导出项目",
+        ));
+    }
+    if !supported_archive(payload) {
+        return Err(AppError::bad(
+            "Dump 结构或迁移版本不兼容；仅接受 schema_version/migration_version 为 4/1 或 5/2 的项目归档",
         ));
     }
     let tables = payload["tables"]
@@ -243,24 +247,16 @@ pub async fn decode(path: &Path, expected_key: &str) -> Result<Value> {
 /// topology validation, revision bump and audit. This never commits independently.
 pub async fn replace(tx: &mut PgConnection, pid: i64, payload: &Value) -> Result<Value> {
     let (key, schema_version): (Option<String>, i32) =
-        sqlx::query_as("SELECT config_key,schema_version FROM project_state WHERE id=$1")
+        sqlx::query_as("SELECT config_key,schema_version FROM meta.project_state WHERE id=$1")
             .bind(pid)
             .fetch_one(&mut *tx)
             .await?;
     validate(payload, key.as_deref().unwrap_or_default())?;
-    if schema_version != 4 {
-        return Err(AppError::bad("请先将目标项目迁移到 v4，再导入 Dump"));
-    }
-    // SQLx owns its migration ledger. The runtime role deliberately cannot read
-    // that private table; the archive must match this application's embedded schema.
-    let migration = supported_migration_version();
-    if payload["migration_version"] != migration {
-        return Err(AppError::bad(format!(
-            "Dump 迁移版本与当前程序支持版本 {migration} 不一致，请先统一版本再导出"
-        )));
+    if schema_version != 5 {
+        return Err(AppError::bad("请先将目标项目迁移到 v5，再导入 Dump"));
     }
     for table in INSERT_ORDER.iter().rev() {
-        sqlx::query(&format!("DELETE FROM {table} WHERE project_id=$1"))
+        sqlx::query(&format!("DELETE FROM points.{table} WHERE project_id=$1"))
             .bind(pid)
             .execute(&mut *tx)
             .await?;
@@ -272,7 +268,7 @@ pub async fn replace(tx: &mut PgConnection, pid: i64, payload: &Value) -> Result
         let allocated: Vec<i64> = sqlx::query_scalar(
             "SELECT nextval(pg_get_serial_sequence($1,'id')) FROM generate_series(1,$2::int)",
         )
-        .bind(table)
+        .bind(format!("points.{table}"))
         .bind(rows.len() as i32)
         .fetch_all(&mut *tx)
         .await?;
@@ -296,7 +292,7 @@ pub async fn replace(tx: &mut PgConnection, pid: i64, payload: &Value) -> Result
         }
         if !remapped.is_empty() {
             let cols = columns(table);
-            sqlx::query(&format!("INSERT INTO {table} ({cols}) SELECT {cols} FROM jsonb_populate_recordset(NULL::{table},$1::jsonb)"))
+            sqlx::query(&format!("INSERT INTO points.{table} ({cols}) SELECT {cols} FROM jsonb_populate_recordset(NULL::points.{table},$1::jsonb)"))
                 .bind(json!(remapped)).execute(&mut *tx).await?;
         }
         counts.insert(table.into(), json!(rows.len()));
@@ -313,7 +309,23 @@ mod tests {
             .iter()
             .map(|table| ((*table).into(), json!([])))
             .collect();
-        json!({"format":"protocol-studio-project","version":1,"schema_version":4,"migration_version":supported_migration_version(),"key":"example","tables":tables})
+        json!({"format":"protocol-studio-project","version":1,"schema_version":5,"migration_version":2,"key":"example","tables":tables})
+    }
+    #[test]
+    fn accepts_only_explicitly_compatible_archive_versions() {
+        let mut data = empty();
+        assert!(validate(&data, "example").is_ok());
+        data["schema_version"] = json!(4);
+        data["migration_version"] = json!(1);
+        assert!(validate(&data, "example").is_ok());
+        data["migration_version"] = json!(2);
+        assert!(validate(&data, "example").is_err());
+        data["schema_version"] = json!(3);
+        data["migration_version"] = json!(1);
+        assert!(validate(&data, "example").is_err());
+        data["schema_version"] = json!(5);
+        data["migration_version"] = json!(999999);
+        assert!(validate(&data, "example").is_err());
     }
     #[test]
     fn only_project_payload_is_accepted() {

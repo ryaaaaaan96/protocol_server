@@ -67,8 +67,8 @@ export async function checkDspPoints({ client, engineer, viewer, engineerId, vie
       ok(proposal.allowed, JSON.stringify(proposal.errors));
       return (await commit(proposal, who)).record;
     };
-    const history = async () => (await inspection.query("SELECT * FROM point_history WHERE project_id=$1 ORDER BY id", [project.id])).rows;
-    const historyCount = async () => (await inspection.query("SELECT count(*)::int AS count FROM point_history WHERE project_id=$1", [project.id])).rows[0].count;
+    const history = async () => (await inspection.query("SELECT * FROM history.events WHERE kind='point' AND project_id=$1 ORDER BY id", [project.id])).rows;
+    const historyCount = async () => (await inspection.query("SELECT count(*)::int AS count FROM history.events WHERE kind='point' AND project_id=$1", [project.id])).rows[0].count;
     const reject = response => ok(
       (response.status === 200 && response.data.allowed === false) || [400, 409].includes(response.status),
       JSON.stringify(response),
@@ -88,7 +88,9 @@ export async function checkDspPoints({ client, engineer, viewer, engineerId, vie
     for (const who of [client, engineer, viewer]) {
       const listed = await who.call("/projects");
       equal(listed.find(row => row.id === project.id).point_count, 552);
+      ok(!Object.keys(listed.find(row => row.id === project.id)).some(key => key.startsWith("edit_owner_") || key === "edit_expires_at"));
       const overview = await who.call(`${url}/overview`);
+      ok(!Object.keys(overview.project).some(key => key.startsWith("edit_owner_") || key === "edit_expires_at"));
       equal(overview.stats.total, 552);
       equal(overview.stats.signals, 552);
       equal(overview.transmit_count, 445);
@@ -179,12 +181,17 @@ export async function checkDspPoints({ client, engineer, viewer, engineerId, vie
     await client.call(`${url}/members`,"PUT",{user_id:engineerId,role:"engineer",edit_scope:"all",grants:[]});
 
     // The SQL workspace is read-only, bounded, and contains only the new business tables.
-    equal((await viewer.call(`${url}/sql`,"POST",{sql:"SELECT count(*) AS count FROM process_points"})).rows[0].count,552);
-    const sqlRows=await viewer.call(`${url}/sql`,"POST",{sql:"SELECT id FROM process_points ORDER BY id"});
+    equal((await viewer.call(`${url}/sql`,"POST",{sql:"SELECT count(*) AS count FROM points.process_points"})).rows[0].count,552);
+    equal((await viewer.call(`${url}/sql`,"POST",{sql:"SELECT count(*) AS count FROM history.events WHERE kind='point'"})).rows[0].count, await historyCount());
+    equal((await viewer.call(`${url}/sql`,"POST",{sql:"WITH data AS (SELECT * FROM points.process_points), summary AS (SELECT count(*) AS count FROM data) SELECT * FROM summary"})).rows[0].count,552);
+    const sqlRows=await viewer.call(`${url}/sql`,"POST",{sql:"SELECT id FROM points.process_points ORDER BY id"});
     equal(sqlRows.rows.length,500);equal(sqlRows.truncated,true);
-    for(const sql of ["DELETE FROM process_points","SELECT * FROM users","SELECT * FROM signals",
-      "SELECT set_config('app.is_admin','true',true)","SELECT * FROM process_points FOR UPDATE",
-      "SELECT 1; DELETE FROM process_points"]){
+    for(const sql of ["DELETE FROM points.process_points","SELECT * FROM users","SELECT * FROM signals",
+      "SELECT set_config('app.is_admin','true',true)","SELECT * FROM points.process_points FOR UPDATE",
+      "SELECT * FROM meta.project_state", "SELECT * FROM meta.previews",
+      "WITH project_state AS (SELECT * FROM project_state) SELECT * FROM project_state",
+      "WITH early AS (SELECT * FROM previews), previews AS (SELECT 1) SELECT * FROM early",
+      "SELECT 1; DELETE FROM points.process_points"]){
       equal((await viewer.raw(`${url}/sql`,"POST",{sql})).status,400);
     }
     const beforeConfig=JSON.stringify(await graph());
@@ -415,17 +422,17 @@ export async function checkDspPoints({ client, engineer, viewer, engineerId, vie
     equal((await client.call(`${otherUrl}/topology`)).process_points[0].enum_name,"ISOLATED_POINT");
     await rejectEdit("forward", secondMapping.id, { process_point_id: 2147483647, wire_type: "U16", wire_length: 2, conversion: "identity" });
     equal((await viewer.raw(`${otherUrl}/topology`)).status, 403);
-    equal((await runtime.query("SELECT count(*)::int AS count FROM process_points")).rows[0].count,0);
+    equal((await runtime.query("SELECT count(*)::int AS count FROM points.process_points")).rows[0].count,0);
     await runtime.query("BEGIN");
     try {
       await runtime.query("SELECT set_config('app.user_id',$1,true),set_config('app.project_id',$2,true),set_config('app.access','{\"role\":\"engineer\",\"edit_scope\":\"all\",\"grants\":[]}',true)", [String(viewerId), String(project.id)]);
-      equal((await runtime.query("SELECT count(*)::int AS count FROM process_points WHERE project_id=$1", [project.id])).rows[0].count, 552);
-      equal((await runtime.query("SELECT count(*)::int AS count FROM process_points WHERE project_id=$1", [otherProject.id])).rows[0].count, 0);
-      equal((await runtime.query("SELECT count(*)::int AS count FROM point_history WHERE project_id=$1", [otherProject.id])).rows[0].count, 0);
+      equal((await runtime.query("SELECT count(*)::int AS count FROM points.process_points WHERE project_id=$1", [project.id])).rows[0].count, 552);
+      equal((await runtime.query("SELECT count(*)::int AS count FROM points.process_points WHERE project_id=$1", [otherProject.id])).rows[0].count, 0);
+      equal((await runtime.query("SELECT count(*)::int AS count FROM history.events WHERE kind='point' AND project_id=$1", [otherProject.id])).rows[0].count, 0);
     } finally {
       await runtime.query("ROLLBACK");
     }
-    for (const command of ["UPDATE point_history SET actor_name='forged' WHERE project_id=$1", "DELETE FROM point_history WHERE project_id=$1"]) {
+    for (const command of ["UPDATE history.events SET actor_name='forged' WHERE project_id=$1", "DELETE FROM history.events WHERE kind='point' AND project_id=$1"]) {
       await runtime.query("BEGIN");
       try {
         await runtime.query("SELECT set_config('app.user_id',$1,true),set_config('app.project_id',$2,true),set_config('app.access','{\"role\":\"engineer\",\"edit_scope\":\"all\",\"grants\":[]}',true)", [String(engineerId), String(project.id)]);
@@ -453,10 +460,10 @@ export async function checkDspPoints({ client, engineer, viewer, engineerId, vie
     const release = await client.call(`${url}/releases`,"POST",{name:"DSP native snapshot",revision:(await graph()).revision});
     ok(release.id && release.sha256);
     equal((await viewer.call(`${url}/releases`))[0].id,release.id);
-    const releaseBefore=(await inspection.query("SELECT snapshot,files FROM releases WHERE id=$1",[release.id])).rows[0];
+    const releaseBefore=(await inspection.query("SELECT snapshot,files FROM history.releases WHERE id=$1",[release.id])).rows[0];
     equal(releaseBefore.snapshot.process_points.length,552);
     ok(!Object.hasOwn(releaseBefore.snapshot,"board_models"));
-    for(const sql of ["UPDATE releases SET name='forged' WHERE id=$1","DELETE FROM releases WHERE id=$1"]){
+    for(const sql of ["UPDATE history.releases SET name='forged' WHERE id=$1","DELETE FROM history.releases WHERE id=$1"]){
       await runtime.query("BEGIN");
       try{
         await runtime.query("SELECT set_config('app.user_id',$1,true),set_config('app.project_id',$2,true),set_config('app.access','{\"role\":\"engineer\",\"edit_scope\":\"all\",\"grants\":[]}',true)",[String(engineerId),String(project.id)]);
@@ -470,10 +477,24 @@ export async function checkDspPoints({ client, engineer, viewer, engineerId, vie
     const beforeReimportHistory = await historyCount();
     const oldHistoryIds = new Set((await history()).map(row => String(row.id)));
     const book = await readFile(new URL("../config/dc-ups/sources/DC-UPS测点数据表.xlsx", import.meta.url));
-    const form = new FormData();
-    form.append("file", new Blob([book]), "DSP.xlsx");
+    const workbookForm = () => {
+      const body = new FormData();
+      body.append("file", new Blob([book]), "DSP.xlsx");
+      return body;
+    };
+    const ownChange = await preview("process", { notes: "pending admin change" }, frequency.id);
+    const otherChange = await preview("process", { notes: "pending engineer change" }, frequency.id, engineer);
+    const otherImport = await engineer.call(`${url}/imports/preview`, "POST", workbookForm());
+    const form = workbookForm();
     const imported = await client.call(`${url}/imports/preview`, "POST", form);
     ok(imported.id);
+    const retainedPreviews = (await inspection.query("SELECT id::text,kind FROM meta.previews WHERE project_id=$1", [project.id])).rows;
+    for (const [proposal,kind] of [[ownChange,"change"],[otherChange,"change"],[otherImport,"import"],[imported,"import"]]) {
+      ok(retainedPreviews.some(row => row.id === String(proposal.id) && row.kind === kind), "New import preview preserves other kinds and owners");
+    }
+    equal((await client.raw(`${url}/changes/${imported.id}/commit`, "POST", {})).status, 400);
+    equal((await client.raw(`${url}/imports/${ownChange.id}/commit`, "POST", { replace: true })).status, 400);
+    equal((await engineer.raw(`${url}/imports/${imported.id}/commit`, "POST", { replace: true })).status, 400);
     equal(await historyCount(), beforeReimportHistory);
     equal(JSON.stringify((await graph()).process_points), JSON.stringify(beforeReimport.process_points));
     await client.call(`${url}/imports/${imported.id}/commit`, "POST", { replace: true });
@@ -488,7 +509,7 @@ export async function checkDspPoints({ client, engineer, viewer, engineerId, vie
     ok([...oldHistoryIds].every(id => retained.has(id)), "Reimport preserves prior point history");
     ok(await historyCount() > beforeReimportHistory);
     equal((await client.call(`${otherUrl}/topology`)).process_points.length, 1);
-    equal(JSON.stringify((await inspection.query("SELECT snapshot,files FROM releases WHERE id=$1",[release.id])).rows[0]),JSON.stringify(releaseBefore));
+    equal(JSON.stringify((await inspection.query("SELECT snapshot,files FROM history.releases WHERE id=$1",[release.id])).rows[0]),JSON.stringify(releaseBefore));
 
     // Export to a separate temporary directory. Upload without the archive
     // preserves current rows; upload with it restores only the named project.

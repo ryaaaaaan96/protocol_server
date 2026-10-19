@@ -17,7 +17,7 @@ const LEASE_SECONDS: i64 = 120;
 
 async fn status(tx: &mut PgConnection, pid: i64, uid: i64) -> Result<Value> {
     let lease: Option<Value> = sqlx::query_scalar(
-        "SELECT jsonb_build_object('owner',jsonb_build_object('id',user_id,'display_name',owner_name,'username',owner_username),'expires_at',expires_at) FROM project_edit_locks WHERE project_id=$1 AND expires_at>clock_timestamp() AND COALESCE(NULLIF(current_setting('app.project_editors',true),''),'[]')::jsonb @> to_jsonb(user_id)"
+        "SELECT jsonb_build_object('owner',jsonb_build_object('id',edit_owner_id,'display_name',edit_owner_name,'username',edit_owner_username),'expires_at',edit_expires_at) FROM meta.project_state WHERE id=$1 AND edit_expires_at>clock_timestamp() AND COALESCE(NULLIF(current_setting('app.project_editors',true),''),'[]')::jsonb @> to_jsonb(edit_owner_id)"
     ).bind(pid).fetch_optional(&mut *tx).await?;
     let lease = lease.unwrap_or(Value::Null);
     let mut permissions = crate::permissions::load(tx, pid).await?.value(&json!({}));
@@ -66,7 +66,7 @@ pub async fn require_available(tx: &mut PgConnection, pid: i64, uid: i64) -> Res
     Ok(())
 }
 pub async fn release_owned(tx: &mut PgConnection, pid: i64, uid: i64) -> Result<()> {
-    sqlx::query("DELETE FROM project_edit_locks WHERE project_id=$1 AND user_id=$2")
+    sqlx::query("UPDATE meta.project_state SET edit_owner_id=NULL,edit_owner_name=NULL,edit_owner_username=NULL,edit_expires_at=NULL WHERE id=$1 AND edit_owner_id=$2")
         .bind(pid)
         .bind(uid)
         .execute(&mut *tx)
@@ -95,7 +95,7 @@ async fn change(s: AppState, u: User, pid: i64, operation: &str) -> Result<Json<
     if operation == "release" {
         release_owned(&mut tx, pid, u.id).await?;
     } else {
-        sqlx::query("INSERT INTO project_edit_locks(project_id,user_id,owner_name,owner_username,expires_at) VALUES($1,$2,current_setting('app.actor_name',true),current_setting('app.username',true),clock_timestamp()+make_interval(secs=>$3::double precision)) ON CONFLICT(project_id) DO UPDATE SET user_id=excluded.user_id,owner_name=excluded.owner_name,owner_username=excluded.owner_username,expires_at=excluded.expires_at")
+        sqlx::query("UPDATE meta.project_state SET edit_owner_id=$2,edit_owner_name=current_setting('app.actor_name',true),edit_owner_username=current_setting('app.username',true),edit_expires_at=clock_timestamp()+make_interval(secs=>$3::double precision) WHERE id=$1")
             .bind(pid).bind(u.id).bind(LEASE_SECONDS as f64).execute(&mut *tx).await?;
     }
     let result = status(&mut tx, pid, u.id).await?;

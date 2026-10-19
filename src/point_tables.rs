@@ -326,7 +326,7 @@ pub(crate) async fn board_definition(
     entity(kind)?;
     board(tx, pid, board_key).await?;
     let key: Option<String> =
-        sqlx::query_scalar("SELECT config_key FROM project_state WHERE id=$1")
+        sqlx::query_scalar("SELECT config_key FROM meta.project_state WHERE id=$1")
             .bind(pid)
             .fetch_one(&mut *tx)
             .await?;
@@ -342,7 +342,7 @@ pub async fn project_schema(
 ) -> Result<Json<Value>> {
     let mut tx = db::read_snapshot_context(&s.pool, &u, pid).await?;
     let key: Option<String> =
-        sqlx::query_scalar("SELECT config_key FROM project_state WHERE id=$1")
+        sqlx::query_scalar("SELECT config_key FROM meta.project_state WHERE id=$1")
             .bind(pid)
             .fetch_one(&mut *tx)
             .await?;
@@ -365,7 +365,7 @@ pub async fn read(
 ) -> Result<Json<Value>> {
     entity(&kind)?;
     let mut tx = db::read_snapshot_context(&s.pool, &u, pid).await?;
-    let revision: i32 = sqlx::query_scalar("SELECT revision FROM project_state WHERE id=$1")
+    let revision: i32 = sqlx::query_scalar("SELECT revision FROM meta.project_state WHERE id=$1")
         .bind(pid)
         .fetch_one(&mut *tx)
         .await?;

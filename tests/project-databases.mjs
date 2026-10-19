@@ -111,7 +111,7 @@ export async function checkProjectDatabases({
 
     // Warm the route cache, alter each side's immutable identity independently,
     // and require rejection even though the same id, key and database still exist.
-    for (const [connection, table] of [[platform, "projects"], [isolated, "project_state"]]) {
+    for (const [connection, table] of [[platform, "projects"], [isolated, "meta.project_state"]]) {
       try {
         await connection.query(`UPDATE ${table} SET project_uid=$2 WHERE id=$1`, [first.id, randomUUID()]);
         equal((await client.raw(topologyUrl)).status, 409);
@@ -135,7 +135,7 @@ export async function checkProjectDatabases({
     });
     ok(create.allowed, JSON.stringify(create.errors));
     const point = (await client.call(`${url}/changes/${create.id}/commit`, "POST", {})).record;
-    equal((await isolated.query("SELECT count(*)::int AS count FROM process_points")).rows[0].count, 0);
+    equal((await isolated.query("SELECT count(*)::int AS count FROM points.process_points")).rows[0].count, 0);
     equal((await viewer.call(`${url}/topology`)).process_points.length, 1);
     equal((await viewer.raw(topologyUrl)).status, 403);
 
@@ -152,11 +152,11 @@ export async function checkProjectDatabases({
     });
     equal(proposal.status, 200);
     ok(proposal.data.allowed, JSON.stringify(proposal.data.errors));
-    const historyBefore = (await business.query("SELECT count(*)::int AS count FROM point_history")).rows[0].count;
+    const historyBefore = (await business.query("SELECT count(*)::int AS count FROM history.events WHERE kind='point'")).rows[0].count;
     let writing, revoking;
     try {
       await business.query("BEGIN");
-      await business.query("SELECT id FROM project_state WHERE id=$1 FOR UPDATE", [security.id]);
+      await business.query("SELECT id FROM meta.project_state WHERE id=$1 FOR UPDATE", [security.id]);
       const blocker = (await business.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
       writing = tracked(engineer.rawUnlocked(`${url}/changes/${proposal.data.id}/commit`, "POST", {}));
       await waitForBlocked(platform, databaseName(securityKey), blocker, "point commit", () => writing.finished);
@@ -167,15 +167,15 @@ export async function checkProjectDatabases({
       await business.query("COMMIT");
       equal((await writing.promise).status, 200);
       equal((await revoking.promise).status, 200);
-      equal((await business.query("SELECT name FROM process_points WHERE id=$1", [point.id])).rows[0].name, "撤权前已经授权的提交");
-      equal((await business.query("SELECT count(*)::int AS count FROM point_history")).rows[0].count, historyBefore + 1);
+      equal((await business.query("SELECT name FROM points.process_points WHERE id=$1", [point.id])).rows[0].name, "撤权前已经授权的提交");
+      equal((await business.query("SELECT count(*)::int AS count FROM history.events WHERE kind='point'")).rows[0].count, historyBefore + 1);
       equal((await viewer.call(`${url}/topology`)).revision, graph.revision + 1);
       equal((await engineer.rawUnlocked(`${url}/edit-lock/acquire`, "POST", {})).status, 403);
       equal((await engineer.rawUnlocked(`${url}/boards/DSP/point-tables/process/preview`, "POST", {
         revision: graph.revision + 1, operation: "update", id: point.id, values: { name: "撤权后不得写入" },
       })).status, 403);
-      equal((await business.query("SELECT name FROM process_points WHERE id=$1", [point.id])).rows[0].name, "撤权前已经授权的提交");
-      equal((await business.query("SELECT count(*)::int AS count FROM point_history")).rows[0].count, historyBefore + 1);
+      equal((await business.query("SELECT name FROM points.process_points WHERE id=$1", [point.id])).rows[0].name, "撤权前已经授权的提交");
+      equal((await business.query("SELECT count(*)::int AS count FROM history.events WHERE kind='point'")).rows[0].count, historyBefore + 1);
     } finally {
       await business.query("ROLLBACK").catch(() => {});
       await Promise.allSettled([writing?.promise, revoking?.promise].filter(Boolean));

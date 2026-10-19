@@ -53,7 +53,7 @@ try {
     if (path.endsWith("/changes/preview")) return ok({ id: 9, allowed: true, errors: [], impact: { count: 0, changes: [], affected_types: [board] } });
     if (path.endsWith("/members")) return method === "GET" ? ok([{ id: 2, username: "engineer", display_name: "工程师", active: true, role: "engineer", edit_scope: "scoped", grants: [] }]) : ok({});
     if (path === "/api/users") return ok([user, { id: 2, username: "engineer", display_name: "工程师", active: true }]);
-    if (path === "/api/sql/definitions") return ok({ relations: ["process_points", "transmit_points", "point_history"], examples: [], sql: "SELECT p.*, t.address FROM process_points p LEFT JOIN transmit_points t ON t.process_point_id = p.id;" });
+    if (path === "/api/sql/definitions") return ok({ relations: ["points.process_points", "points.transmit_points", "history.events"], examples: [], sql: "SELECT p.*, t.address FROM points.process_points p LEFT JOIN points.transmit_points t ON t.process_point_id = p.id;" });
     if (path.endsWith("/sql")) return ok({ rows: [point], elapsed_ms: 1, truncated: false });
     if (path.endsWith("/releases")) return ok([]);
     if (path.endsWith("/generate")) return ok({ revision: 1, blocked: false, validation, files: { "board_types/DSP/process.json": JSON.stringify([point]), "board_types/DSP/UPP_SERVICE.xml": "<UPP />" } });
@@ -115,7 +115,7 @@ try {
   assert.deepEqual(memberSave.body.grants, [{ board_key: "DSP", scope: "internal" }, { board_key: "DSP", scope: "protocol", endpoint_key: "UPP_SERVICE" }]);
   await nav.getByRole("button", { name: "SQL 工作台", exact: true }).click();
   await expect(page.getByLabel("SQL 查询编辑器")).toHaveValue(/process_points/);
-  await expect(page.locator(".sql-explorer")).toContainText("point_history");
+  await expect(page.locator(".sql-explorer")).toContainText("history.events");
   await page.getByRole("button", { name: "运行查询", exact: true }).click();
   await expect(page.locator(".sql-results")).toContainText("母线电压");
   await nav.getByRole("button", { name: "代码与版本", exact: true }).click();

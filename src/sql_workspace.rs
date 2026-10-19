@@ -15,9 +15,19 @@ use sqlparser::{
     dialect::PostgreSqlDialect,
     parser::Parser,
 };
-use std::{collections::BTreeSet, ops::ControlFlow};
+use std::{
+    collections::{BTreeSet, VecDeque},
+    ops::ControlFlow,
+};
 
-const RELATIONS: &[&str] = &["process_points", "transmit_points", "point_history"];
+const RELATIONS: &[&str] = &[
+    "points.process_points",
+    "points.transmit_points",
+    "history.events",
+];
+// Legacy unqualified point queries and the short events name are resolved only
+// through the project pool's fixed, trusted search_path.
+const SHORT_RELATIONS: &[&str] = &["process_points", "transmit_points", "events"];
 const FUNCTIONS: &[&str] = &[
     "count",
     "sum",
@@ -51,7 +61,20 @@ const FUNCTIONS: &[&str] = &[
     "least",
 ];
 struct Guard {
-    ctes: Vec<BTreeSet<String>>,
+    scopes: Vec<QueryScope>,
+}
+struct QueryScope {
+    visible: BTreeSet<String>,
+    // Addresses identify immutable AST nodes; they are never dereferenced.
+    // A non-recursive CTE enters scope only after its complete body is checked.
+    pending: VecDeque<(*const Query, String)>,
+}
+fn identifier_name(identifier: &ast::Ident) -> String {
+    if identifier.quote_style.is_some() {
+        identifier.value.clone()
+    } else {
+        identifier.value.to_lowercase()
+    }
 }
 // TABLE shortcuts are not relation nodes in every parser AST variant. Validate
 // every set operand explicitly rather than relying only on relation visitors.
@@ -80,26 +103,59 @@ impl Visitor for Guard {
         if !q.locks.is_empty() {
             return ControlFlow::Break("不允许锁定数据".into());
         }
-        let mut names = BTreeSet::new();
+        let mut pending = VecDeque::new();
         if let Some(w) = &q.with {
+            if w.recursive {
+                return ControlFlow::Break("SQL 工作台暂不支持 WITH RECURSIVE".into());
+            }
+            let mut names = BTreeSet::new();
             for c in &w.cte_tables {
-                names.insert(c.alias.name.value.to_lowercase());
+                let name = identifier_name(&c.alias.name);
+                if !names.insert(name.clone()) {
+                    return ControlFlow::Break("同一 WITH 中的名称不能重复".into());
+                }
+                pending.push_back((c.query.as_ref() as *const Query, name));
             }
         }
-        self.ctes.push(names);
+        self.scopes.push(QueryScope {
+            visible: BTreeSet::new(),
+            pending,
+        });
         query_body(&q.body)?;
         ControlFlow::Continue(())
     }
-    fn post_visit_query(&mut self, _q: &Query) -> ControlFlow<String> {
-        self.ctes.pop();
+    fn post_visit_query(&mut self, q: &Query) -> ControlFlow<String> {
+        self.scopes.pop();
+        if let Some(parent) = self.scopes.last_mut()
+            && parent
+                .pending
+                .front()
+                .is_some_and(|(body, _)| std::ptr::eq(*body, q))
+        {
+            let (_, name) = parent.pending.pop_front().unwrap();
+            parent.visible.insert(name);
+        }
         ControlFlow::Continue(())
     }
     fn pre_visit_relation(&mut self, n: &ast::ObjectName) -> ControlFlow<String> {
-        let name = n.to_string().to_lowercase();
-        if !RELATIONS.contains(&name.as_str()) && !self.ctes.iter().any(|set| set.contains(&name)) {
-            return ControlFlow::Break(format!(
-                "不可访问对象 {name}，仅允许当前项目的业务表和视图"
-            ));
+        let identifiers: Option<Vec<String>> = n
+            .0
+            .iter()
+            .map(|part| match part {
+                ast::ObjectNamePart::Identifier(identifier) => Some(identifier_name(identifier)),
+                _ => None,
+            })
+            .collect();
+        let allowed = match identifiers.as_deref() {
+            Some([name]) => {
+                SHORT_RELATIONS.contains(&name.as_str())
+                    || self.scopes.iter().any(|scope| scope.visible.contains(name))
+            }
+            Some([schema, name]) => RELATIONS.contains(&format!("{schema}.{name}").as_str()),
+            _ => false,
+        };
+        if !allowed {
+            return ControlFlow::Break(format!("不可访问对象 {n}，仅允许当前项目的点表和历史事件"));
         }
         ControlFlow::Continue(())
     }
@@ -166,7 +222,7 @@ pub fn check(sql: &str) -> Result<String> {
     if statements.len() != 1 {
         return Err(AppError::bad("每次只能执行一条查询"));
     }
-    let mut g = Guard { ctes: Vec::new() };
+    let mut g = Guard { scopes: Vec::new() };
     if let ControlFlow::Break(e) = statements[0].visit(&mut g) {
         return Err(AppError::bad(e));
     }
@@ -223,13 +279,16 @@ pub async fn execute(
     }
 }
 pub async fn definitions(_user: User) -> Json<Value> {
-    Json(
-        json!({"sql": include_str!("../migrations/project/0001_project.sql"), "relations": RELATIONS, "examples": [
-            {"name":"DSP 内部数据", "sql":"SELECT board_key,group_key,name,enum_name,sig_id,internal_type FROM process_points ORDER BY board_key,display_order,id"},
-            {"name":"DSP 转发映射", "sql":"SELECT t.name,t.endpoint_key,t.address,t.wire_type,p.enum_name FROM transmit_points t JOIN process_points p ON p.id=t.process_point_id ORDER BY t.endpoint_key,t.address"},
-            {"name":"点表历史", "sql":"SELECT * FROM point_history ORDER BY id DESC LIMIT 100"}
-        ]}),
-    )
+    Json(json!({"sql": concat!(
+        "-- 项目结构迁移源码，按版本顺序展示；最终分组为 points、history、meta。\n",
+        include_str!("../migrations/project/0001_project.sql"),
+        "\n-- 以下迁移应用分组和表合并。\n",
+        include_str!("../migrations/project/0002_grouped_project.sql")
+    ), "relations": RELATIONS, "examples": [
+        {"name":"DSP 内部数据", "sql":"SELECT board_key,group_key,name,enum_name,sig_id,internal_type FROM points.process_points ORDER BY board_key,display_order,id"},
+        {"name":"DSP 转发映射", "sql":"SELECT t.name,t.endpoint_key,t.address,t.wire_type,p.enum_name FROM points.transmit_points t JOIN points.process_points p ON p.id=t.process_point_id ORDER BY t.endpoint_key,t.address"},
+        {"name":"点表历史", "sql":"SELECT * FROM history.events WHERE kind='point' ORDER BY id DESC LIMIT 100"}
+    ]}))
 }
 
 #[cfg(test)]
@@ -264,6 +323,16 @@ mod tests {
             "SELECT * FROM app_project_registry(1)",
             "SELECT * FROM app_lock_project(1)",
             "SELECT * FROM project_state",
+            "SELECT * FROM meta.project_state",
+            "SELECT * FROM meta.previews",
+            "SELECT * FROM history.releases",
+            "SELECT * FROM public.process_points",
+            "SELECT * FROM public.events",
+            "SELECT * FROM points.events",
+            "SELECT * FROM history.process_points",
+            "SELECT * FROM protocol_platform.history.events",
+            "SELECT * FROM point_history",
+            "SELECT count(*) FROM events FOR UPDATE",
             "SELECT * FROM sessions",
             "SELECT * FROM project_members",
             "SELECT * FROM protocol_platform.public.users",
@@ -290,8 +359,54 @@ mod tests {
             "SELECT group_key,count(*) FROM process_points GROUP BY group_key",
             "WITH x AS (SELECT * FROM transmit_points) SELECT name FROM x",
             "SELECT name, row_number() OVER (ORDER BY display_order) FROM process_points",
-            "SELECT before_data->>'name' FROM point_history ORDER BY id DESC LIMIT 10",
+            "SELECT before_data->>'name' FROM history.events WHERE kind='point' ORDER BY id DESC LIMIT 10",
+            "SELECT kind,count(*) FROM events GROUP BY kind",
+            "SELECT p.enum_name,t.address FROM points.process_points p JOIN points.transmit_points t ON p.id=t.process_point_id",
             "SELECT name FROM process_points UNION ALL SELECT name FROM transmit_points",
+        ] {
+            assert!(check(sql).is_ok(), "{sql}");
+        }
+    }
+    #[test]
+    fn cte_names_cannot_authorize_their_own_body_or_forward_references() {
+        for sql in [
+            "WITH project_state AS (SELECT * FROM project_state) SELECT * FROM project_state",
+            "WITH previews AS (SELECT * FROM previews) SELECT * FROM previews",
+            "WITH arbitrary_private_table AS (SELECT * FROM arbitrary_private_table) SELECT * FROM arbitrary_private_table",
+            "WITH first AS (SELECT * FROM later), later AS (SELECT id FROM points.process_points) SELECT * FROM first",
+            "WITH first AS (SELECT * FROM project_state), project_state AS (SELECT 1) SELECT * FROM first",
+            "WITH process_points AS (SELECT * FROM meta.project_state) SELECT * FROM process_points",
+            "WITH project_state AS (SELECT (SELECT topology_config FROM project_state)) SELECT * FROM project_state",
+            "WITH project_state AS (SELECT 1) SELECT * FROM meta.project_state",
+            "WITH \"history.events\" AS (SELECT * FROM \"history.events\") SELECT * FROM \"history.events\"",
+            "WITH RECURSIVE x AS (SELECT 1 UNION ALL SELECT * FROM x) SELECT * FROM x",
+        ] {
+            assert!(check(sql).is_err(), "{sql}");
+        }
+    }
+    #[test]
+    fn nested_ctes_do_not_escape_their_query_scope() {
+        for sql in [
+            "WITH x AS (WITH project_state AS (SELECT id FROM points.process_points) SELECT * FROM project_state) SELECT * FROM project_state",
+            "SELECT * FROM (WITH project_state AS (SELECT 1) SELECT * FROM project_state) x JOIN project_state p ON true",
+            "WITH x AS (WITH secret AS (SELECT 1) SELECT * FROM secret), y AS (SELECT * FROM secret) SELECT * FROM y",
+            "WITH \"safe\" AS (SELECT 1) SELECT * FROM \"SAFE\"",
+            "WITH \"PROJECT_STATE\" AS (SELECT 1) SELECT * FROM project_state",
+        ] {
+            assert!(check(sql).is_err(), "{sql}");
+        }
+    }
+    #[test]
+    fn accepts_ordered_and_nested_nonrecursive_ctes() {
+        for sql in [
+            "WITH first AS (SELECT id FROM points.process_points), second AS (SELECT * FROM first) SELECT * FROM second",
+            "WITH project_state AS (SELECT id FROM points.process_points) SELECT * FROM project_state",
+            "WITH process_points AS (SELECT * FROM process_points) SELECT * FROM process_points",
+            "WITH project_state AS (SELECT id FROM points.process_points), result AS (WITH project_state AS (SELECT * FROM project_state) SELECT * FROM project_state) SELECT * FROM result",
+            "WITH x AS (WITH local_rows AS (SELECT * FROM points.process_points) SELECT * FROM local_rows) SELECT * FROM x",
+            "WITH \"CaseSensitive\" AS (SELECT 1 AS value) SELECT * FROM \"CaseSensitive\"",
+            "WITH MixedCase AS (SELECT 1 AS value) SELECT * FROM mixedcase",
+            "WITH \"history.events\" AS (SELECT 1 AS value) SELECT * FROM \"history.events\"",
         ] {
             assert!(check(sql).is_ok(), "{sql}");
         }
