@@ -11,14 +11,14 @@ use axum::{
     http::StatusCode,
 };
 use serde_json::{Value, json};
-use sqlx::{Postgres, Transaction};
+use sqlx::PgConnection;
 
 const LEASE_SECONDS: i64 = 120;
 
-async fn status(tx: &mut Transaction<'_, Postgres>, pid: i64, uid: i64) -> Result<Value> {
+async fn status(tx: &mut PgConnection, pid: i64, uid: i64) -> Result<Value> {
     let lease: Option<Value> = sqlx::query_scalar(
-        "SELECT jsonb_build_object('owner',jsonb_build_object('id',u.id,'display_name',u.display_name,'username',u.username),'expires_at',l.expires_at) FROM project_edit_locks l JOIN users u ON u.id=l.user_id WHERE l.project_id=$1 AND l.expires_at>clock_timestamp() AND u.active AND (u.is_admin OR EXISTS(SELECT 1 FROM project_members m WHERE m.project_id=l.project_id AND m.user_id=u.id AND m.role='engineer' AND (m.edit_scope='all' OR EXISTS(SELECT 1 FROM project_member_grants g WHERE g.project_id=m.project_id AND g.user_id=m.user_id ))))"
-    ).bind(pid).fetch_optional(&mut **tx).await?;
+        "SELECT jsonb_build_object('owner',jsonb_build_object('id',user_id,'display_name',owner_name,'username',owner_username),'expires_at',expires_at) FROM project_edit_locks WHERE project_id=$1 AND expires_at>clock_timestamp() AND COALESCE(NULLIF(current_setting('app.project_editors',true),''),'[]')::jsonb @> to_jsonb(user_id)"
+    ).bind(pid).fetch_optional(&mut *tx).await?;
     let lease = lease.unwrap_or(Value::Null);
     let mut permissions = crate::permissions::load(tx, pid).await?.value(&json!({}));
     permissions.as_object_mut().unwrap().remove("catalog");
@@ -47,7 +47,7 @@ fn denied(status: Value) -> AppError {
         })),
     )
 }
-pub async fn require(tx: &mut Transaction<'_, Postgres>, pid: i64, uid: i64) -> Result<()> {
+pub async fn require(tx: &mut PgConnection, pid: i64, uid: i64) -> Result<()> {
     db::lock_project(tx, pid).await?;
     let state = status(tx, pid, uid).await?;
     if state["owned"] != true {
@@ -57,11 +57,7 @@ pub async fn require(tx: &mut Transaction<'_, Postgres>, pid: i64, uid: i64) -> 
 }
 /// Folder imports hold the project row lock for their entire transaction, so an
 /// idle project needs no lasting lease. An existing editor still takes priority.
-pub async fn require_available(
-    tx: &mut Transaction<'_, Postgres>,
-    pid: i64,
-    uid: i64,
-) -> Result<()> {
+pub async fn require_available(tx: &mut PgConnection, pid: i64, uid: i64) -> Result<()> {
     db::lock_project(tx, pid).await?;
     let state = status(tx, pid, uid).await?;
     if state["locked"] == true && state["owned"] != true {
@@ -69,11 +65,11 @@ pub async fn require_available(
     }
     Ok(())
 }
-pub async fn release_owned(tx: &mut Transaction<'_, Postgres>, pid: i64, uid: i64) -> Result<()> {
+pub async fn release_owned(tx: &mut PgConnection, pid: i64, uid: i64) -> Result<()> {
     sqlx::query("DELETE FROM project_edit_locks WHERE project_id=$1 AND user_id=$2")
         .bind(pid)
         .bind(uid)
-        .execute(&mut **tx)
+        .execute(&mut *tx)
         .await?;
     Ok(())
 }
@@ -99,7 +95,7 @@ async fn change(s: AppState, u: User, pid: i64, operation: &str) -> Result<Json<
     if operation == "release" {
         release_owned(&mut tx, pid, u.id).await?;
     } else {
-        sqlx::query("INSERT INTO project_edit_locks(project_id,user_id,expires_at) VALUES($1,$2,clock_timestamp()+make_interval(secs=>$3::double precision)) ON CONFLICT(project_id) DO UPDATE SET user_id=excluded.user_id,expires_at=excluded.expires_at")
+        sqlx::query("INSERT INTO project_edit_locks(project_id,user_id,owner_name,owner_username,expires_at) VALUES($1,$2,current_setting('app.actor_name',true),current_setting('app.username',true),clock_timestamp()+make_interval(secs=>$3::double precision)) ON CONFLICT(project_id) DO UPDATE SET user_id=excluded.user_id,owner_name=excluded.owner_name,owner_username=excluded.owner_username,expires_at=excluded.expires_at")
             .bind(pid).bind(u.id).bind(LEASE_SECONDS as f64).execute(&mut *tx).await?;
     }
     let result = status(&mut tx, pid, u.id).await?;

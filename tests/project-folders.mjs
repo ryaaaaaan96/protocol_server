@@ -66,8 +66,8 @@ async function incompatibleArchive(source, destination, testEnv) {
   }
 }
 
-export async function checkProjectFolders({ client, engineer, viewer, engineerId, viewerId, password, makeClient, projectConfigs, fixtureSource, testEnv, equal, ok }) {
-  const key = "folder_import";
+export async function checkProjectFolders({ client, engineer, viewer, engineerId, viewerId, password, makeClient, projectConfigs, fixtureSource, testEnv, equal, ok, fixtureKey }) {
+  const key = fixtureKey("folder_import");
   const directory = path.join(projectConfigs, key);
   const files = folderFiles(fixtureSource);
   json(files, "project.json", manifest => Object.assign(manifest, { key, name: "Folder import fixture", description: "Original folder" }));
@@ -83,7 +83,7 @@ export async function checkProjectFolders({ client, engineer, viewer, engineerId
     ok(result.status === 200, `Folder commit: ${JSON.stringify(result)}`);
     return result.data;
   };
-  const untouched = (await client.call("/projects")).find(project => ["dsp_native","cli"].includes(project.config_key));
+  const untouched = (await client.call("/projects")).find(project => [fixtureKey("dsp_native"),fixtureKey("cli")].includes(project.config_key));
   const unrelatedBefore = JSON.stringify(await client.call(`/projects/${untouched.id}/topology`));
   const projectsBefore = JSON.stringify(await client.call("/projects"));
   equal((await preview(new Map(), makeClient())).status, 401);

@@ -3,14 +3,14 @@ services:
     image: postgres:18-bookworm
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_DB: protocol_studio
+      POSTGRES_DB: protocol_platform
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:?Set POSTGRES_APP_PASSWORD in .env}
     volumes:
       - pgdata:/var/lib/postgresql
       - ./deploy/init-db.sh:/docker-entrypoint-initdb.d/10-app-role.sh:ro
     healthcheck:
-      test: [CMD-SHELL, 'pg_isready -U postgres -d protocol_studio']
+      test: [CMD-SHELL, 'pg_isready -U postgres -d protocol_platform']
       interval: 5s
       timeout: 5s
       retries: 20
@@ -20,7 +20,8 @@ services:
     image: protocol-studio:local
     command: [migrate]
     environment:
-      MIGRATION_DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/protocol_studio
+      MIGRATION_DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/protocol_platform
+      DATABASE_URL: postgres://protocol_app:${POSTGRES_APP_PASSWORD}@postgres:5432/protocol_platform
     depends_on:
       postgres:
         condition: service_healthy
@@ -28,7 +29,8 @@ services:
     image: protocol-studio:local
     build: .
     environment:
-      DATABASE_URL: postgres://protocol_app:${POSTGRES_APP_PASSWORD}@postgres:5432/protocol_studio
+      DATABASE_URL: postgres://protocol_app:${POSTGRES_APP_PASSWORD}@postgres:5432/protocol_platform
+      MIGRATION_DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/protocol_platform
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}

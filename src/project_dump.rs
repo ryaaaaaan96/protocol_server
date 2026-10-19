@@ -4,7 +4,7 @@ use crate::{
     topology,
 };
 use serde_json::{Value, json};
-use sqlx::{Postgres, Transaction};
+use sqlx::PgConnection;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
@@ -17,7 +17,7 @@ const MAX_DECODED: u64 = 64 * 1024 * 1024;
 const MAX_ROWS: usize = 100_000;
 
 fn supported_migration_version() -> i64 {
-    sqlx::migrate!()
+    sqlx::migrate!("./migrations/project")
         .iter()
         .map(|migration| migration.version)
         .max()
@@ -49,7 +49,7 @@ fn positive(value: &Value) -> Option<i64> {
 pub fn validate(payload: &Value, expected_key: &str) -> Result<()> {
     if payload["format"] != "protocol-studio-project"
         || payload["version"] != 1
-        || payload["schema_version"] != 3
+        || payload["schema_version"] != 4
         || payload["key"] != expected_key
         || positive(&payload["migration_version"]).is_none()
     {
@@ -241,19 +241,15 @@ pub async fn decode(path: &Path, expected_key: &str) -> Result<Value> {
 
 /// Caller owns the transaction, admin/edit-lock/revision checks, preview rollback,
 /// topology validation, revision bump and audit. This never commits independently.
-pub async fn replace(
-    tx: &mut Transaction<'_, Postgres>,
-    pid: i64,
-    payload: &Value,
-) -> Result<Value> {
+pub async fn replace(tx: &mut PgConnection, pid: i64, payload: &Value) -> Result<Value> {
     let (key, schema_version): (Option<String>, i32) =
-        sqlx::query_as("SELECT config_key,schema_version FROM projects WHERE id=$1")
+        sqlx::query_as("SELECT config_key,schema_version FROM project_state WHERE id=$1")
             .bind(pid)
-            .fetch_one(&mut **tx)
+            .fetch_one(&mut *tx)
             .await?;
     validate(payload, key.as_deref().unwrap_or_default())?;
-    if schema_version != 3 {
-        return Err(AppError::bad("请先将目标项目迁移到 v3，再导入 Dump"));
+    if schema_version != 4 {
+        return Err(AppError::bad("请先将目标项目迁移到 v4，再导入 Dump"));
     }
     // SQLx owns its migration ledger. The runtime role deliberately cannot read
     // that private table; the archive must match this application's embedded schema.
@@ -266,7 +262,7 @@ pub async fn replace(
     for table in INSERT_ORDER.iter().rev() {
         sqlx::query(&format!("DELETE FROM {table} WHERE project_id=$1"))
             .bind(pid)
-            .execute(&mut **tx)
+            .execute(&mut *tx)
             .await?;
     }
     let mut mappings: BTreeMap<&str, BTreeMap<i64, i64>> = BTreeMap::new();
@@ -278,7 +274,7 @@ pub async fn replace(
         )
         .bind(table)
         .bind(rows.len() as i32)
-        .fetch_all(&mut **tx)
+        .fetch_all(&mut *tx)
         .await?;
         let mapping: BTreeMap<_, _> = rows
             .iter()
@@ -301,7 +297,7 @@ pub async fn replace(
         if !remapped.is_empty() {
             let cols = columns(table);
             sqlx::query(&format!("INSERT INTO {table} ({cols}) SELECT {cols} FROM jsonb_populate_recordset(NULL::{table},$1::jsonb)"))
-                .bind(json!(remapped)).execute(&mut **tx).await?;
+                .bind(json!(remapped)).execute(&mut *tx).await?;
         }
         counts.insert(table.into(), json!(rows.len()));
         mappings.insert(table, mapping);
@@ -317,7 +313,7 @@ mod tests {
             .iter()
             .map(|table| ((*table).into(), json!([])))
             .collect();
-        json!({"format":"protocol-studio-project","version":1,"schema_version":3,"migration_version":supported_migration_version(),"key":"example","tables":tables})
+        json!({"format":"protocol-studio-project","version":1,"schema_version":4,"migration_version":supported_migration_version(),"key":"example","tables":tables})
     }
     #[test]
     fn only_project_payload_is_accepted() {

@@ -34,7 +34,7 @@ async function main() {
       password = crypto.randomBytes(18).toString("hex");
     fs.writeFileSync(
       envPath,
-      `DATABASE_URL=postgres://protocol_app:${app}@127.0.0.1:55432/protocol_studio\nMIGRATION_DATABASE_URL=postgres://postgres:${admin}@127.0.0.1:55432/protocol_studio\nADMIN_USERNAME=admin\nADMIN_PASSWORD=${password}\nBIND_ADDR=127.0.0.1:8080\nCOOKIE_SECURE=false\n`,
+      `DATABASE_URL=postgres://protocol_app:${app}@127.0.0.1:55432/protocol_platform\nMIGRATION_DATABASE_URL=postgres://postgres:${admin}@127.0.0.1:55432/protocol_platform\nADMIN_USERNAME=admin\nADMIN_PASSWORD=${password}\nBIND_ADDR=127.0.0.1:8080\nCOOKIE_SECURE=false\n`,
       { mode: 0o600, flag: "wx" },
     );
   }
@@ -177,6 +177,9 @@ async function main() {
       );
     }
     const name = adminUrl.pathname.slice(1);
+    if (name !== "protocol_platform") {
+      throw new Error("现有 .env 指向旧版或自定义数据库；不会自动替换。旧单库请先停止服务并运行 node scripts/split-databases.mjs --maintenance，验证后再将两个 URL 的数据库名改为 protocol_platform。自定义平台库请直接使用 cargo run -- migrate。");
+    }
     if (!/^[a-z_][a-z0-9_]*$/.test(name))
       throw new Error("Invalid database name");
     if (

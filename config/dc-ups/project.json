@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "key": "upm",
+  "key": "dc-ups",
   "name": "DC-UPS",
   "description": "AIDC · 本地控制器与 DSP 点表的统一数据空间",
-  "workbook": "sources/UPM项目测点数据表.xlsx",
+  "workbook": "sources/DC-UPS测点数据表.xlsx",
   "topology": {
     "version": 2,
     "board_types": [

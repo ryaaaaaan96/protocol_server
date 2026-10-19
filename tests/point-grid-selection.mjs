@@ -42,7 +42,7 @@ const { usePointGrid } = await import(moduleUrl(source));
 const { parseClipboard } = await import(domain);
 const definition = JSON.parse(
   await readFile(
-    new URL("../config/upm/DSP/process.json", import.meta.url),
+    new URL("../config/dc-ups/DSP/process.json", import.meta.url),
     "utf8",
   ),
 );

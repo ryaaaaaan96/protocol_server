@@ -7,10 +7,10 @@ import { promisify } from "node:util";
 import ExcelJS from "../scripts/excel-batch/node_modules/exceljs/excel.js";
 const execute = promisify(execFile);
 
-export async function checkExcelBatch({client, equal, ok}) {
+export async function checkExcelBatch({client, equal, ok, fixtureKey}) {
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(),"protocol-excel-http-"));
   try {
-    const project = await client.call("/projects","POST",{config_key:"excel"});
+    const project = await client.call("/projects","POST",{config_key:fixtureKey("excel")});
     const url = `/projects/${project.id}`;
     const cli = async args => (await execute(process.execPath,["scripts/excel-batch/index.mjs",...args],{
       env:{...process.env,PROTOCOL_SESSION:client.cookie.split("=")[1]},timeout:60000,

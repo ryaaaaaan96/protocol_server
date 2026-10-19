@@ -40,7 +40,7 @@ impl FromRequestParts<AppState> for User {
         }
         let hash = hex::encode(Sha256::digest(token.as_bytes()));
         sqlx::query_as("SELECT u.id,u.username,u.display_name,u.is_admin FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.expires_at>now() AND u.active")
-            .bind(hash).fetch_optional(&state.pool).await?.ok_or(AppError::new(StatusCode::UNAUTHORIZED,"登录已过期，请重新登录"))
+            .bind(hash).fetch_optional(&state.pool.platform).await?.ok_or(AppError::new(StatusCode::UNAUTHORIZED,"登录已过期，请重新登录"))
     }
 }
 impl User {
@@ -78,7 +78,7 @@ pub async fn login(
         return Err(AppError::bad("账号或密码格式不正确"));
     }
     let failures:i32=sqlx::query_scalar("INSERT INTO login_attempts(username,failures) VALUES($1,1) ON CONFLICT(username) DO UPDATE SET failures=CASE WHEN login_attempts.updated_at<now()-interval '15 minutes' THEN 1 ELSE login_attempts.failures+1 END,updated_at=CASE WHEN login_attempts.updated_at<now()-interval '15 minutes' THEN now() ELSE login_attempts.updated_at END RETURNING failures")
-        .bind(&input.username).fetch_one(&state.pool).await?;
+        .bind(&input.username).fetch_one(&state.pool.platform).await?;
     if failures > 10 {
         return Err(AppError::new(
             StatusCode::TOO_MANY_REQUESTS,
@@ -88,7 +88,7 @@ pub async fn login(
     let record: Option<(i64, String)> =
         sqlx::query_as("SELECT id,password_hash FROM users WHERE username=$1 AND active")
             .bind(&input.username)
-            .fetch_optional(&state.pool)
+            .fetch_optional(&state.pool.platform)
             .await?;
     let stored = record
         .as_ref()
@@ -110,7 +110,7 @@ pub async fn login(
     let mut bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut bytes);
     let token = hex::encode(bytes);
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.pool.platform.begin().await?;
     sqlx::query("DELETE FROM login_attempts WHERE username=$1")
         .bind(input.username)
         .execute(&mut *tx)
@@ -127,7 +127,7 @@ pub async fn login(
     let user: User =
         sqlx::query_as("SELECT id,username,display_name,is_admin FROM users WHERE id=$1")
             .bind(uid)
-            .fetch_one(&state.pool)
+            .fetch_one(&state.pool.platform)
             .await?;
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -158,7 +158,7 @@ pub async fn logout(
     {
         sqlx::query("DELETE FROM sessions WHERE token_hash=$1")
             .bind(hex::encode(Sha256::digest(token.as_bytes())))
-            .execute(&state.pool)
+            .execute(&state.pool.platform)
             .await?;
     }
     let mut h = HeaderMap::new();

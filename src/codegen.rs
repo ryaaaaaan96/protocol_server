@@ -1,6 +1,6 @@
 use crate::error::{AppError, Result};
 use serde_json::Value;
-use sqlx::{Postgres, Transaction};
+use sqlx::PgConnection;
 use std::io::{Cursor, Write};
 pub(crate) fn xml(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -11,7 +11,7 @@ pub(crate) fn xml(s: &str) -> String {
         .replace('\n', "&#10;")
         .replace('\r', "")
 }
-pub async fn generate(tx: &mut Transaction<'_, Postgres>, pid: i64) -> Result<Value> {
+pub async fn generate(tx: &mut PgConnection, pid: i64) -> Result<Value> {
     let graph = crate::topology::snapshot(tx, pid, true).await?;
     let mut generated = crate::topology_codegen::generate(&graph)?;
     generated["revision"] = graph["revision"].clone();

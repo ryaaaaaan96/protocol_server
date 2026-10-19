@@ -11,7 +11,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sqlx::{Postgres, Transaction};
+use sqlx::PgConnection;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -265,7 +265,7 @@ pub(crate) fn validate_directory(
 pub async fn read(State(s): State<AppState>, u: User, Path(pid): Path<i64>) -> Result<Json<Value>> {
     let mut tx = db::context(&s.pool, &u, Some(pid), false).await?;
     let config: Option<Value> =
-        sqlx::query_scalar("SELECT topology_config FROM projects WHERE id=$1")
+        sqlx::query_scalar("SELECT topology_config FROM project_state WHERE id=$1")
             .bind(pid)
             .fetch_one(&mut *tx)
             .await?;
@@ -277,10 +277,11 @@ pub async fn source(
     Path(pid): Path<i64>,
 ) -> Result<Json<Value>> {
     let mut tx = db::context(&s.pool, &u, Some(pid), false).await?;
-    let key: Option<String> = sqlx::query_scalar("SELECT config_key FROM projects WHERE id=$1")
-        .bind(pid)
-        .fetch_one(&mut *tx)
-        .await?;
+    let key: Option<String> =
+        sqlx::query_scalar("SELECT config_key FROM project_state WHERE id=$1")
+            .bind(pid)
+            .fetch_one(&mut *tx)
+            .await?;
     let key = key.ok_or(AppError::bad("项目没有关联配置目录"))?;
     Ok(Json(
         s.project_files
@@ -288,15 +289,15 @@ pub async fn source(
             .map_err(|e| AppError::bad(format!("{e:#}")))?,
     ))
 }
-pub async fn apply(tx: &mut Transaction<'_, Postgres>, pid: i64, value: &Value) -> Result<Value> {
+pub async fn apply(tx: &mut PgConnection, pid: i64, value: &Value) -> Result<Value> {
     let config = Config::parse(value.clone())?;
-    let used = db::all_json(tx, "SELECT to_jsonb(ref) FROM (SELECT board_key,group_key,NULL::text AS endpoint_key FROM process_points WHERE project_id=$1 GROUP BY board_key,group_key UNION SELECT board_key,NULL,endpoint_key FROM transmit_points WHERE project_id=$1 GROUP BY board_key,endpoint_key UNION SELECT board_key,NULL,endpoint_key FROM project_member_grants WHERE project_id=$1 GROUP BY board_key,endpoint_key) ref", pid).await?;
+    let used = db::all_json(tx, "SELECT to_jsonb(ref) FROM (SELECT board_key,group_key,NULL::text AS endpoint_key FROM process_points WHERE project_id=$1 GROUP BY board_key,group_key UNION SELECT board_key,NULL,endpoint_key FROM transmit_points WHERE project_id=$1 GROUP BY board_key,endpoint_key UNION SELECT g->>'board_key',NULL,g->>'endpoint_key' FROM jsonb_array_elements(COALESCE(NULLIF(current_setting('app.project_grants',true),''),'[]')::jsonb) g) ref", pid).await?;
     validate_references(&config, &used)?;
     let value = serde_json::to_value(&config)?;
-    sqlx::query("UPDATE projects SET topology_config=$2 WHERE id=$1")
+    sqlx::query("UPDATE project_state SET topology_config=$2 WHERE id=$1")
         .bind(pid)
         .bind(&value)
-        .execute(&mut **tx)
+        .execute(&mut *tx)
         .await?;
     Ok(json!({"id":pid,"config":value,"counts":config.counts()?}))
 }
@@ -339,7 +340,7 @@ fn validate_references(config: &Config, used: &[Value]) -> Result<()> {
 mod tests {
     use super::*;
     fn example() -> Value {
-        serde_json::from_str::<Value>(include_str!("../config/upm/project.json")).unwrap()["topology"].clone()
+        serde_json::from_str::<Value>(include_str!("../config/dc-ups/project.json")).unwrap()["topology"].clone()
     }
     #[test]
     fn type_counts_do_not_expand_instances() {

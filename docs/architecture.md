@@ -2,23 +2,25 @@
 
 ## 结构概览
 
-迁移 `0015_json_topology.sql` 后，public 中共 16 张表。板卡、分组、端点和挂载关系不再有独立 SQL 组织表；它们来自项目 JSON。
+同一个 PostgreSQL 实例中，平台库与项目业务库分开。DC-UPS 使用 `protocol_project_dc_ups`，不是 UPM 项目；UPM 是 `config/dc-ups/project.json` 中的一种板卡。
 
-| 表 | 职责 |
-| --- | --- |
-| `process_points` | 当前 DSP 内部数据 |
-| `transmit_points` | 当前 DSP UPP 转发，一条内部点可关联多条转发 |
-| `point_history` | 两张业务表的追加式修改历史 |
-| `projects` | 项目 ID、config_key、名称、revision、已应用 topology_config 快照 |
-| `users` / `sessions` / `login_attempts` | 登录账号、会话、登录限流 |
-| `project_members` / `project_member_grants` | 项目成员、板卡和端点编辑范围 |
-| `project_edit_locks` | 有期限的项目编辑权 |
-| `imports` / `import_previews` / `change_previews` | 导入记录、工作簿和修改预览 |
-| `audit_logs` | 项目、成员、发布、导入和修改操作审计 |
-| `releases` | 不可变的生成文件、数据快照及发布信息 |
-| `_sqlx_migrations` | 程序迁移版本及校验和 |
+| 数据库 | 表 | 职责 |
+| --- | --- | --- |
+| `protocol_platform` | `users` / `sessions` / `login_attempts` | 登录账号、会话与限流 |
+| 平台库 | `projects` | 项目 ID、不可变 UUID、config_key、名称、数据库名和创建状态 |
+| 平台库 | `project_members` / `project_member_grants` | 项目成员及板卡、端点编辑范围 |
+| 平台库 | `audit_logs` | 成员与权限操作审计 |
+| 每项目业务库 | `project_state` | 单行项目身份、UUID、revision、schema_version、生效 topology_config |
+| 项目库 | `process_points` / `transmit_points` | 当前 DSP 内部数据及 UPP 转发映射 |
+| 项目库 | `point_history` | 业务行的追加式修改历史 |
+| 项目库 | `project_edit_locks` | 有期限的编辑权，持有人名称快照 |
+| 项目库 | `imports` / `import_previews` / `change_previews` | 导入记录及修改预览 |
+| 项目库 | `audit_logs` / `releases` | 项目操作审计、不可变发布快照 |
+| 每个库 | `_sqlx_migrations` | 各自的迁移版本和校验和 |
 
-`projects` 只保留系统定位和版本所需信息。`config/upm/project.json` 是 DC-UPS 的可编辑来源，`projects.topology_config` 是经过校验导入的生效快照；保留快照使编辑、权限和历史不会随着未导入的 SSH 文件改动发生变化。
+平台库共 8 张表，每个项目库共 11 张表（包含迁移记录表）。组织配置没有独立 SQL 表，板卡也不单独建库。业务库不保存账号密码或权限副本；历史记录保存操作者 ID 和名称快照，不跨数据库建用户外键。
+
+`config/dc-ups/project.json` 是可编辑来源，业务库 `project_state.topology_config` 是校验导入后的生效快照。平台登记仅负责定位项目，不能用 JSON 中任意数据库地址替换路由。路由同时核验项目 ID、key 和 UUID，避免同名数据库被误用。
 
 ## JSON 组织
 
@@ -38,7 +40,7 @@
 
 ## 当前业务字段
 
-所有业务行都有 `id`、`project_id`、`board_key`。ID 是数据库稳定主键，JSON 代码指定归属。
+所有业务行都有 `id`、`project_id`、`board_key`。ID 是库内稳定主键；不同项目可有相同 ID，完整身份包含项目。JSON 代码指定板卡归属。
 
 | 表 | 主要字段 |
 | --- | --- |
@@ -49,10 +51,10 @@
 
 ```mermaid
 erDiagram
-  projects ||--o{ process_points : owns
-  projects ||--o{ transmit_points : owns
+  project_state ||--o{ process_points : owns
+  project_state ||--o{ transmit_points : owns
   process_points ||--o{ transmit_points : maps
-  projects ||--o{ point_history : records
+  project_state ||--o{ point_history : records
 ```
 
 转发以 `process_point_id` 关联内部点，避免修改枚举或 sigID 时断开关系。数据库外键防止跨项目引用，应用校验确保相同板卡且端点、分组在生效 JSON 中存在。移除被数据或授权引用的配置会被拒绝。
@@ -65,6 +67,6 @@ erDiagram
 
 预览在事务内试写后回滚。提交再次校验编辑权、revision、字段冲突、关联和权限，业务修改、历史、审计及 revision 在同一事务提交。`json-patch` 比较基线与最新状态，无关字段可合并；同字段或依赖冲突不覆盖。项目编辑租约降低同时修改概率，版本检查处理过期草稿。
 
-PostgreSQL 的事务/MVCC 不替代这些应用历史记录。运行角色不能修改或删除既有 `point_history` 和发布记录；RLS 隔离项目。`project_member_grants` 使用稳定 `board_key` / `endpoint_key`，全板卡授权覆盖内部点与该板卡协议授权。
+PostgreSQL 的事务/MVCC 不替代这些应用历史记录。运行角色不能修改或删除既有 `point_history` 和发布记录；RLS 校验当前项目与事务内权限。服务器先在平台库锁定账号及项目权限，再把授权快照设置到业务事务；直到业务提交完成才释放平台锁。撤权与提交按锁顺序执行，数据库不使用跨库用户查询。`project_member_grants` 使用稳定 `board_key` / `endpoint_key`，全板卡授权覆盖内部点与该板卡协议授权。
 
-项目 Dump 只包含两张当前业务表，导入时重新分配 ID 并重建引用，保留目标已有历史；完整账号、历史和发布迁移必须使用全库备份。旧关系图与旧 C 生成流程已移除，当前仅实现 DSP，UPM 采集留待后续。
+项目 Dump 只包含两张当前业务表，导入时重新分配 ID 并重建引用，保留目标已有历史；完整迁移必须停写，分别备份平台库、各项目库和 config 目录，并一起恢复，保留相同 UUID。旧关系图与旧 C 生成流程已移除，当前仅实现 DSP，UPM 采集留待后续。

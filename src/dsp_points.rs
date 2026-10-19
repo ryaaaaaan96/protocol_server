@@ -6,7 +6,7 @@ use crate::{
     topology::{Change, num, rows, strv},
 };
 use serde_json::{Value, json};
-use sqlx::{Postgres, Transaction};
+use sqlx::PgConnection;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const PROCESS_COLUMNS: &str = "group_key,name,enum_name,sig_id,internal_type,element_count,byte_length,unit,default_value,min_value,max_value,boot_restore,manual_restore,process_enabled,flags,callback,notes,display_order,source_sheet,source_row,metadata";
@@ -22,14 +22,14 @@ fn board_definition<'a>(g: &'a Value, key: &str) -> Option<&'a Value> {
 }
 
 pub async fn native_board(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut PgConnection,
     pid: i64,
     board_key: &str,
 ) -> Result<Option<Value>> {
     let config: Option<Value> =
-        sqlx::query_scalar("SELECT topology_config FROM projects WHERE id=$1")
+        sqlx::query_scalar("SELECT topology_config FROM project_state WHERE id=$1")
             .bind(pid)
-            .fetch_optional(&mut **tx)
+            .fetch_optional(&mut *tx)
             .await?
             .flatten();
     Ok(config.and_then(|config| {
@@ -101,7 +101,7 @@ fn derive_length(point: &mut Value, supplied: Option<&Value>) -> Result<()> {
 }
 
 async fn insert(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut PgConnection,
     pid: i64,
     board_key: &str,
     kind: &str,
@@ -116,11 +116,11 @@ async fn insert(
         .join(",");
     Ok(sqlx::query_scalar(&format!(
         "INSERT INTO {table}(project_id,board_key,{cols}) SELECT $1,$2,{selected} FROM jsonb_populate_record(NULL::{table},$3) x RETURNING to_jsonb({table})"
-    )).bind(pid).bind(board_key).bind(values).fetch_one(&mut **tx).await?)
+    )).bind(pid).bind(board_key).bind(values).fetch_one(&mut *tx).await?)
 }
 
 pub async fn apply(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut PgConnection,
     pid: i64,
     board_key: &str,
     kind: &str,
@@ -158,7 +158,7 @@ pub async fn apply(
         .bind(pid)
         .bind(board_key)
         .bind(c.id)
-        .fetch_optional(&mut **tx)
+        .fetch_optional(&mut *tx)
         .await?
         .ok_or(AppError::not_found())?
     };
@@ -169,7 +169,7 @@ pub async fn apply(
         .bind(pid)
         .bind(board_key)
         .bind(c.id)
-        .execute(&mut **tx)
+        .execute(&mut *tx)
         .await?;
         return Ok(old);
     }
@@ -207,7 +207,7 @@ pub async fn apply(
             return Err(AppError::bad("转发端点不在已应用 JSON 的 UPP 端点配置中"));
         }
         let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM process_points WHERE project_id=$1 AND board_key=$2 AND id=$3)")
-            .bind(pid).bind(board_key).bind(merged["process_point_id"].as_i64()).fetch_one(&mut **tx).await?;
+            .bind(pid).bind(board_key).bind(merged["process_point_id"].as_i64()).fetch_one(&mut *tx).await?;
         if !exists {
             return Err(AppError::bad("转发必须关联当前板卡的内部数据点"));
         }
@@ -224,11 +224,11 @@ pub async fn apply(
     let assigned = cols.join(",");
     Ok(sqlx::query_scalar(&format!(
         "UPDATE {table} t SET ({assigned})=(SELECT {selected} FROM jsonb_populate_record(NULL::{table},$4) x) WHERE project_id=$1 AND board_key=$2 AND id=$3 RETURNING to_jsonb(t)"
-    )).bind(pid).bind(board_key).bind(c.id).bind(Value::Object(updates)).fetch_one(&mut **tx).await?)
+    )).bind(pid).bind(board_key).bind(c.id).bind(Value::Object(updates)).fetch_one(&mut *tx).await?)
 }
 
 pub async fn table_rows(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut PgConnection,
     pid: i64,
     board_key: &str,
     kind: &str,
@@ -244,7 +244,7 @@ pub async fn table_rows(
             'resolved_sig_id',p.sig_id,
             'forward_count',(SELECT count(*) FROM transmit_points t WHERE t.project_id=p.project_id AND t.process_point_id=p.id))
             FROM process_points p WHERE p.project_id=$1 AND p.board_key=$2 ORDER BY p.display_order,p.id"#)
-            .bind(pid).bind(board_key).fetch_all(&mut **tx).await?
+            .bind(pid).bind(board_key).fetch_all(&mut *tx).await?
     } else {
         sqlx::query_scalar(r#"SELECT to_jsonb(t) || jsonb_build_object(
             'edit_values',to_jsonb(t),'signal_name',p.name,
@@ -256,7 +256,7 @@ pub async fn table_rows(
             'endpoint_name',t.endpoint_key,'protocol','UPP')
             FROM transmit_points t JOIN process_points p ON p.project_id=t.project_id AND p.board_key=t.board_key AND p.id=t.process_point_id
             WHERE t.project_id=$1 AND t.board_key=$2 ORDER BY t.display_order,t.id"#)
-            .bind(pid).bind(board_key).fetch_all(&mut **tx).await?
+            .bind(pid).bind(board_key).fetch_all(&mut *tx).await?
     };
     let groups = groups(&board);
     for row in &mut result {
@@ -279,11 +279,11 @@ pub async fn table_rows(
     Ok(result)
 }
 
-pub async fn import(tx: &mut Transaction<'_, Postgres>, pid: i64, data: &DspImport) -> Result<()> {
+pub async fn import(tx: &mut PgConnection, pid: i64, data: &DspImport) -> Result<()> {
     let config: Option<Value> =
-        sqlx::query_scalar("SELECT topology_config FROM projects WHERE id=$1")
+        sqlx::query_scalar("SELECT topology_config FROM project_state WHERE id=$1")
             .bind(pid)
-            .fetch_one(&mut **tx)
+            .fetch_one(&mut *tx)
             .await?;
     let Some(board) = config
         .as_ref()
@@ -302,12 +302,12 @@ pub async fn import(tx: &mut Transaction<'_, Postgres>, pid: i64, data: &DspImpo
     sqlx::query("DELETE FROM transmit_points WHERE project_id=$1 AND board_key=$2")
         .bind(pid)
         .bind(board_key)
-        .execute(&mut **tx)
+        .execute(&mut *tx)
         .await?;
     sqlx::query("DELETE FROM process_points WHERE project_id=$1 AND board_key=$2")
         .bind(pid)
         .bind(board_key)
-        .execute(&mut **tx)
+        .execute(&mut *tx)
         .await?;
     let mut ids = BTreeMap::new();
     for point in &data.process {
@@ -667,7 +667,7 @@ pub fn validate(g: &Value) -> Vec<Value> {
 }
 
 pub async fn history(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut PgConnection,
     pid: i64,
     user_id: i64,
     batch_label: &str,
@@ -713,14 +713,14 @@ pub async fn history(
         return Ok(());
     }
     let count = changes.len() as u64;
-    let result = sqlx::query(r#"WITH batch AS (SELECT gen_random_uuid() AS id), actor AS (SELECT display_name FROM users WHERE id=$2)
+    let result = sqlx::query(r#"WITH batch AS (SELECT gen_random_uuid() AS id), actor AS (SELECT current_setting('app.actor_name',true) AS display_name)
         INSERT INTO point_history(project_id,batch_id,batch_label,entity_type,record_id,board_key,group_key,action,before_data,after_data,actor_id,actor_name,project_revision,config_snapshot)
         SELECT $1,batch.id,$3,c.entity_type,c.record_id,c.board_key,c.group_key,c.action,
             NULLIF(c.before_data,'null'::jsonb),NULLIF(c.after_data,'null'::jsonb),$2,actor.display_name,p.revision,
             jsonb_build_object('before',$5::jsonb,'after',p.topology_config)
         FROM jsonb_to_recordset($4) AS c(entity_type text,record_id bigint,board_key text,group_key text,action text,before_data jsonb,after_data jsonb)
-        CROSS JOIN batch CROSS JOIN actor JOIN projects p ON p.id=$1"#)
-        .bind(pid).bind(user_id).bind(batch_label).bind(json!(changes)).bind(&before["project_config"]).execute(&mut **tx).await?;
+        CROSS JOIN batch CROSS JOIN actor JOIN project_state p ON p.id=$1"#)
+        .bind(pid).bind(user_id).bind(batch_label).bind(json!(changes)).bind(&before["project_config"]).execute(&mut *tx).await?;
     if result.rows_affected() != count {
         return Err(AppError::bad("操作者或项目状态无效，无法完整保存点表历史"));
     }
@@ -983,7 +983,7 @@ mod tests {
     #[test]
     fn dsp_workbook_produces_a_valid_native_graph() {
         let data = crate::dsp_workbook::parse_workbook(
-            include_bytes!("../config/upm/sources/UPM项目测点数据表.xlsx").to_vec(),
+            include_bytes!("../config/dc-ups/sources/DC-UPS测点数据表.xlsx").to_vec(),
         )
         .unwrap();
         let mut g = graph();

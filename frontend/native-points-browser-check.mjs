@@ -8,7 +8,7 @@ import { createServer } from "vite";
 import { chromium, expect } from "@playwright/test";
 
 const root = fileURLToPath(new URL(".", import.meta.url));
-const definition = async name => JSON.parse(await readFile(new URL(`../config/upm/DSP/${name}.json`, import.meta.url), "utf8"));
+const definition = async name => JSON.parse(await readFile(new URL(`../config/dc-ups/DSP/${name}.json`, import.meta.url), "utf8"));
 const processDefinition = await definition("process"), forwardDefinition = await definition("transmit");
 const points = [
   { id: 1, project_id: 1, board_key: "DSP", group_key: "LOCAL", name: "母线电压", enum_name: "DC_BUS_VOLTAGE", sig_id: 4097, internal_type: "F32", element_count: 1, byte_length: 4, unit: "V", default_value: "0", min_value: "0", max_value: "1000", flags: "0", callback: "NULL", process_enabled: true, boot_restore: false, manual_restore: false, notes: null },

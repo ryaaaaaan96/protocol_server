@@ -369,7 +369,7 @@ mod tests {
     fn fixture() -> Vec<Value> {
         static ROWS: OnceLock<Vec<Value>> = OnceLock::new();
         ROWS.get_or_init(|| {
-            workbook_rows(include_bytes!("../config/upm/sources/UPM项目测点数据表.xlsx").to_vec())
+            workbook_rows(include_bytes!("../config/dc-ups/sources/DC-UPS测点数据表.xlsx").to_vec())
                 .unwrap()
         })
         .clone()
@@ -596,9 +596,10 @@ mod tests {
 
     #[test]
     fn reads_dsp_workbook_without_the_legacy_importer() {
-        let direct =
-            parse_workbook(include_bytes!("../config/upm/sources/UPM项目测点数据表.xlsx").to_vec())
-                .unwrap();
+        let direct = parse_workbook(
+            include_bytes!("../config/dc-ups/sources/DC-UPS测点数据表.xlsx").to_vec(),
+        )
+        .unwrap();
         let from_rows = parse(&fixture()).unwrap();
         assert_eq!(direct.process, from_rows.process);
         assert_eq!(direct.transmit, from_rows.transmit);
@@ -606,7 +607,7 @@ mod tests {
 
     #[test]
     fn requires_only_the_two_dsp_sheets() {
-        let source = include_bytes!("../config/upm/sources/UPM项目测点数据表.xlsx");
+        let source = include_bytes!("../config/dc-ups/sources/DC-UPS测点数据表.xlsx");
         let mut archive = zip::ZipArchive::new(Cursor::new(source)).unwrap();
         let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
         for index in 0..archive.len() {

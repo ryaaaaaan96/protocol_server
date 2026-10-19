@@ -6,7 +6,7 @@ use crate::{
     topology::{self, Change},
 };
 use serde_json::{Value, json};
-use sqlx::{Postgres, Transaction};
+use sqlx::PgConnection;
 
 /// Stable identity keys prevent an unrelated row insertion from shifting array paths.
 pub fn document(graph: &Value) -> Value {
@@ -44,7 +44,7 @@ pub fn conflict(c: &Change, current: i32, reason: &str) -> AppError {
 /// The resulting preview always uses current server data and requires confirmation.
 pub async fn can_preview(
     s: &AppState,
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut PgConnection,
     pid: i64,
     c: &Change,
     graph: &Value,

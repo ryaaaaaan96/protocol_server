@@ -9,7 +9,7 @@
 ```bash
 ./scripts/check-env.sh               # 检查缺少的工具、依赖和配置，不安装、不连接数据库
 ./scripts/init-db.sh                 # 初始化 PostgreSQL 18、账号和表结构，不创建项目
-./scripts/create-project.sh upm      # 从 config/upm/ 创建 DC-UPS，重复执行保留已有数据
+./scripts/create-project.sh dc-ups      # 从 config/dc-ups/ 创建 DC-UPS，重复执行保留已有数据
 ./scripts/dev.sh                     # 构建前后端并启动 HTTP 服务
 ```
 
@@ -20,16 +20,16 @@ node scripts/local-db.mjs start
 ./scripts/dev.sh
 ```
 
-更新代码涉及数据库迁移时，先停止旧 HTTP 服务、备份数据库，然后执行 `cargo run -- migrate`，再运行 `./scripts/dev.sh`。**0015 会删除旧关系表**，升级条件及回退方法见 [部署与数据库迁移](docs/operations.md)。不要删除或修改已经应用的迁移文件。
+更新代码涉及数据库迁移时，先停止旧 HTTP 服务、备份数据库，然后执行 `cargo run -- migrate`，再运行 `./scripts/dev.sh`。**旧单库 v15 必须先执行分库迁移，不能直接运行新版本的 migrate**，操作及回退方法见 [部署与数据库迁移](docs/operations.md)。不要删除或修改已经应用的迁移文件。
 
 本地 PostgreSQL 默认端口为 `55432`，真实持久数据在 `.runtime/pgdata/`。停止数据库使用 `node scripts/local-db.mjs stop`。`dev.sh` 不自动启动数据库、迁移或创建项目。
 
 ## 项目文件与数据库
 
-**一个 `config/` 子目录就是一个项目。** DC-UPS 保留稳定标识 `upm`，避免改名后产生另一项目：
+**一个 `config/` 子目录就是一个项目。** DC-UPS 的项目标识为 `dc-ups`，UPM 只是其中一种板卡：
 
 ```text
-config/upm/
+config/dc-ups/
   project.json                 key、显示名称、板卡类型、挂载关系、目录和页签顺序
   DSP/
     process.json               DSP 内部数据的列、字段及编辑规则
@@ -44,7 +44,12 @@ config/upm/
 
 JSON 是组织配置的编辑来源。服务器文件修改后，通过网页读取、检查并导入；网页不提供拓扑编辑表单。表格展示定义刷新即可读取；拓扑导入后才更新数据库中的生效快照，以保证已有点和授权仍有归属。
 
-数据库只保存两张当前业务表：`process_points` 和 `transmit_points`，另有 `point_history` 保存修改历史。全部 public 表为 **16 张**：其余用于项目身份/生效快照、账号、权限、编辑锁、审计、预览和发布。已移除 `board_models`、`signal_groups`、`data_items` 等 17 张旧表和 9 个视图。具体字段见 [数据库结构](docs/architecture.md)。
+数据库采用 **一个平台库 + 每项目一个业务库**，共用一个 PostgreSQL 实例：
+
+- `protocol_platform`：账号、登录会话、项目登记、成员权限及平台审计。
+- `protocol_project_dc_ups`：DC-UPS 的 `process_points`、`transmit_points`、`point_history`、生效配置快照、版本、编辑锁、导入和发布。
+
+新项目按 `protocol_project_<key>` 建库，短横线转为下划线。板卡不单独建库；业务库中没有账号或成员权限表。具体字段见 [数据库结构](docs/architecture.md)。
 
 ## DSP 点表
 
@@ -70,15 +75,15 @@ JSON 是组织配置的编辑来源。服务器文件修改后，通过网页读
 导出可移植项目文件夹：
 
 ```bash
-node scripts/export-project.mjs upm
+node scripts/export-project.mjs dc-ups
 ```
 
-默认输出 `.runtime/exports/<时间>/upm/`，包含配置及专用 `project.dump`。在网页「项目设置 → 导入项目文件夹」选择完整目录：相同 key 覆盖配置，新 key 建立项目。
+默认输出 `.runtime/exports/<时间>/dc-ups/`，包含配置及专用 `project.dump`。在网页「项目设置 → 导入项目文件夹」选择完整目录：相同 key 覆盖配置，新 key 建立项目。
 
 - 带 Dump：替换该项目当前点表，追加修改历史，保留账号、授权、原历史和发布。
 - 不带 Dump：保留当前点表；新项目点表为空。文件夹中的 XLSX 不会自动导入。
 
-CLI 创建优先使用 Dump，否则只支持 `workbook_boards: ["DSP"]` 的 DSP 来源导入。项目 Dump 不携带历史、账号和发布，完整迁移使用全库备份。新版本只接受 schema_version 3 且迁移版本匹配的专用归档；旧归档需在匹配旧环境中处理后重新导出。
+CLI 创建优先使用 Dump，否则只支持 `workbook_boards: ["DSP"]` 的 DSP 来源导入。项目 Dump 不携带历史、账号和发布，完整迁移分别备份平台库、全部项目库和配置目录。新版本只接受 schema_version 4 且迁移版本匹配的专用归档；旧归档需在匹配旧环境中处理后重新导出。
 
 逐表 Excel 追加示例见 [批量添加](docs/batch-add.md)。
 

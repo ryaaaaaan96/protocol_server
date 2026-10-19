@@ -12,7 +12,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use sqlx::{Postgres, Transaction};
+use sqlx::PgConnection;
 use std::collections::BTreeSet;
 
 // Inactive board definitions may retain descriptive fields for future tables.
@@ -317,7 +317,7 @@ fn definition(config: &Value, kind: &str, code: &str) -> Result<Value> {
     })
 }
 pub(crate) async fn board_definition(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut PgConnection,
     pid: i64,
     board_key: &str,
     kind: &str,
@@ -325,10 +325,11 @@ pub(crate) async fn board_definition(
 ) -> Result<Value> {
     entity(kind)?;
     board(tx, pid, board_key).await?;
-    let key: Option<String> = sqlx::query_scalar("SELECT config_key FROM projects WHERE id=$1")
-        .bind(pid)
-        .fetch_one(&mut **tx)
-        .await?;
+    let key: Option<String> =
+        sqlx::query_scalar("SELECT config_key FROM project_state WHERE id=$1")
+            .bind(pid)
+            .fetch_one(&mut *tx)
+            .await?;
     let config = files
         .definition(key.as_deref())
         .map_err(|e| AppError::bad(e.to_string()))?;
@@ -340,10 +341,11 @@ pub async fn project_schema(
     Path(pid): Path<i64>,
 ) -> Result<Json<Value>> {
     let mut tx = db::read_snapshot_context(&s.pool, &u, pid).await?;
-    let key: Option<String> = sqlx::query_scalar("SELECT config_key FROM projects WHERE id=$1")
-        .bind(pid)
-        .fetch_one(&mut *tx)
-        .await?;
+    let key: Option<String> =
+        sqlx::query_scalar("SELECT config_key FROM project_state WHERE id=$1")
+            .bind(pid)
+            .fetch_one(&mut *tx)
+            .await?;
     Ok(Json(
         s.project_files
             .definition(key.as_deref())
@@ -351,7 +353,7 @@ pub async fn project_schema(
             .clone(),
     ))
 }
-async fn board(tx: &mut Transaction<'_, Postgres>, pid: i64, board_key: &str) -> Result<Value> {
+async fn board(tx: &mut PgConnection, pid: i64, board_key: &str) -> Result<Value> {
     crate::dsp_points::native_board(tx, pid, board_key)
         .await?
         .ok_or(AppError::bad("此板卡尚未启用点表存储"))
@@ -363,7 +365,7 @@ pub async fn read(
 ) -> Result<Json<Value>> {
     entity(&kind)?;
     let mut tx = db::read_snapshot_context(&s.pool, &u, pid).await?;
-    let revision: i32 = sqlx::query_scalar("SELECT revision FROM projects WHERE id=$1")
+    let revision: i32 = sqlx::query_scalar("SELECT revision FROM project_state WHERE id=$1")
         .bind(pid)
         .fetch_one(&mut *tx)
         .await?;
@@ -394,7 +396,7 @@ pub async fn read(
 }
 
 pub(crate) async fn table_rows(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut PgConnection,
     pid: i64,
     board_key: &str,
     kind: &str,
@@ -430,7 +432,7 @@ pub async fn preview(
     };
     topology::preview(State(s), u, Path(pid), Json(c)).await
 }
-pub async fn apply(tx: &mut Transaction<'_, Postgres>, pid: i64, c: &Change) -> Result<Value> {
+pub async fn apply(tx: &mut PgConnection, pid: i64, c: &Change) -> Result<Value> {
     let kind = match c.entity.as_str() {
         "process_points" => "process",
         "transmit_points" => "forward",
@@ -465,7 +467,7 @@ mod tests {
     fn configuration() -> Value {
         crate::project_files::ProjectFiles::load_from(std::path::Path::new("config"))
             .unwrap()
-            .definition(Some("upm"))
+            .definition(Some("dc-ups"))
             .unwrap()
             .clone()
     }

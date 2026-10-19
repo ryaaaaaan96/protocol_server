@@ -7,13 +7,13 @@ import { createServer } from "vite";
 import { chromium, expect } from "@playwright/test";
 
 const root = fileURLToPath(new URL(".", import.meta.url));
-const definition = async name => JSON.parse(await readFile(new URL(`../config/upm/DSP/${name}.json`, import.meta.url), "utf8"));
+const definition = async name => JSON.parse(await readFile(new URL(`../config/dc-ups/DSP/${name}.json`, import.meta.url), "utf8"));
 const processDefinition = await definition("process"), forwardDefinition = await definition("transmit");
 const board = { code: "DSP", name: "DSP 功率板", point_storage: "native", point_groups: [{ code: "LOCAL", name: "DSP 内部数据" }], point_endpoints: [{ code: "UPP_SERVICE", name: "UPP 对外接口", protocol: "UPP" }] };
 const config = { version: 2, board_types: [{ code: "UPM", name: "UPM 控制板" }, board], root: { type: "UPM", quantity: 1 }, mounts: [{ parent: "UPM", child: "DSP", quantity: 8, connections: [{ protocol: "UPP", transport: "CAN" }] }] };
 const point = { id: 1, board_key: "DSP", group_key: "LOCAL", name: "母线电压", enum_name: "BUS_VOLTAGE", internal_type: "U16", element_count: 1, byte_length: 2, sig_id: null };
 const graph = { revision: 1, project_config: config, process_points: [point], transmit_points: [] };
-const project = { id: 1, key: "upm", name: "DC-UPS", revision: 1, role: "engineer" };
+const project = { id: 1, key: "dc-ups", name: "DC-UPS", revision: 1, role: "engineer" };
 const catalog = [{ board_key: "DSP", board_name: "DSP 功率板", endpoints: [{ endpoint_key: "UPP_SERVICE", name: "UPP 对外接口", protocol: "UPP" }] }];
 const permissions = { role: "admin", edit_scope: "all", grants: [], can_edit: true, can_manage_project: true, catalog };
 const user = { id: 1, username: "test-admin", display_name: "测试管理员", is_admin: true, active: true };
@@ -22,7 +22,7 @@ const tables = { process: processDefinition, forward: forwardDefinition };
 const requests = [], errors = [];
 let owned = false, folderInvalid = false;
 const folder = await mkdtemp(join(tmpdir(), "protocol-folder-ui-"));
-await writeFile(join(folder, "project.json"), JSON.stringify({ key: "upm", name: "DC-UPS", topology: config }));
+await writeFile(join(folder, "project.json"), JSON.stringify({ key: "dc-ups", name: "DC-UPS", topology: config }));
 const lock = () => ({ locked: owned, owned, owner: owned ? user : null, expires_at: owned ? new Date(Date.now() + 120_000).toISOString() : null, lease_seconds: 120, permissions });
 const server = await createServer({ root, logLevel: "error", server: { host: "127.0.0.1", port: 0 } });
 let browser;
@@ -49,7 +49,7 @@ try {
     if (path.endsWith("/point-tables/schema")) return ok({ boards: { DSP: tables }, workspace: { boards: { DSP: { tables: ["process", "forward"] } } } });
     const tableMatch = path.match(/^\/api\/projects\/1\/boards\/DSP\/point-tables\/(process|forward)$/);
     if (tableMatch) return ok({ revision: 1, board_key: "DSP", kind: tableMatch[1], storage: "native", definition: tables[tableMatch[1]], rows: tableMatch[1] === "process" ? [{ ...point, data_type: "U16", group_name: "DSP 内部数据", edit_values: point, forward_count: 0 }] : [], options: { native_groups: board.point_groups, process_points: [point], endpoints: board.point_endpoints } });
-    if (path.endsWith("/configuration/source")) return ok({ key: "upm", sha256: "a".repeat(64), config });
+    if (path.endsWith("/configuration/source")) return ok({ key: "dc-ups", sha256: "a".repeat(64), config });
     if (path.endsWith("/changes/preview")) return ok({ id: 9, allowed: true, errors: [], impact: { count: 0, changes: [], affected_types: [board] } });
     if (path.endsWith("/members")) return method === "GET" ? ok([{ id: 2, username: "engineer", display_name: "工程师", active: true, role: "engineer", edit_scope: "scoped", grants: [] }]) : ok({});
     if (path === "/api/users") return ok([user, { id: 2, username: "engineer", display_name: "工程师", active: true }]);
@@ -61,7 +61,7 @@ try {
     if (path === "/api/project-folders/preview") {
       if (folderInvalid) return route.fulfill({ status: 400, json: { error: "项目配置校验失败", errors: [{ entity: "process_points", name: point.name, message: "点表分组不存在" }] } });
       const replace = request.postDataBuffer().toString("utf8").includes("project.dump");
-      return ok({ token: "folder-preview", key: "upm", name: "DC-UPS", existing_project_id: 1, revision: 1, replace_data: replace, files: ["project.json", ...(replace ? ["project.dump"] : [])] });
+      return ok({ token: "folder-preview", key: "dc-ups", name: "DC-UPS", existing_project_id: 1, revision: 1, replace_data: replace, files: ["project.json", ...(replace ? ["project.dump"] : [])] });
     }
     if (path === "/api/project-folders/commit") return route.fulfill({ status: 409, json: { error: "项目已被其他成员更新，请重新检查" } });
     errors.push(`Unexpected ${method} ${path}`);

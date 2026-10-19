@@ -150,7 +150,8 @@ export async function exportProject(key, destination, overrides = {}) {
   adminUrl.pathname = "/postgres";
   const temporaryUrl = new URL(sourceUrl);
   temporaryUrl.pathname = `/${temporaryDatabase}`;
-  const sourceDb = new pg.Client({ connectionString: sourceUrl.toString() });
+  const platformDb = new pg.Client({ connectionString: sourceUrl.toString() });
+  let sourceDb;
   const adminDb = new pg.Client({ connectionString: adminUrl.toString() });
   let temporaryDb;
   let created = false;
@@ -167,18 +168,27 @@ export async function exportProject(key, destination, overrides = {}) {
     if (JSON.stringify(JSON.parse(fs.readFileSync(path.join(stagedProject, "project.json"), "utf8"))) !== JSON.stringify(manifest)) {
       throw new Error("读取期间 project.json 发生变化，请重新导出。");
     }
+    await platformDb.connect();
+    await platformDb.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    const { rows: registrations } = await platformDb.query("SELECT id,project_uid,database_name FROM projects WHERE config_key=$1 AND status='ready'", [key]);
+    if (registrations.length !== 1) throw new Error("平台数据库中未找到唯一的就绪项目。");
+    const registry = registrations[0];
+    if (!/^protocol_project_[a-z][a-z0-9_]{0,39}$/.test(registry.database_name)) throw new Error("平台登记的项目数据库名称无效。");
+    const projectUrl = new URL(sourceUrl);
+    projectUrl.pathname = `/${registry.database_name}`;
+    sourceDb = new pg.Client({ connectionString: projectUrl.toString() });
     await sourceDb.connect();
     await sourceDb.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
-    const { rows: projects } = await sourceDb.query("SELECT id,revision,schema_version,topology_config FROM projects WHERE config_key=$1", [key]);
-    if (projects.length !== 1) throw new Error("数据库中未找到唯一的对应项目。");
+    const { rows: projects } = await sourceDb.query("SELECT id,project_uid,config_key,revision,schema_version,topology_config FROM project_state");
+    if (projects.length !== 1 || projects[0].id !== registry.id || projects[0].project_uid !== registry.project_uid || projects[0].config_key !== key) throw new Error("项目数据库与平台登记的身份不一致。");
     const project = projects[0];
-    if (project.schema_version !== 3) throw new Error("请先迁移项目数据库到 v3。");
+    if (project.schema_version !== 4) throw new Error("请先迁移项目数据库到 v4。");
     if (comparableTopology(manifest.topology) !== comparableTopology(project.topology_config)) {
       throw new Error("服务器 project.json 与已应用的项目拓扑不同，请先在网页检查并导入配置后再导出。");
     }
     const { rows: migrations } = await sourceDb.query("SELECT max(version)::int AS version FROM _sqlx_migrations WHERE success");
     const payload = {
-      format: "protocol-studio-project", version: 1, key, schema_version: 3,
+      format: "protocol-studio-project", version: 1, key, schema_version: 4,
       migration_version: migrations[0].version, source_revision: project.revision,
       tables: {},
     };
@@ -189,6 +199,7 @@ export async function exportProject(key, destination, overrides = {}) {
       total += rows.length;
     }
     await sourceDb.query("COMMIT");
+    await platformDb.query("COMMIT");
     if (fingerprint(source) !== originalFingerprint) throw new Error("导出期间服务器项目配置发生变化，请重新导出。");
     removeOldDumps(stagedProject, manifest.dump);
     if (total > 100_000) throw new Error("项目超过当前导入支持的 100000 条业务记录限制。");
@@ -217,7 +228,7 @@ export async function exportProject(key, destination, overrides = {}) {
     fs.renameSync(stagedProject, output);
     return { directory: output, rows: total, revision: project.revision, migrationVersion: payload.migration_version };
   } finally {
-    await Promise.allSettled([sourceDb.end(), temporaryDb?.end()]);
+    await Promise.allSettled([sourceDb?.end(), platformDb.end(), temporaryDb?.end()]);
     try {
       if (created) await adminDb.query(`DROP DATABASE "${temporaryDatabase}" WITH (FORCE)`);
     } finally {

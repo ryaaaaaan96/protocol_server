@@ -13,8 +13,8 @@ const { pointChoices, pointDataType } = await import(choicesUrl);
 const { parseCell, displayCell } = await import(moduleUrl((await compile("./src/domain/pointGrid.ts")).replace('"./pointTables"', JSON.stringify(choicesUrl))));
 const { allowsPoint } = await import(moduleUrl(await compile("./src/domain/permissions.ts")));
 const { belongsToBoard, scopedRows } = await import(moduleUrl(await compile("./src/domain/board.ts")));
-const processDefinition = JSON.parse(await readFile(new URL("../config/upm/DSP/process.json", import.meta.url), "utf8"));
-const forwardDefinition = JSON.parse(await readFile(new URL("../config/upm/DSP/transmit.json", import.meta.url), "utf8"));
+const processDefinition = JSON.parse(await readFile(new URL("../config/dc-ups/DSP/process.json", import.meta.url), "utf8"));
+const forwardDefinition = JSON.parse(await readFile(new URL("../config/dc-ups/DSP/transmit.json", import.meta.url), "utf8"));
 const point = {
   id: 1, board_key: "DSP", group_key: "LOCAL", name: "母线电压", enum_name: "DC_BUS_VOLTAGE", sig_id: 4097,
   data_type: "F32", internal_type: "F32", element_count: 1, byte_length: 4, unit: "V", default_value: "0", min_value: "0", max_value: "1000",

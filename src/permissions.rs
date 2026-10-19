@@ -14,7 +14,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sqlx::{Postgres, Transaction};
+use sqlx::PgConnection;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -94,17 +94,27 @@ impl Access {
         }
     }
 }
-pub async fn load(tx: &mut Transaction<'_, Postgres>, pid: i64) -> Result<Access> {
-    let member: Value = sqlx::query_scalar("SELECT CASE WHEN app_is_admin() THEN jsonb_build_object('role','admin','edit_scope','all') ELSE COALESCE((SELECT to_jsonb(m) FROM project_members m WHERE m.project_id=$1 AND m.user_id=app_user_id()), '{}'::jsonb) END")
-        .bind(pid).fetch_one(&mut **tx).await?;
-    let grants: Vec<Value> = db::all_json(tx,"SELECT jsonb_build_object('board_key',board_key,'scope',scope,'endpoint_key',endpoint_key) FROM project_member_grants WHERE project_id=$1 AND user_id=app_user_id() ORDER BY board_key,scope,endpoint_key",pid).await?;
+pub async fn load(tx: &mut PgConnection, pid: i64) -> Result<Access> {
+    let allowed: bool = sqlx::query_scalar("SELECT app_can_access($1)")
+        .bind(pid)
+        .fetch_one(&mut *tx)
+        .await?;
+    if !allowed {
+        return Err(AppError::forbidden());
+    }
+    let member: Value = sqlx::query_scalar("SELECT app_access()")
+        .fetch_one(tx)
+        .await?;
     Ok(Access {
         role: member["role"].as_str().unwrap_or("viewer").into(),
         edit_scope: member["edit_scope"].as_str().unwrap_or("scoped").into(),
-        grants: grants
-            .into_iter()
-            .map(serde_json::from_value)
-            .collect::<std::result::Result<_, _>>()?,
+        grants: serde_json::from_value(
+            member["grants"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into(),
+        )?,
     })
 }
 pub async fn read(State(s): State<AppState>, u: User, Path(pid): Path<i64>) -> Result<Json<Value>> {
@@ -112,15 +122,16 @@ pub async fn read(State(s): State<AppState>, u: User, Path(pid): Path<i64>) -> R
     let access = load(&mut tx, pid).await?;
     Ok(Json(access.value(&catalog(&mut tx, pid).await?)))
 }
-pub async fn catalog(tx: &mut Transaction<'_, Postgres>, pid: i64) -> Result<Value> {
-    let config =
-        sqlx::query_scalar::<_, Option<Value>>("SELECT topology_config FROM projects WHERE id=$1")
-            .bind(pid)
-            .fetch_one(&mut **tx)
-            .await?;
+pub async fn catalog(tx: &mut PgConnection, pid: i64) -> Result<Value> {
+    let config = sqlx::query_scalar::<_, Option<Value>>(
+        "SELECT topology_config FROM project_state WHERE id=$1",
+    )
+    .bind(pid)
+    .fetch_one(&mut *tx)
+    .await?;
     Ok(json!({"project_config":config}))
 }
-pub async fn require_all(tx: &mut Transaction<'_, Postgres>, pid: i64) -> Result<()> {
+pub async fn require_all(tx: &mut PgConnection, pid: i64) -> Result<()> {
     load(tx, pid).await?.require_all()
 }
 fn denied(required: Vec<Value>) -> AppError {
@@ -228,15 +239,10 @@ pub fn can_edit_row(access: &Access, graph: &Value, table: &str, row: &Value) ->
     let scopes = resources(graph, table, row);
     access.all() || !scopes.is_empty() && scopes.iter().all(|r| access.allows(r))
 }
-pub async fn validate_grants(
-    tx: &mut Transaction<'_, Postgres>,
-    pid: i64,
-    grants: &[Grant],
-) -> Result<()> {
+pub fn validate_grants_graph(graph: &Value, grants: &[Grant]) -> Result<()> {
     if grants.len() > 1000 {
         return Err(AppError::bad("最多配置 1000 个编辑范围"));
     }
-    let graph = catalog(tx, pid).await?;
     let mut seen = BTreeSet::new();
     for grant in grants {
         if !model::identifier(&grant.board_key)
@@ -251,7 +257,7 @@ pub async fn validate_grants(
         {
             return Err(AppError::bad("板卡/协议编辑范围无效或重复"));
         }
-        let valid = board(&graph, &grant.board_key).is_some_and(|b| {
+        let valid = board(graph, &grant.board_key).is_some_and(|b| {
             grant
                 .endpoint_key
                 .as_deref()

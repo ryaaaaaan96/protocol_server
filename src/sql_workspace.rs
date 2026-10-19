@@ -11,7 +11,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlparser::{
-    ast::{self, Expr, Query, SetExpr, Statement, TableFactor, Visit, Visitor},
+    ast::{self, BinaryOperator, Expr, Query, SetExpr, Statement, TableFactor, Visit, Visitor},
     dialect::PostgreSqlDialect,
     parser::Parser,
 };
@@ -53,6 +53,21 @@ const FUNCTIONS: &[&str] = &[
 struct Guard {
     ctes: Vec<BTreeSet<String>>,
 }
+// TABLE shortcuts are not relation nodes in every parser AST variant. Validate
+// every set operand explicitly rather than relying only on relation visitors.
+fn query_body(body: &SetExpr) -> ControlFlow<String> {
+    match body {
+        SetExpr::Select(select) if select.into.is_some() => {
+            ControlFlow::Break("不允许 SELECT INTO".into())
+        }
+        SetExpr::Select(_) | SetExpr::Values(_) | SetExpr::Query(_) => ControlFlow::Continue(()),
+        SetExpr::SetOperation { left, right, .. } => {
+            query_body(left)?;
+            query_body(right)
+        }
+        _ => ControlFlow::Break("仅允许 SELECT / WITH 查询，不允许 TABLE 简写或数据修改".into()),
+    }
+}
 impl Visitor for Guard {
     type Break = String;
     fn pre_visit_statement(&mut self, s: &Statement) -> ControlFlow<String> {
@@ -72,11 +87,7 @@ impl Visitor for Guard {
             }
         }
         self.ctes.push(names);
-        if let SetExpr::Select(s) = q.body.as_ref() {
-            if s.into.is_some() {
-                return ControlFlow::Break("不允许 SELECT INTO".into());
-            }
-        }
+        query_body(&q.body)?;
         ControlFlow::Continue(())
     }
     fn post_visit_query(&mut self, _q: &Query) -> ControlFlow<String> {
@@ -105,6 +116,12 @@ impl Visitor for Guard {
     }
     fn pre_visit_expr(&mut self, e: &Expr) -> ControlFlow<String> {
         match e {
+            Expr::BinaryOp {
+                op: BinaryOperator::Custom(_) | BinaryOperator::PGCustomBinaryOperator(_),
+                ..
+            } => {
+                return ControlFlow::Break("不允许自定义操作符".into());
+            }
             Expr::Function(f)
                 if !FUNCTIONS.contains(&f.name.to_string().to_lowercase().as_str()) =>
             {
@@ -207,7 +224,7 @@ pub async fn execute(
 }
 pub async fn definitions(_user: User) -> Json<Value> {
     Json(
-        json!({"sql": include_str!("../migrations/0014_dsp_point_tables.sql"), "relations": RELATIONS, "examples": [
+        json!({"sql": include_str!("../migrations/project/0001_project.sql"), "relations": RELATIONS, "examples": [
             {"name":"DSP 内部数据", "sql":"SELECT board_key,group_key,name,enum_name,sig_id,internal_type FROM process_points ORDER BY board_key,display_order,id"},
             {"name":"DSP 转发映射", "sql":"SELECT t.name,t.endpoint_key,t.address,t.wire_type,p.enum_name FROM transmit_points t JOIN process_points p ON p.id=t.process_point_id ORDER BY t.endpoint_key,t.address"},
             {"name":"点表历史", "sql":"SELECT * FROM point_history ORDER BY id DESC LIMIT 100"}
@@ -236,11 +253,45 @@ mod tests {
         }
     }
     #[test]
+    fn authorization_context_and_platform_objects_cannot_be_queried_or_changed() {
+        for sql in [
+            "SELECT set_config('app.access','{\"role\":\"admin\"}',true)",
+            "SELECT pg_catalog.set_config('app.project_id','2',false)",
+            "SELECT current_setting('app.actor_name')",
+            "SELECT app_access()",
+            "SELECT app_is_admin()",
+            "SELECT app_project_identity()",
+            "SELECT * FROM app_project_registry(1)",
+            "SELECT * FROM app_lock_project(1)",
+            "SELECT * FROM project_state",
+            "SELECT * FROM sessions",
+            "SELECT * FROM project_members",
+            "SELECT * FROM protocol_platform.public.users",
+            "SELECT * FROM public.users",
+            "SELECT * FROM information_schema.tables",
+            "SELECT * FROM pg_catalog.pg_authid",
+            "WITH x AS (SELECT * FROM users) SELECT * FROM x",
+            "SELECT (SELECT password_hash FROM users LIMIT 1)",
+            "TABLE audit_logs",
+            "WITH x AS (TABLE users) SELECT * FROM x",
+            "SELECT id FROM process_points UNION TABLE project_members",
+            "SELECT 1 OPERATOR(public.===) 1",
+            "SELECT id INTO temporary_copy FROM process_points",
+            "SELECT * FROM process_points FOR UPDATE",
+            "SELECT * FROM process_points FOR SHARE",
+            "SELECT dblink('other','SELECT * FROM users')",
+        ] {
+            assert!(check(sql).is_err(), "{sql}");
+        }
+    }
+    #[test]
     fn accepts_project_analytics() {
         for sql in [
             "SELECT group_key,count(*) FROM process_points GROUP BY group_key",
             "WITH x AS (SELECT * FROM transmit_points) SELECT name FROM x",
             "SELECT name, row_number() OVER (ORDER BY display_order) FROM process_points",
+            "SELECT before_data->>'name' FROM point_history ORDER BY id DESC LIMIT 10",
+            "SELECT name FROM process_points UNION ALL SELECT name FROM transmit_points",
         ] {
             assert!(check(sql).is_ok(), "{sql}");
         }

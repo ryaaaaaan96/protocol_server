@@ -2,6 +2,7 @@ mod api;
 mod auth;
 mod change_merge;
 mod codegen;
+mod database;
 mod db;
 mod dsp_points;
 mod dsp_workbook;
@@ -30,7 +31,7 @@ use axum::{
     response::Response,
     routing::{get, post, put},
 };
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::postgres::PgPoolOptions;
 use tower_http::{
     services::{ServeDir, ServeFile},
     set_header::SetResponseHeaderLayer,
@@ -39,7 +40,7 @@ use tower_http::{
 
 #[derive(Clone)]
 pub struct AppState {
-    pub pool: PgPool,
+    pub pool: database::DatabaseRouter,
     pub secure_cookie: bool,
     pub dummy_hash: String,
     pub project_files: std::sync::Arc<project_files::ProjectFiles>,
@@ -77,18 +78,16 @@ async fn main() -> anyhow::Result<()> {
     if arguments.first().is_some_and(|a| a == "migrate") {
         let url =
             std::env::var("MIGRATION_DATABASE_URL").or_else(|_| std::env::var("DATABASE_URL"))?;
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&url)
-            .await?;
-        sqlx::migrate!().run(&pool).await?;
+        database::migrate(&url).await?;
         tracing::info!("PostgreSQL migrations applied");
         return Ok(());
     }
+    let runtime_url = std::env::var("DATABASE_URL")
+        .context("请先运行 ./scripts/init-db.sh，或配置平台数据库的 DATABASE_URL")?;
     let pool = PgPoolOptions::new()
         .max_connections(10)
         .acquire_timeout(std::time::Duration::from_secs(5))
-        .connect(&std::env::var("DATABASE_URL").context("请先运行 ./scripts/init-db.sh，或配置已有 PostgreSQL 的 DATABASE_URL")?)
+        .connect(&runtime_url)
         .await.context("无法连接数据库。首次使用请运行 ./scripts/init-db.sh；已初始化的本地数据库请运行 node scripts/local-db.mjs start；外部数据库请检查其服务和连接配置")?;
     let unsafe_role: bool = sqlx::query_scalar(
         "SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname=current_user",
@@ -100,11 +99,11 @@ async fn main() -> anyhow::Result<()> {
         "DATABASE_URL must use a non-superuser role without BYPASSRLS; run migrations using MIGRATION_DATABASE_URL separately"
     );
     let schema_ready: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='projects' AND column_name='config_key') AND to_regclass('public.project_edit_locks') IS NOT NULL AND to_regclass('public.project_member_grants') IS NOT NULL AND to_regclass('public.process_points') IS NOT NULL AND to_regclass('public.transmit_points') IS NOT NULL AND to_regclass('public.point_history') IS NOT NULL AND to_regclass('public.board_models') IS NULL AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='project_member_grants' AND column_name='board_key')",
+        "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='projects' AND column_name='database_name') AND to_regclass('public.users') IS NOT NULL AND to_regclass('public.process_points') IS NULL",
     ).fetch_one(&pool).await?;
     anyhow::ensure!(
         schema_ready,
-        "数据库表结构尚未初始化或需要升级，请先执行 protocol-server migrate（本地可运行 ./scripts/init-db.sh）。启动服务不会自动建表。"
+        "平台数据库尚未初始化或仍为旧共享库。新环境运行 ./scripts/init-db.sh；旧库先运行 scripts/split-databases.mjs 完成拆分。启动服务不会自动建表。"
     );
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM users")
         .fetch_one(&pool)
@@ -118,7 +117,15 @@ async fn main() -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!(e.1))?;
         sqlx::query("INSERT INTO users(username,display_name,password_hash,is_admin) VALUES($1,'系统管理员',$2,true) ON CONFLICT(username) DO NOTHING").bind(std::env::var("ADMIN_USERNAME").unwrap_or("admin".into())).bind(hash).execute(&pool).await?;
     }
+    let pool = database::DatabaseRouter::new(
+        pool,
+        runtime_url,
+        std::env::var("MIGRATION_DATABASE_URL").ok(),
+    );
     project_folders::recover(&pool).await?;
+    pool.recover_projects()
+        .await
+        .map_err(|e| anyhow::anyhow!(e.1))?;
     let project_files = project_files::ProjectFiles::load()?;
     if arguments.first().is_some_and(|a| a == "create-project") {
         return project_files.create(&pool, &arguments[1]).await;

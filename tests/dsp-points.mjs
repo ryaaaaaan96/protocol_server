@@ -33,14 +33,21 @@ function folderForm(files) {
   return form;
 }
 
-export async function checkDspPoints({ client, engineer, viewer, engineerId, viewerId, equal, ok, migrationUrl, appUrl, testEnv, projectConfigs }) {
+export async function checkDspPoints({ client, engineer, viewer, engineerId, viewerId, equal, ok, migrationUrl, appUrl, testEnv, projectConfigs, fixtureKey }) {
   const { default: pg } = await import(fileURLToPath(new URL("../.runtime/db-tools/node_modules/pg/lib/index.js", import.meta.url)));
-  const inspection = new pg.Client({ connectionString: String(migrationUrl) });
-  const runtime = new pg.Client({ connectionString: String(appUrl) });
+  const project = await client.call("/projects", "POST", { config_key: fixtureKey("dsp_native"), name: "DSP native" });
+  const platform = new pg.Client({ connectionString: String(migrationUrl) });
+  let databaseName;
+  await platform.connect();
+  try { databaseName=(await platform.query("SELECT database_name FROM projects WHERE id=$1",[project.id])).rows[0].database_name; }
+  finally { await platform.end(); }
+  const inspectionUrl=new URL(migrationUrl),runtimeUrl=new URL(appUrl);
+  inspectionUrl.pathname=runtimeUrl.pathname=`/${databaseName}`;
+  const inspection = new pg.Client({ connectionString: inspectionUrl.toString() });
+  const runtime = new pg.Client({ connectionString: runtimeUrl.toString() });
   await inspection.connect();
   try {
     await runtime.connect();
-    const project = await client.call("/projects", "POST", { config_key: "dsp_native", name: "DSP native" });
     const url = `/projects/${project.id}`;
     for (const [user_id, role] of [[engineerId, "engineer"], [viewerId, "viewer"]]) {
       await client.call(`${url}/members`, "PUT", { user_id, role });
@@ -378,7 +385,7 @@ export async function checkDspPoints({ client, engineer, viewer, engineerId, vie
     equal((await viewer.raw(`${table}/process/preview`, "POST", {
       revision: (await graph()).revision, operation: "update", id: frequency.id, values: { name: "Forbidden" },
     })).status, 403);
-    const otherProject = await client.call("/projects", "POST", { config_key: "dsp_native_other", name: "DSP isolated" });
+    const otherProject = await client.call("/projects", "POST", { config_key: fixtureKey("dsp_native_other"), name: "DSP isolated" });
     const otherUrl = `/projects/${otherProject.id}`;
     const otherGraph = await client.call(`${otherUrl}/topology`);
     const otherTable = `${otherUrl}/boards/DSP/point-tables/process`;
@@ -400,11 +407,18 @@ export async function checkDspPoints({ client, engineer, viewer, engineerId, vie
     equal(isolatedOverview.transmit_count, 0);
     ok(!(await viewer.call("/projects")).some(row => row.id === otherProject.id));
     equal((await viewer.raw(`${otherUrl}/overview`)).status, 403);
-    await rejectEdit("forward", secondMapping.id, { process_point_id: foreign.id, wire_type: "U16", wire_length: 2, conversion: "identity" });
+    // Local IDs can repeat across physical databases: the selected project
+    // determines their meaning, and no cross-database point reference exists.
+    const sameLocalId=initial.process_points.find(row=>row.id===foreign.id);
+    ok(sameLocalId,"independent projects may reuse the same local point ID");
+    equal((await graph()).process_points.find(row=>row.id===foreign.id).enum_name, sameLocalId.enum_name);
+    equal((await client.call(`${otherUrl}/topology`)).process_points[0].enum_name,"ISOLATED_POINT");
+    await rejectEdit("forward", secondMapping.id, { process_point_id: 2147483647, wire_type: "U16", wire_length: 2, conversion: "identity" });
     equal((await viewer.raw(`${otherUrl}/topology`)).status, 403);
+    equal((await runtime.query("SELECT count(*)::int AS count FROM process_points")).rows[0].count,0);
     await runtime.query("BEGIN");
     try {
-      await runtime.query("SELECT set_config('app.user_id',$1,true),set_config('app.project_id',$2,true)", [String(viewerId), String(project.id)]);
+      await runtime.query("SELECT set_config('app.user_id',$1,true),set_config('app.project_id',$2,true),set_config('app.access','{\"role\":\"engineer\",\"edit_scope\":\"all\",\"grants\":[]}',true)", [String(viewerId), String(project.id)]);
       equal((await runtime.query("SELECT count(*)::int AS count FROM process_points WHERE project_id=$1", [project.id])).rows[0].count, 552);
       equal((await runtime.query("SELECT count(*)::int AS count FROM process_points WHERE project_id=$1", [otherProject.id])).rows[0].count, 0);
       equal((await runtime.query("SELECT count(*)::int AS count FROM point_history WHERE project_id=$1", [otherProject.id])).rows[0].count, 0);
@@ -414,7 +428,7 @@ export async function checkDspPoints({ client, engineer, viewer, engineerId, vie
     for (const command of ["UPDATE point_history SET actor_name='forged' WHERE project_id=$1", "DELETE FROM point_history WHERE project_id=$1"]) {
       await runtime.query("BEGIN");
       try {
-        await runtime.query("SELECT set_config('app.user_id',$1,true),set_config('app.project_id',$2,true)", [String(engineerId), String(project.id)]);
+        await runtime.query("SELECT set_config('app.user_id',$1,true),set_config('app.project_id',$2,true),set_config('app.access','{\"role\":\"engineer\",\"edit_scope\":\"all\",\"grants\":[]}',true)", [String(engineerId), String(project.id)]);
         let rejected = false;
         try { await runtime.query(command, [project.id]); } catch (error) { rejected = error.code === "42501"; }
         ok(rejected, "Runtime role must not modify or delete point history");
@@ -445,7 +459,7 @@ export async function checkDspPoints({ client, engineer, viewer, engineerId, vie
     for(const sql of ["UPDATE releases SET name='forged' WHERE id=$1","DELETE FROM releases WHERE id=$1"]){
       await runtime.query("BEGIN");
       try{
-        await runtime.query("SELECT set_config('app.user_id',$1,true),set_config('app.project_id',$2,true)",[String(engineerId),String(project.id)]);
+        await runtime.query("SELECT set_config('app.user_id',$1,true),set_config('app.project_id',$2,true),set_config('app.access','{\"role\":\"engineer\",\"edit_scope\":\"all\",\"grants\":[]}',true)",[String(engineerId),String(project.id)]);
         let denied=false;try{await runtime.query(sql,[release.id]);}catch{denied=true;}ok(denied,"Release is immutable");
       }finally{await runtime.query("ROLLBACK");}
     }
@@ -455,7 +469,7 @@ export async function checkDspPoints({ client, engineer, viewer, engineerId, vie
     const beforeReimport = await graph();
     const beforeReimportHistory = await historyCount();
     const oldHistoryIds = new Set((await history()).map(row => String(row.id)));
-    const book = await readFile(new URL("../config/upm/sources/UPM项目测点数据表.xlsx", import.meta.url));
+    const book = await readFile(new URL("../config/dc-ups/sources/DC-UPS测点数据表.xlsx", import.meta.url));
     const form = new FormData();
     form.append("file", new Blob([book]), "DSP.xlsx");
     const imported = await client.call(`${url}/imports/preview`, "POST", form);
@@ -480,11 +494,11 @@ export async function checkDspPoints({ client, engineer, viewer, engineerId, vie
     // preserves current rows; upload with it restores only the named project.
     const exportParent = mkdtempSync(path.join(os.tmpdir(), "protocol-dsp-export-"));
     try {
-      const sourceDirectory = path.join(projectConfigs, "dsp_native");
+      const sourceDirectory = path.join(projectConfigs, fixtureKey("dsp_native"));
       const sourceFingerprint = fingerprint(folderFiles(sourceDirectory));
       const exportedGraph = await graph();
       const unrelatedBefore = JSON.stringify(await client.call(`${otherUrl}/topology`));
-      const exported = await exportProject("dsp_native", exportParent, testEnv);
+      const exported = await exportProject(fixtureKey("dsp_native"), exportParent, testEnv);
       equal(fingerprint(folderFiles(sourceDirectory)), sourceFingerprint);
       const dumpFiles = folderFiles(exported.directory);
       equal(dumpFiles.get("project.dump").subarray(0, 5).toString(), "PGDMP");
@@ -560,7 +574,7 @@ export async function checkDspPoints({ client, engineer, viewer, engineerId, vie
       // manifest must not redirect those rows into another project.
       const wrongProject = new Map(dumpFiles);
       const wrongManifest = JSON.parse(wrongProject.get("project.json").toString());
-      wrongManifest.key = "dsp_native_other";
+      wrongManifest.key = fixtureKey("dsp_native_other");
       wrongProject.set("project.json", Buffer.from(JSON.stringify(wrongManifest)));
       const stableGraph = JSON.stringify(await graph());
       const wrongPreview = await client.raw("/project-folders/preview", "POST", folderForm(wrongProject));

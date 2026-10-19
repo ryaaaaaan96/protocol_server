@@ -1,4 +1,5 @@
 //! Project-folder replacement with revision checks and a recoverable filesystem journal.
+use crate::database::DatabaseRouter;
 use crate::{
     AppState,
     auth::User,
@@ -17,7 +18,7 @@ use axum::{
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::PgConnection;
 use std::{
     collections::BTreeSet,
     fs,
@@ -91,6 +92,10 @@ struct Journal {
     token: String,
     key: String,
     had_original: bool,
+    #[serde(default)]
+    project_id: Option<i64>,
+    #[serde(default)]
+    created: bool,
 }
 
 fn private_directory(path: &Path) -> Result<()> {
@@ -159,7 +164,7 @@ impl Drop for StagingGuard {
     }
 }
 
-async fn begin(pool: &PgPool, user: &User) -> Result<Transaction<'static, Postgres>> {
+async fn begin(pool: &DatabaseRouter, user: &User) -> Result<db::DbTransaction> {
     let mut tx = db::context(pool, user, None, true).await?;
     let administrator: Option<i64> =
         sqlx::query_scalar("SELECT id FROM users WHERE id=$1 AND active AND is_admin FOR SHARE")
@@ -171,45 +176,67 @@ async fn begin(pool: &PgPool, user: &User) -> Result<Transaction<'static, Postgr
     }
     db::require_admin(&mut tx).await?;
     // Same lock as CLI/HTTP project creation; also serializes cross-process imports.
-    sqlx::query("SELECT pg_advisory_xact_lock(192837465, 1)")
-        .execute(&mut *tx)
+    let available: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(192837465, 1)")
+        .fetch_one(&mut *tx)
         .await?;
+    if !available {
+        return Err(AppError::conflict("另一个项目正在创建或导入，请稍后重试"));
+    }
     Ok(tx)
 }
-async fn target(tx: &mut Transaction<'_, Postgres>, key: &str) -> Result<Option<(i64, i32)>> {
-    Ok(
-        sqlx::query_as("SELECT id,revision FROM projects WHERE config_key=$1 FOR UPDATE")
+async fn target(
+    router: &DatabaseRouter,
+    tx: &mut PgConnection,
+    user: &User,
+    key: &str,
+) -> Result<Option<(i64, i32)>> {
+    let pid: Option<i64> =
+        sqlx::query_scalar("SELECT id FROM projects WHERE config_key=$1 AND status='ready'")
             .bind(key)
-            .fetch_optional(&mut **tx)
-            .await?,
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some(pid) = pid else {
+        return Ok(None);
+    };
+    let mut business = db::read_snapshot_context(router, user, pid).await?;
+    let revision = sqlx::query_scalar("SELECT revision FROM project_state WHERE id=$1")
+        .bind(pid)
+        .fetch_one(&mut *business)
+        .await?;
+    Ok(Some((pid, revision)))
+}
+
+fn new_project_summary(manifest: &Value, payload: Option<&Value>) -> Result<Value> {
+    let graph = json!({"project_config":manifest["topology"],
+        "process_points":payload.map(|p|p["tables"]["process_points"].clone()).unwrap_or(json!([])),
+        "transmit_points":payload.map(|p|p["tables"]["transmit_points"].clone()).unwrap_or(json!([]))});
+    let report = topology_validation::validate(&graph);
+    if report["errors"].as_u64().unwrap_or(0) > 0 {
+        return Err(AppError(
+            axum::http::StatusCode::BAD_REQUEST,
+            "项目配置或 Dump 导致数据校验失败，未导入".into(),
+            Some(json!({"validation":report})),
+        ));
+    }
+    Ok(
+        json!({"point_count":topology::rows(&graph,"process_points").len(),
+        "signal_count":topology::rows(&graph,"process_points").len(),
+        "transmit_count":topology::rows(&graph,"transmit_points").len(),"validation":report,"restored":Value::Null}),
     )
 }
 
 /// Used in both preview (rolled back) and commit, with identical validation.
 async fn apply(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut PgConnection,
     user: &User,
     manifest: &Value,
-    existing: Option<(i64, i32)>,
+    pid: i64,
+    existing: bool,
     payload: Option<&Value>,
 ) -> Result<(i64, Value)> {
-    let pid = if let Some((pid, _)) = existing {
+    if existing {
         edit_lock::require_available(tx, pid, user.id).await?;
-        pid
-    } else {
-        sqlx::query_scalar(
-            "INSERT INTO projects(name,description,config_key) VALUES($1,$2,$3) RETURNING id",
-        )
-        .bind(manifest["name"].as_str())
-        .bind(manifest["description"].as_str().unwrap_or(""))
-        .bind(manifest["key"].as_str())
-        .fetch_one(&mut **tx)
-        .await?
-    };
-    sqlx::query("SELECT set_config('app.project_id',$1,true)")
-        .bind(pid.to_string())
-        .execute(&mut **tx)
-        .await?;
+    }
     let before = topology::snapshot(tx, pid, true).await?;
     let restored = if let Some(payload) = payload {
         project_dump::replace(tx, pid, payload).await?
@@ -217,11 +244,11 @@ async fn apply(
         Value::Null
     };
     project_config::apply(tx, pid, &manifest["topology"]).await?;
-    sqlx::query("UPDATE projects SET name=$2,description=$3 WHERE id=$1")
+    sqlx::query("UPDATE project_state SET name=$2,description=$3 WHERE id=$1")
         .bind(pid)
         .bind(manifest["name"].as_str())
         .bind(manifest["description"].as_str().unwrap_or(""))
-        .execute(&mut **tx)
+        .execute(&mut *tx)
         .await?;
     let after = topology::snapshot(tx, pid, true).await?;
     let report = topology_validation::validate(&after);
@@ -313,7 +340,7 @@ pub async fn preview(
         .ok_or(AppError::bad("project.json 缺少 key"))?
         .to_owned();
     if key.is_empty()
-        || key.len() > 64
+        || key.len() > 40
         || !key
             .bytes()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_' || c == b'-')
@@ -340,10 +367,19 @@ pub async fn preview(
     };
     let original_hash = s.project_files.fingerprint(&key).map_err(bad)?;
     let uploaded_hash = uploaded.fingerprint(&key).map_err(bad)?.unwrap();
-    let mut tx = begin(&s.pool, &user).await?;
-    let existing = target(&mut tx, &key).await?;
-    let (_, summary) = apply(&mut tx, &user, &manifest, existing, payload.as_ref()).await?;
-    tx.rollback().await?;
+    let mut registry_tx = begin(&s.pool, &user).await?;
+    let existing = target(&s.pool, &mut registry_tx, &user, &key).await?;
+    let summary = if let Some((pid, _)) = existing {
+        let mut business = db::unlocked_write_context(&s.pool, &user, pid).await?;
+        db::lock_project(&mut business, pid).await?;
+        let (_, summary) =
+            apply(&mut business, &user, &manifest, pid, true, payload.as_ref()).await?;
+        business.rollback().await?;
+        summary
+    } else {
+        new_project_summary(&manifest, payload.as_ref())?
+    };
+    registry_tx.rollback().await?;
     sync_tree(&stage)?;
     let pending = Pending {
         token: token.clone(),
@@ -389,11 +425,11 @@ pub async fn commit(
     if pending.expires < chrono::Utc::now().timestamp() {
         return Err(AppError::bad("导入预览已过期，请重新选择文件夹"));
     }
-    let mut tx = begin(&s.pool, &user).await?;
+    let mut registry_tx = begin(&s.pool, &user).await?;
     if directory.join("journal.json").exists() {
         return Err(AppError::conflict("上次导入需要恢复，请重启服务后重试"));
     }
-    let existing = target(&mut tx, &pending.key).await?;
+    let existing = target(&s.pool, &mut registry_tx, &user, &pending.key).await?;
     if existing != pending.existing_project_id.zip(pending.revision) {
         return Err(AppError::conflict(
             "项目数据版本已变化，请重新选择文件夹并检查后导入",
@@ -418,12 +454,58 @@ pub async fn commit(
     } else {
         None
     };
-    let history_before = if let Some((pid, _)) = existing {
-        topology::snapshot(&mut tx, pid, true).await?
+    let pid = if let Some((pid, _)) = existing {
+        pid
     } else {
-        json!({})
+        let registry = s
+            .pool
+            .reserve_project(
+                &mut registry_tx,
+                &pending.key,
+                manifest["name"].as_str().unwrap(),
+                manifest["description"].as_str().unwrap_or(""),
+                user.id,
+            )
+            .await?;
+        if registry.status == "ready" {
+            return Err(AppError::conflict("项目已被创建，请重新预览"));
+        }
+        let pid = registry.id;
+        registry_tx.commit().await?;
+        s.pool.provision_project(pid).await?;
+        // Creation commits its registry reservation before CREATE DATABASE. The
+        // global import lock is reacquired before checking/installing any files.
+        registry_tx = begin(&s.pool, &user).await?;
+        pid
     };
-    let (pid, summary) = apply(&mut tx, &user, &manifest, existing, payload.as_ref()).await?;
+    let mut tx = if existing.is_some() {
+        db::unlocked_write_context(&s.pool, &user, pid).await?
+    } else {
+        db::creation_context(&s.pool, &user, pid).await?
+    };
+    let current = db::lock_project(&mut tx, pid).await?;
+    if existing.is_some() && pending.revision != Some(current) {
+        return Err(AppError::conflict(
+            "项目数据版本已变化，请重新选择文件夹并检查后导入",
+        ));
+    }
+    if existing.is_none() {
+        let complete: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM audit_logs WHERE project_id=$1 AND action='project.create')")
+            .bind(pid).fetch_one(&mut *tx).await?;
+        if complete {
+            return Err(AppError::conflict("项目已被创建，请重新预览"));
+        }
+    }
+    let history_before = topology::snapshot(&mut tx, pid, true).await?;
+    let (_, summary) = apply(
+        &mut tx,
+        &user,
+        &manifest,
+        pid,
+        existing.is_some(),
+        payload.as_ref(),
+    )
+    .await?;
     db::touch(&mut tx, pid).await?;
     let history_after = topology::snapshot(&mut tx, pid, true).await?;
     crate::dsp_points::history(
@@ -435,10 +517,22 @@ pub async fn commit(
         &history_after,
     )
     .await?;
-    let revision: i32 = sqlx::query_scalar("SELECT revision FROM projects WHERE id=$1")
+    let revision: i32 = sqlx::query_scalar("SELECT revision FROM project_state WHERE id=$1")
         .bind(pid)
         .fetch_one(&mut *tx)
         .await?;
+    if existing.is_none() {
+        db::audit(
+            &mut tx,
+            user.id,
+            Some(pid),
+            "project.create",
+            "project",
+            None,
+            Some(json!({"id":pid,"config_key":pending.key,"name":manifest["name"]})),
+        )
+        .await?;
+    }
     db::audit(&mut tx,user.id,Some(pid),"project.folder_import","project",None,
         Some(json!({"folder_import_token":pending.token,"key":pending.key,"replace_data":pending.replace_data,
             "sha256":pending.uploaded_hash,"summary":summary}))).await?;
@@ -446,9 +540,9 @@ pub async fn commit(
         token: pending.token.clone(),
         key: pending.key.clone(),
         had_original: pending.original_hash.is_some(),
+        project_id: Some(pid),
+        created: existing.is_none(),
     };
-    // Decoding and validating a Dump can take time; check SSH edits again just
-    // before replacement, rather than relying only on the request's initial read.
     if s.project_files.fingerprint(&pending.key).map_err(bad)? != pending.original_hash {
         return Err(AppError::conflict(
             "检查期间服务器项目文件已变化，请重新上传并检查",
@@ -472,17 +566,25 @@ pub async fn commit(
         return Err(error);
     }
     if let Err(error) = tx.commit().await {
-        // A lost COMMIT response is ambiguous. The durable audit token is the
-        // authority; acquire the same DB lock before deciding which folder wins.
-        let mut check = begin(&s.pool, &user).await?;
+        // Audit in this project's database decides an ambiguous COMMIT result.
+        let mut check = db::creation_context(&s.pool, &user, pid).await?;
+        db::lock_project(&mut check, pid).await?;
         let committed = was_committed(&mut check, &journal.token).await?;
-        finish_recovery(s.project_files.root(), &directory, &journal, committed).map_err(bad)?;
         check.rollback().await?;
         if !committed {
-            return Err(error.into());
+            finish_recovery(s.project_files.root(), &directory, &journal, false).map_err(bad)?;
+            return Err(error);
         }
-    } else if let Err(error) = finish_recovery(s.project_files.root(), &directory, &journal, true) {
-        // Data is committed. Retain journal for startup cleanup, never claim rollback.
+    }
+    registry_tx.rollback().await?;
+    // Keep the journal until registry publication succeeds. Startup retries this
+    // step after a crash instead of restoring already committed point data.
+    if journal.created {
+        s.pool.finish_project(pid).await?;
+    } else {
+        s.pool.sync_project_metadata(pid).await?;
+    }
+    if let Err(error) = finish_recovery(s.project_files.root(), &directory, &journal, true) {
         tracing::error!(%error,"committed folder import cleanup deferred until restart");
     }
     Ok(Json(
@@ -490,9 +592,9 @@ pub async fn commit(
     ))
 }
 
-async fn was_committed(tx: &mut Transaction<'_, Postgres>, token: &str) -> Result<bool> {
+async fn was_committed(tx: &mut PgConnection, token: &str) -> Result<bool> {
     Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM audit_logs WHERE action='project.folder_import' AND after_data->>'folder_import_token'=$1)")
-        .bind(token).fetch_one(&mut **tx).await?)
+        .bind(token).fetch_one(&mut *tx).await?)
 }
 fn finish_recovery(
     root: &Path,
@@ -522,14 +624,14 @@ fn finish_recovery(
 
 /// Called before ProjectFiles::load: a crash between renames may temporarily
 /// leave the project directory absent. Never resolve this with a blanket DB restore.
-pub async fn recover(pool: &PgPool) -> anyhow::Result<()> {
+pub async fn recover(pool: &DatabaseRouter) -> anyhow::Result<()> {
     let root =
         PathBuf::from(std::env::var("PROJECT_CONFIG_DIR").unwrap_or_else(|_| "config".into()));
     let imports = root.join(".imports");
     if !imports.exists() {
         return Ok(());
     }
-    let user: User = sqlx::query_as("SELECT id,username,display_name,is_admin FROM users WHERE active AND is_admin ORDER BY id LIMIT 1").fetch_one(pool).await?;
+    let user: User = sqlx::query_as("SELECT id,username,display_name,is_admin FROM users WHERE active AND is_admin ORDER BY id LIMIT 1").fetch_one(&pool.platform).await?;
     let mut tx = begin(pool, &user).await.map_err(|e| anyhow::anyhow!(e.1))?;
     for entry in fs::read_dir(&imports)? {
         let entry = entry?;
@@ -549,9 +651,43 @@ pub async fn recover(pool: &PgPool) -> anyhow::Result<()> {
                         || c == b'-'),
                 "invalid folder import journal"
             );
-            let committed = was_committed(&mut tx, &journal.token)
-                .await
-                .map_err(|e| anyhow::anyhow!(e.1))?;
+            let pid = if let Some(pid) = journal.project_id {
+                Some(pid)
+            } else {
+                sqlx::query_scalar::<_, i64>("SELECT id FROM projects WHERE config_key=$1")
+                    .bind(&journal.key)
+                    .fetch_optional(&mut *tx)
+                    .await?
+            };
+            let committed = if let Some(pid) = pid {
+                let mut business = db::creation_context(pool, &user, pid)
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e.1))?;
+                db::lock_project(&mut business, pid)
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e.1))?;
+                let committed = was_committed(&mut business, &journal.token)
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e.1))?;
+                business
+                    .rollback()
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e.1))?;
+                if committed {
+                    if journal.created {
+                        pool.finish_project(pid)
+                            .await
+                            .map_err(|e| anyhow::anyhow!(e.1))?;
+                    } else {
+                        pool.sync_project_metadata(pid)
+                            .await
+                            .map_err(|e| anyhow::anyhow!(e.1))?;
+                    }
+                }
+                committed
+            } else {
+                false
+            };
             finish_recovery(&root, &directory, &journal, committed)?;
         } else if let Ok(bytes) = fs::read(directory.join("preview.json")) {
             let pending: Pending = serde_json::from_slice(&bytes)?;
@@ -564,13 +700,29 @@ pub async fn recover(pool: &PgPool) -> anyhow::Result<()> {
             fs::remove_dir_all(directory)?;
         }
     }
-    tx.rollback().await?;
+    tx.rollback().await.map_err(|e| anyhow::anyhow!(e.1))?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn new_folder_preview_rejects_dangling_transmit_before_database_creation() {
+        let manifest: Value =
+            serde_json::from_str(include_str!("../config/dc-ups/project.json")).unwrap();
+        assert_eq!(
+            new_project_summary(&manifest, None).unwrap()["point_count"],
+            0
+        );
+        let payload = json!({"tables":{"process_points":[],"transmit_points":[{
+            "id":1,"board_key":"DSP","process_point_id":999,"endpoint_key":"UPP_SERVICE",
+            "name":"无关联转发","upp_model":1,"address":0,"wire_type":"U16","wire_length":2,
+            "scale":1,"access":"RO","byte_order":0,"conversion":"identity","enabled":true
+        }]}});
+        assert!(new_project_summary(&manifest, Some(&payload)).is_err());
+    }
+
     #[test]
     fn rejects_unsafe_upload_paths() {
         for path in [
@@ -602,6 +754,8 @@ mod tests {
                 token: "token".into(),
                 key: "example".into(),
                 had_original: true,
+                project_id: None,
+                created: false,
             },
             false,
         )
@@ -645,6 +799,8 @@ mod tests {
                     token: "token".into(),
                     key: "example".into(),
                     had_original,
+                    project_id: None,
+                    created: false,
                 },
                 committed,
             )

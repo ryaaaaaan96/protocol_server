@@ -74,7 +74,6 @@ check_tool rustc 'Rust 编译器' '安装 Rust 工具链，需支持 Rust 2024 e
 check_tool cargo '后端构建与测试' '安装 Rust 工具链并使 cargo 位于 PATH。'
 check_tool python3 '工作簿导入与生成文件测试' '安装 Python 3。'
 check_tool cc 'Rust 链接' 'Ubuntu/Debian 可安装 build-essential。'
-check_tool gcc '生成 C 文件测试' 'Ubuntu/Debian 可安装 build-essential。'
 
 printf '\n配置与数据迁移\n'
 if [[ ! -f .env && -n "${DATABASE_URL:-}" ]]; then
@@ -149,7 +148,9 @@ if [[ -f .runtime/pgdata/PG_VERSION ]]; then
 else
   info '未发现本地数据库；使用外部 PostgreSQL 时无需本地数据目录。'
 fi
-info '数据库连接、账号权限和 Dump 内容未验证；项目迁移可导出带 project.dump 的文件夹，完整账号与历史迁移使用全库备份。'
+info '账号、会话、成员权限保存在平台库；每项目独立业务库。DATABASE_URL 和 MIGRATION_DATABASE_URL 应指向平台库。'
+info '数据库连接、账号权限和 Dump 内容未验证；项目导出包含当前点表。完整迁移需分别备份平台库、各项目库及 config 文件夹。'
+info '旧 v15 单库升级：先停止服务并断开查看工具，再执行 node scripts/split-databases.mjs --maintenance；脚本保留源库并自动备份。'
 info '迁移 .env 时单独安全传递；完整流程见 docs/operations.md。'
 pg_native=''
 for candidate in .runtime/pg-package/package/native .runtime/db-tools/node_modules/@embedded-postgres/linux-x64/native; do

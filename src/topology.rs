@@ -10,7 +10,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sqlx::{Acquire, Postgres, Transaction};
+use sqlx::{Acquire, PgConnection};
 use std::collections::BTreeSet;
 
 pub const TABLES: &[&str] = &["process_points", "transmit_points"];
@@ -26,13 +26,9 @@ pub fn strv<'a>(v: &'a Value, k: &str) -> &'a str {
 pub fn find<'a>(g: &'a Value, t: &str, id: i64) -> Option<&'a Value> {
     rows(g, t).iter().find(|v| num(v, "id") == id)
 }
-pub async fn snapshot(
-    tx: &mut Transaction<'_, Postgres>,
-    pid: i64,
-    _computed: bool,
-) -> Result<Value> {
-    let project: Value = sqlx::query_scalar("SELECT jsonb_build_object('project_config',topology_config,'revision',revision,'schema_version',schema_version) FROM projects WHERE id=$1")
-        .bind(pid).fetch_one(&mut **tx).await?;
+pub async fn snapshot(tx: &mut PgConnection, pid: i64, _computed: bool) -> Result<Value> {
+    let project: Value = sqlx::query_scalar("SELECT jsonb_build_object('project_config',topology_config,'revision',revision,'schema_version',schema_version) FROM project_state WHERE id=$1")
+        .bind(pid).fetch_one(&mut *tx).await?;
     let mut graph = project;
     for table in TABLES {
         graph[*table] = json!(
@@ -64,7 +60,7 @@ pub struct Change {
     #[serde(default)]
     pub expected: Value,
 }
-pub async fn apply(tx: &mut Transaction<'_, Postgres>, pid: i64, c: &Change) -> Result<Value> {
+pub async fn apply(tx: &mut PgConnection, pid: i64, c: &Change) -> Result<Value> {
     if crate::point_tables::is_point_entity(&c.entity) {
         return Box::pin(crate::point_tables::apply(tx, pid, c)).await;
     }
@@ -328,17 +324,13 @@ pub async fn commit(
     ))
 }
 
-async fn apply_change(
-    s: &AppState,
-    tx: &mut Transaction<'_, Postgres>,
-    pid: i64,
-    c: &Change,
-) -> Result<Value> {
+async fn apply_change(s: &AppState, tx: &mut PgConnection, pid: i64, c: &Change) -> Result<Value> {
     if c.entity == "project_config" {
-        let key: Option<String> = sqlx::query_scalar("SELECT config_key FROM projects WHERE id=$1")
-            .bind(pid)
-            .fetch_one(&mut **tx)
-            .await?;
+        let key: Option<String> =
+            sqlx::query_scalar("SELECT config_key FROM project_state WHERE id=$1")
+                .bind(pid)
+                .fetch_one(&mut *tx)
+                .await?;
         crate::project_config::validate_directory(&s.project_files, key.as_deref(), &c.values)?;
         if let Some(expected) = c.expected.get("source_sha256") {
             let source = s

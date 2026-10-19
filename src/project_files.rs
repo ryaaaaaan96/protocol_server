@@ -1,10 +1,11 @@
 //! Self-contained project folders. Loading never writes to the database.
+use crate::database::DatabaseRouter;
 use crate::{auth::User, db, error::AppError, point_tables, project_config};
 use anyhow::{Context, Result, anyhow, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::PgConnection;
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Read,
@@ -106,12 +107,12 @@ fn workbook_path(project: &Path, relative: &str) -> Result<std::path::PathBuf> {
 fn validate_key(key: &str) -> Result<()> {
     ensure!(
         !key.is_empty()
-            && key.len() <= 64
+            && key.len() <= 40
             && key.as_bytes()[0].is_ascii_lowercase()
             && key
                 .bytes()
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || b"_-".contains(&c)),
-        "项目 key 使用小写字母开头的字母、数字、_、-（最多 64 字节）"
+        "项目 key 使用小写字母开头的字母、数字、_、-（最多 40 字节）"
     );
     Ok(())
 }
@@ -563,7 +564,7 @@ impl ProjectFiles {
     /// Import the optional source into a newly inserted project using its creation transaction.
     pub(crate) async fn import_source(
         &self,
-        tx: &mut Transaction<'_, Postgres>,
+        tx: &mut PgConnection,
         pid: i64,
         key: &str,
         user: &User,
@@ -589,9 +590,9 @@ impl ProjectFiles {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("project.dump");
-            sqlx::query("INSERT INTO imports(project_id,filename,sha256,report,created_by) VALUES($1,$2,$3,$4,$5)")
+            sqlx::query("INSERT INTO imports(project_id,filename,sha256,report,created_by,created_by_name) VALUES($1,$2,$3,$4,$5,current_setting('app.actor_name',true))")
                 .bind(pid).bind(filename).bind(&hash).bind(&report).bind(user.id)
-                .execute(&mut **tx).await?;
+                .execute(&mut *tx).await?;
             return Ok(
                 json!({"filename":filename,"sha256":hash,"validation":report,"restored":restored}),
             );
@@ -632,8 +633,8 @@ impl ProjectFiles {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("points.xlsx");
-            sqlx::query("INSERT INTO imports(project_id,filename,sha256,report,created_by) VALUES($1,$2,$3,$4,$5)")
-                .bind(pid).bind(filename).bind(&hash).bind(&report).bind(user.id).execute(&mut **tx).await?;
+            sqlx::query("INSERT INTO imports(project_id,filename,sha256,report,created_by,created_by_name) VALUES($1,$2,$3,$4,$5,current_setting('app.actor_name',true))")
+                .bind(pid).bind(filename).bind(&hash).bind(&report).bind(user.id).execute(&mut *tx).await?;
             return Ok(
                 json!({"filename":filename,"sha256":hash,"boards":["DSP"],"process_count":data.process.len(),"transmit_count":data.transmit.len(),"validation":report}),
             );
@@ -643,72 +644,99 @@ impl ProjectFiles {
         ))
     }
 
-    pub async fn create(&self, pool: &PgPool, key: &str) -> Result<()> {
+    /// Reserve a private project database, then publish it only after its business
+    /// transaction has a durable creation marker. Failed attempts can be retried.
+    pub(crate) async fn create_configured(
+        &self,
+        router: &DatabaseRouter,
+        user: &User,
+        key: &str,
+        name: &str,
+        description: &str,
+        config: &Value,
+    ) -> crate::error::Result<Value> {
+        project_config::validate_directory(self, Some(key), config)?;
+        let mut registry_tx = db::context(router, user, None, true).await?;
+        let administrator: Option<i64> = sqlx::query_scalar(
+            "SELECT id FROM users WHERE id=$1 AND active AND is_admin FOR SHARE",
+        )
+        .bind(user.id)
+        .fetch_optional(&mut *registry_tx)
+        .await?;
+        if administrator.is_none() {
+            return Err(AppError::forbidden());
+        }
+        db::require_admin(&mut registry_tx).await?;
+        let available: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(192837465, 1)")
+            .fetch_one(&mut *registry_tx)
+            .await?;
+        if !available {
+            return Err(AppError::conflict("另一个项目正在创建或导入，请稍后重试"));
+        }
+        let registry = router
+            .reserve_project(&mut registry_tx, key, name, description, user.id)
+            .await?;
+        if registry.status == "ready" {
+            return Err(AppError::conflict("该配置目录已关联项目，请打开现有项目"));
+        }
+        let pid = registry.id;
+        registry_tx.commit().await?;
+        router.provision_project(pid).await?;
+        let mut tx = db::creation_context(router, user, pid).await?;
+        db::lock_project(&mut tx, pid).await?;
+        let complete: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM audit_logs WHERE project_id=$1 AND action='project.create')")
+            .bind(pid).fetch_one(&mut *tx).await?;
+        if !complete {
+            project_config::apply(&mut tx, pid, config).await?;
+            sqlx::query("UPDATE project_state SET name=$2,description=$3 WHERE id=$1")
+                .bind(pid)
+                .bind(name)
+                .bind(description)
+                .execute(&mut *tx)
+                .await?;
+            let imported = self.import_source(&mut tx, pid, key, user).await?;
+            db::audit(&mut tx, user.id, Some(pid), "project.create", "project", None,
+                Some(json!({"id":pid,"config_key":key,"name":name,"topology":config,"import":imported}))).await?;
+        }
+        let project: Value =
+            sqlx::query_scalar("SELECT to_jsonb(p) FROM project_state p WHERE id=$1")
+                .bind(pid)
+                .fetch_one(&mut *tx)
+                .await?;
+        tx.commit().await?;
+        router.finish_project(pid).await?;
+        Ok(project)
+    }
+
+    pub async fn create(&self, router: &DatabaseRouter, key: &str) -> Result<()> {
         let project = self.project(key)?;
         let m = &project.manifest;
         let username = std::env::var("ADMIN_USERNAME").unwrap_or_else(|_| "admin".into());
         let user: User = sqlx::query_as(
             "SELECT id,username,display_name,is_admin FROM users WHERE username=$1 AND is_admin AND active",
-        ).bind(username).fetch_optional(pool).await?
+        ).bind(username).fetch_optional(&router.platform).await?
             .context("ADMIN_USERNAME 必须对应一个启用的管理员账号")?;
-        let mut tx = db::context(pool, &user, None, true)
+        let mut registry_tx = db::context(router, &user, None, false)
             .await
             .map_err(|e| anyhow!(e.1))?;
-        // Serialize concurrent creation commands, preserving unique directory bindings.
-        sqlx::query("SELECT pg_advisory_xact_lock(192837465, 1)")
-            .execute(&mut *tx)
-            .await?;
         let existing: Option<i64> =
-            sqlx::query_scalar("SELECT id FROM projects WHERE config_key=$1")
+            sqlx::query_scalar("SELECT id FROM projects WHERE config_key=$1 AND status='ready'")
                 .bind(key)
-                .fetch_optional(&mut *tx)
+                .fetch_optional(&mut *registry_tx)
                 .await?;
+        registry_tx.rollback().await.map_err(|e| anyhow!(e.1))?;
         if let Some(pid) = existing {
-            tx.commit().await?;
             println!("项目 {key} 已存在（ID {pid}），未覆盖任何数据。");
             return Ok(());
         }
-        let same_name: bool =
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM projects WHERE name=$1)")
-                .bind(&m.name)
-                .fetch_one(&mut *tx)
-                .await?;
-        ensure!(
-            !same_name,
-            "已存在名为「{}」的项目，未重复创建。请在网页查看已有项目，或为新项目配置不同的名称。",
-            m.name
-        );
-        let pid: i64 = sqlx::query_scalar(
-            "INSERT INTO projects(name,description,config_key) VALUES($1,$2,$3) RETURNING id",
-        )
-        .bind(&m.name)
-        .bind(&m.description)
-        .bind(key)
-        .fetch_one(&mut *tx)
-        .await?;
-        project_config::apply(&mut tx, pid, &m.topology)
+        let created = self
+            .create_configured(router, &user, key, &m.name, &m.description, &m.topology)
             .await
             .map_err(|e| anyhow!(e.1))?;
-        let imported = self
-            .import_source(&mut tx, pid, key, &user)
-            .await
-            .map_err(|error| anyhow!(error.1))?;
-        db::audit(&mut tx, user.id, Some(pid), "project.create", "project", None,
-            Some(json!({"id":pid,"config_key":key,"name":m.name,"topology":m.topology,"import":imported})))
-            .await.map_err(|e| anyhow!(e.1))?;
-        tx.commit().await?;
         println!(
-            "已创建项目「{}」（ID {pid}）。登录后在项目列表中选择；成员权限需在网页中分配。",
-            m.name
+            "已创建项目「{}」（ID {}），使用独立项目数据库。成员权限在平台中分配。",
+            m.name, created["id"]
         );
-        if !imported.is_null() {
-            println!(
-                "已导入项目数据：{}；校验错误 {} 条、提示 {} 条，请在校验中心处理。",
-                imported["filename"].as_str().unwrap_or_default(),
-                imported["validation"]["errors"],
-                imported["validation"]["warnings"]
-            );
-        }
         Ok(())
     }
 }

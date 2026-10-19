@@ -13,7 +13,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sqlx::{Acquire, Postgres, Transaction};
+use sqlx::{Acquire, PgConnection};
 use std::collections::BTreeSet;
 
 const MAX_ROWS: usize = 200;
@@ -178,7 +178,7 @@ fn check_fields(batch: &Batch, operation: &str) -> Result<()> {
     }
 }
 
-pub async fn apply(tx: &mut Transaction<'_, Postgres>, pid: i64, c: &Change) -> Result<Value> {
+pub async fn apply(tx: &mut PgConnection, pid: i64, c: &Change) -> Result<Value> {
     let batch = decode(c)?;
     if crate::dsp_points::native_board(tx, pid, &batch.board_key)
         .await?
@@ -237,7 +237,7 @@ pub async fn apply(tx: &mut Transaction<'_, Postgres>, pid: i64, c: &Change) -> 
 /// Read once for the batch so all comparisons use the same locked project snapshot.
 pub async fn can_preview(
     s: &AppState,
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut PgConnection,
     pid: i64,
     c: &Change,
 ) -> Result<bool> {

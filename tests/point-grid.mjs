@@ -37,7 +37,7 @@ const {
 );
 const definitions = Object.fromEntries(await Promise.all(
   [["process", "process"], ["forward", "transmit"]].map(async ([kind, filename]) => [
-    kind, JSON.parse(await readFile(new URL(`../config/upm/DSP/${filename}.json`, import.meta.url), "utf8")),
+    kind, JSON.parse(await readFile(new URL(`../config/dc-ups/DSP/${filename}.json`, import.meta.url), "utf8")),
   ]),
 ));
 
