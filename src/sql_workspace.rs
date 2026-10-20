@@ -286,7 +286,7 @@ pub async fn definitions(_user: User) -> Json<Value> {
         include_str!("../migrations/project/0002_grouped_project.sql")
     ), "relations": RELATIONS, "examples": [
         {"name":"DSP 内部数据", "sql":"SELECT board_key,group_key,name,enum_name,sig_id,internal_type FROM points.process_points ORDER BY board_key,display_order,id"},
-        {"name":"DSP 转发映射", "sql":"SELECT t.name,t.endpoint_key,t.address,t.wire_type,p.enum_name FROM points.transmit_points t JOIN points.process_points p ON p.id=t.process_point_id ORDER BY t.endpoint_key,t.address"},
+        {"name":"DSP 转发映射", "sql":"SELECT p.name,t.endpoint_key,t.address,t.wire_type,p.enum_name FROM points.transmit_points t JOIN points.process_points p ON p.id=t.process_point_id ORDER BY t.endpoint_key,t.address"},
         {"name":"点表历史", "sql":"SELECT * FROM history.events WHERE kind='point' ORDER BY id DESC LIMIT 100"}
     ]}))
 }

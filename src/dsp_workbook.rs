@@ -264,7 +264,7 @@ pub fn parse(rows: &[Value]) -> Result<DspImport> {
         if transmit.len() == MAX_POINTS {
             return Err(invalid(row, "DSP 转发点数不能超过 10000 条"));
         }
-        let name = required(row, "A", "数据名称")?;
+        required(row, "A", "数据名称")?;
         let en = enum_name(row)?;
         let point = by_enum
             .get(&en)
@@ -345,7 +345,7 @@ pub fn parse(rows: &[Value]) -> Result<DspImport> {
             "board_key": "DSP",
             "endpoint_key": "UPP_SERVICE",
             "process_enum": en,
-            "name": name,
+            "name": point["name"],
             "upp_model": upp_model,
             "address": address,
             "wire_type": wire_type,
@@ -502,6 +502,22 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn transmit_names_follow_the_internal_sheet_even_when_source_cache_is_stale() {
+        let mut rows = fixture();
+        row(&mut rows, PROCESS_SHEET, "GridFrequency")["cells"]["values"]["A"] =
+            json!("更新后的电网频率");
+        row(&mut rows, TRANSMIT_SHEET, "GridFrequency")["cells"]["values"]["A"] =
+            json!("旧转发字段名");
+        let data = parse(&rows).unwrap();
+        let mapping = data
+            .transmit
+            .iter()
+            .find(|point| point["process_enum"] == "GRID_FREQUENCY")
+            .unwrap();
+        assert_eq!(mapping["name"], "更新后的电网频率");
     }
 
     #[test]

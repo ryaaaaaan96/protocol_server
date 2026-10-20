@@ -1,6 +1,8 @@
 import type { Row } from "../api";
 import {
   choiceLabel,
+  dspModel,
+  isDspForward,
   isDspSheet,
   sheetType,
   pointChoices,
@@ -208,11 +210,7 @@ export function displayCell(
       return count > 1 ? "STRING" : type === "F32" ? "S32" : type;
     }
     if (column === "sheet_upp_model" && changed("category")) {
-      const models: Record<string, number> = {
-        "系统参数1": 1, "系统参数2": 2, "任务级观测量": 99,
-        "中断级观测量": 100, "控制参数设置": 102, "任务级标定量": 103,
-      };
-      return values.category == null || values.category === "" ? "" : String(models[String(values.category)] ?? PENDING);
+      return values.category == null || values.category === "" ? "" : String(dspModel(values.category) ?? PENDING);
     }
     const key = fieldForColumn(data, column);
     return key && changed(key) ? format(values[key]) : current();
@@ -231,6 +229,8 @@ export function displayCell(
       return width && Number.isSafeInteger(count) && count > 0 ? String(width * count) : PENDING;
     }
   } else {
+    if (isDspForward(data) && column === "upp_model" && changed("process_point_id"))
+      return String(dspModel(related("process_points", "process_point_id")?.category) ?? PENDING);
     const signalColumns: Record<string, string> = {
       signal_name: "name", resolved_sig_id: "sig_id", enum_name: "enum_name",
       data_type: "data_type", byte_length: "byte_length", unit: "unit",

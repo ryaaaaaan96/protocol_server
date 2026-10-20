@@ -220,6 +220,20 @@ pub async fn apply(
             .bind(pid).bind(board_key).bind(merged["process_point_id"].as_i64()).fetch_optional(&mut *tx).await?
             .ok_or(AppError::bad("转发必须关联当前板卡的内部数据点"))?;
         if dsp {
+            if fields
+                .get("enabled")
+                .is_some_and(|value| value != &json!(true))
+            {
+                return Err(AppError::bad(
+                    "DSP 转发表中的记录全部参与转发，不再支持停用；不需要转发时请删除映射",
+                ));
+            }
+            // Retain compatible storage columns without independent DSP meaning.
+            // In particular, old clients cannot override the current source name.
+            for (key, value) in [("name", point["name"].clone()), ("enabled", json!(true))] {
+                updates.insert(key.into(), value.clone());
+                merged[key] = value;
+            }
             let model = require_upp_model(&point)?;
             if fields
                 .get("upp_model")
@@ -398,7 +412,10 @@ pub async fn import(tx: &mut PgConnection, pid: i64, data: &DspImport) -> Result
         }
         let created = insert(tx, pid, board_key, "process", &values).await?;
         if ids
-            .insert(strv(&created, "enum_name").to_owned(), num(&created, "id"))
+            .insert(
+                strv(&created, "enum_name").to_owned(),
+                (num(&created, "id"), created["name"].clone()),
+            )
             .is_some()
         {
             return Err(AppError::bad("DSP 内部数据枚举重复，无法唯一匹配转发来源"));
@@ -411,13 +428,15 @@ pub async fn import(tx: &mut PgConnection, pid: i64, data: &DspImport) -> Result
                 values[key] = value.clone();
             }
         }
-        let id = ids.get(strv(point, "process_enum")).ok_or_else(|| {
+        let (id, name) = ids.get(strv(point, "process_enum")).ok_or_else(|| {
             AppError::bad(format!(
                 "转发字段 {} 找不到对应的 DSP 内部枚举",
                 strv(point, "name")
             ))
         })?;
         values["process_point_id"] = json!(id);
+        values["name"] = name.clone();
+        values["enabled"] = json!(true);
         insert(tx, pid, board_key, "forward", &values).await?;
     }
     Ok(())
@@ -621,6 +640,7 @@ pub fn validate(g: &Value) -> Vec<Value> {
     }
     for t in rows(g, "transmit_points") {
         let entity = "transmit_points";
+        let dsp = board_definition(g, strv(t, "board_key")).is_some_and(crate::dsp_sheet::is_dsp);
         if !board_definition(g, strv(t, "board_key"))
             .and_then(|board| board["point_endpoints"].as_array())
             .is_some_and(|endpoints| {
@@ -653,7 +673,7 @@ pub fn validate(g: &Value) -> Vec<Value> {
             );
             continue;
         };
-        if board_definition(g, strv(t, "board_key")).is_some_and(crate::dsp_sheet::is_dsp) {
+        if dsp {
             let model = crate::dsp_sheet::upp_model(p);
             if model.is_none() || model != t["upp_model"].as_i64() {
                 issue(
@@ -745,10 +765,10 @@ pub fn validate(g: &Value) -> Vec<Value> {
                 0,
             );
         }
-        if t["enabled"] == true {
+        if dsp || t["enabled"] == true {
             for other in rows(g, "transmit_points").iter().filter(|o| {
                 num(o, "id") < num(t, "id")
-                    && o["enabled"] == true
+                    && (dsp || o["enabled"] == true)
                     && o["project_id"] == t["project_id"]
                     && o["board_key"] == t["board_key"]
                     && o["endpoint_key"] == t["endpoint_key"]
@@ -857,6 +877,17 @@ pub fn generate(g: &Value) -> BTreeMap<String, String> {
             .filter(|p| p["board_key"] == code)
             .cloned()
             .collect();
+        if crate::dsp_sheet::is_dsp(board) {
+            for mapping in &mut transmit {
+                mapping["enabled"] = json!(true);
+                if let Some(point) = process.iter().find(|point| {
+                    point["id"] == mapping["process_point_id"]
+                        && point["project_id"] == mapping["project_id"]
+                }) {
+                    mapping["name"] = point["name"].clone();
+                }
+            }
+        }
         transmit.sort_by_key(|t| {
             (
                 strv(t, "endpoint_key").to_owned(),
@@ -958,6 +989,7 @@ mod tests {
         let mut second = g["transmit_points"][0].clone();
         second["id"] = json!(2);
         second["address"] = json!(20);
+        second["enabled"] = json!(false);
         g["transmit_points"].as_array_mut().unwrap().push(second);
         assert!(validate(&g).is_empty());
         g["process_points"][0]["name"] = json!("新的内部名称");
@@ -971,6 +1003,23 @@ mod tests {
         );
         assert!(files["board_types/DSP/transmit.json"].contains("fixed_point"));
         assert!(files["board_types/DSP/process.json"].contains("新的内部名称"));
+        assert_eq!(
+            files["board_types/DSP/UPP_SERVICE.xml"]
+                .matches("DataName=\"新的内部名称\"")
+                .count(),
+            2
+        );
+        let exported: Value =
+            serde_json::from_str(&files["board_types/DSP/transmit.json"]).unwrap();
+        assert!(
+            exported["points"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|point| { point["name"] == "新的内部名称" && point["enabled"] == true })
+        );
+        assert_eq!(g["transmit_points"][1]["enabled"], false);
+        assert_eq!(g["transmit_points"][1]["name"], "母线电压输出");
     }
 
     #[test]
@@ -1003,7 +1052,7 @@ mod tests {
             .push(second);
         assert!(validate(&overlap).iter().any(|i| i["code"] == "overlap"));
         overlap["transmit_points"][1]["enabled"] = json!(false);
-        assert!(validate(&overlap).is_empty());
+        assert!(validate(&overlap).iter().any(|i| i["code"] == "overlap"));
     }
 
     #[test]
@@ -1051,6 +1100,31 @@ mod tests {
         g["transmit_points"][0]["conversion"] = json!("identity");
         g["transmit_points"][0]["scale"] = json!(1);
         assert!(validate(&g).is_empty());
+    }
+
+    #[test]
+    fn other_boards_retain_independent_names_and_enabled_mappings() {
+        let mut g = graph();
+        g["project_config"]["board_types"][0]["code"] = json!("UPM");
+        g["process_points"][0]["board_key"] = json!("UPM");
+        g["transmit_points"][0]["board_key"] = json!("UPM");
+        let mut disabled = g["transmit_points"][0].clone();
+        disabled["id"] = json!(2);
+        disabled["enabled"] = json!(false);
+        g["transmit_points"].as_array_mut().unwrap().push(disabled);
+        assert!(validate(&g).is_empty());
+        let files = generate(&g);
+        assert_eq!(
+            files["board_types/UPM/UPP_SERVICE.xml"]
+                .matches("<point ")
+                .count(),
+            1
+        );
+        assert!(files["board_types/UPM/UPP_SERVICE.xml"].contains("DataName=\"母线电压输出\""));
+        let exported: Value =
+            serde_json::from_str(&files["board_types/UPM/transmit.json"]).unwrap();
+        assert_eq!(exported["points"][1]["enabled"], false);
+        assert_eq!(exported["points"][1]["name"], "母线电压输出");
     }
 
     #[test]

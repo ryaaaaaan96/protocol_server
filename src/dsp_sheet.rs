@@ -101,6 +101,11 @@ pub fn wire_defaults(point: &Value, selected: Option<&str>) -> Value {
 }
 
 pub fn project_forward(row: &mut Value, point: &Value) {
+    // DSP mappings inherit the live source name and always participate in UPP.
+    // Keep edit_values untouched: legacy columns are still concurrency baselines.
+    row["name"] = point["name"].clone();
+    row["field_name"] = point["name"].clone();
+    row["enabled"] = json!(true);
     let mut point = point.clone();
     project(&mut point);
     for field in ["category", "variable_name", "sheet_type"] {
@@ -471,6 +476,21 @@ mod tests {
             assert_eq!(displayed["category"], category(point));
             assert!(!displayed["variable_name"].as_str().unwrap().is_empty());
         }
+    }
+
+    #[test]
+    fn forward_projection_inherits_source_name_without_changing_legacy_baselines() {
+        let point = json!({"name":"更新后的数据名称","enum_name":"SAMPLE",
+            "internal_type":"U16","element_count":1,"byte_length":2,
+            "metadata":{"category":"系统参数1"}});
+        let mut mapping = json!({"name":"旧转发名称","enabled":false,
+            "edit_values":{"name":"旧转发名称","enabled":false}});
+        project_forward(&mut mapping, &point);
+        assert_eq!(mapping["name"], point["name"]);
+        assert_eq!(mapping["field_name"], point["name"]);
+        assert_eq!(mapping["enabled"], true);
+        assert_eq!(mapping["edit_values"]["name"], "旧转发名称");
+        assert_eq!(mapping["edit_values"]["enabled"], false);
     }
 
     #[test]

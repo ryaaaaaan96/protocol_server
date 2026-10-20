@@ -106,6 +106,14 @@ export function dspCategory(model: unknown): string {
   return categories[String(model)] ?? (model == null ? "—" : "未匹配分类");
 }
 
+export function dspModel(category: unknown): number | undefined {
+  const models: Record<string, number> = {
+    "系统参数1": 1, "系统参数2": 2, "任务级观测量": 99,
+    "中断级观测量": 100, "控制参数设置": 102, "任务级标定量": 103,
+  };
+  return models[String(category)];
+}
+
 export function sheetType(value: unknown): string | undefined {
   const type = normalizedDataType(value)?.replace(/^SYS_/, "");
   return type === "FLOAT" ? "F32" : type;
@@ -212,10 +220,17 @@ export function pointChangeSummary(change: Row, fields?: Record<string, PointFie
     const classify = (record: Row) => {
       if (!Object.hasOwn(record, "upp_model")) return record;
       const { upp_model, ...rest } = record;
-      return { ...rest, category: record.category || dspCategory(upp_model) };
+      return { ...(fields.upp_model ? record : rest), category: record.category || dspCategory(upp_model) };
     };
     before = classify(before);
     after = classify(after);
+  }
+  if (!process && fields?.recommended_wire_type && fields.category) {
+    // Shared storage compatibility fields are not separate DSP user settings.
+    const visible = (record: Row) => Object.fromEntries(Object.entries(record)
+      .filter(([key]) => !["name", "enabled"].includes(key) || fields[key]));
+    before = visible(before);
+    after = visible(after);
   }
   const text = (value: unknown) => value !== null && typeof value === "object"
     ? JSON.stringify(value) : pointText(value);

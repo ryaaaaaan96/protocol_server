@@ -67,7 +67,9 @@ test("templates cover each table without overwriting existing files", async t =>
         assert.equal(actualHeaders.includes(derived), false);
       }
     }
-    if (kind === "forward") assert.equal(actualHeaders.includes("upp_model"), false);
+    if (kind === "forward") {
+      for (const derived of ["upp_model", "name", "enabled"]) assert.equal(actualHeaders.includes(derived), false);
+    }
     await assert.rejects(writeTemplate(file, kind), { code: "EEXIST" });
     await assert.rejects(readRows(file, kind), /当前 0 行/);
     await assert.rejects(readRows(file, kind, "missing"), /找不到工作表/);
@@ -120,14 +122,14 @@ test("native forwarding keeps stable references and fractional scale", async t =
   assert.equal(row.values.access, "WO");
 });
 
-test("DSP forwarding may omit model and communication suggestions", async t => {
+test("DSP forwarding only requires its source, endpoint and address", async t => {
   const { file, book, sheet } = await fixture(t,
-    ["process_point_id", "endpoint_key", "name", "address"],
-    [[11, "UPP_SERVICE", "电压转发", 14]]);
+    ["process_point_id", "endpoint_key", "address"],
+    [[11, "UPP_SERVICE", 14]]);
   sheet.name = "forward";
   await book.xlsx.writeFile(file);
   const [row] = await readRows(file, "forward");
-  assert.deepEqual(row.values, { process_point_id: 11, endpoint_key: "UPP_SERVICE", name: "电压转发", address: 14 });
+  assert.deepEqual(row.values, { process_point_id: 11, endpoint_key: "UPP_SERVICE", address: 14 });
 });
 
 test("server definition defaults apply only to missing editable fields and preserve aliases", () => {

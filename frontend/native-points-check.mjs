@@ -104,7 +104,7 @@ assert.ok(relatedSummary.includes('metadata：{"ram":"N"} → {"ram":"Y"}'), rel
 assert.ok(!relatedSummary.includes("RAM："), relatedSummary);
 assert.equal(pointChangeSummary({ entity: "process_points", before: { internal_type: "U16" }, after: { internal_type: "F32" } }, { internal_type: { label: "内部类型" } }), "内部类型：U16 → F32");
 const forward = { ...process, kind: "forward", definition: forwardDefinition };
-const mapping = { process_point_id: 1, endpoint_key: "UPP_SERVICE", name: "电压转发", upp_model: 5, address: 6, wire_type: "S32", wire_length: 4, scale: 0.001, access: "RO", byte_order: 0, conversion: "fixed_point", enabled: true };
+const mapping = { process_point_id: 1, endpoint_key: "UPP_SERVICE", name: "电压转发", upp_model: 1, address: 6, wire_type: "S32", wire_length: 4, scale: 0.001, access: "RO", byte_order: 0, conversion: "fixed_point", enabled: true };
 const forwardRow = { ...mapping, signal_id: 1, signal_name: point.name, resolved_sig_id: point.sig_id, enum_name: point.enum_name, data_type: "F32", effective_address: 6, effective_type: "S32", effective_length: 4, edit_values: mapping };
 assert.equal(pointDataType(forward, mapping), "F32");
 assert.equal(pointDataType(forward, { process_point_id: 2 }), "STRING");
@@ -112,7 +112,7 @@ assert.deepEqual(pointChoices(forward, "process_point_id", {}).map(record => rec
 assert.equal(parseCell(forward, "process_point_id", "母线电压", mapping), 1);
 assert.equal(parseCell(forward, "scale", "0.001", mapping), 0.001);
 assert.equal(parseCell(forward, "byte_order", "2", mapping), 2);
-assert.equal(displayCell(forward, forwardRow, "upp_model", {}), "5");
+assert.equal(displayCell(forward, forwardRow, "upp_model", {}), "1");
 assert.equal(displayCell(forward, forwardRow, "effective_address", { address: 10 }), "10");
 assert.equal(displayCell(forward, forwardRow, "signal_name", { process_point_id: 2 }), "设备名称");
 assert.equal(displayCell(forward, forwardRow, "enum_name", { process_point_id: 2 }), "DEVICE_NAME");
@@ -121,7 +121,23 @@ assert.equal(displayCell(forward, forwardRow, "byte_length", { process_point_id:
 assert.equal(isDspForward(forward), true);
 assert.equal(isDspForward(process), false);
 assert.equal(isDspForward({ ...forward, definition: { ...forwardDefinition, fields: {} } }), false);
-for (const key of ["upp_model", "resolved_sig_id", "enum_name"]) assert.ok(!forwardDefinition.columns.includes(key));
+assert.deepEqual(forwardDefinition.columns, ["signal_name", "variable_name", "category", "upp_model", "effective_address", "effective_length", "effective_type", "scale", "conversion", "access", "byte_order"]);
+for (const key of ["name", "enabled", "byte_length", "resolved_sig_id", "enum_name", "sheet_type"]) assert.ok(!forwardDefinition.columns.includes(key));
+for (const key of ["name", "enabled"]) {
+  assert.ok(!forwardDefinition.editor.includes(key));
+  assert.equal(fieldForColumn(forward, key), undefined);
+}
+assert.equal(forwardDefinition.fields.signal_name.label, processDefinition.fields.name.label);
+assert.equal(forwardDefinition.fields.process_point_id.label, processDefinition.fields.name.label);
+assert.equal(forwardDefinition.fields.variable_name.label, processDefinition.fields.variable_name.label);
+assert.equal(forwardDefinition.fields.effective_address.label, "UPP偏移地址");
+assert.equal(forwardDefinition.fields.effective_length.label, "UPP协议字节数");
+assert.equal(displayCell(forward, forwardRow, "upp_model", { process_point_id: 2 }), "99");
+assert.equal(displayCell(forward, forwardRow, "upp_model", { process_point_id: null }), "待计算");
+assert.equal(displayCell(forward, forwardRow, "upp_model", { process_point_id: 999 }), "待计算");
+assert.equal(displayCell(forward, forwardRow, "effective_length", { process_point_id: 2 }), "4", "Changing the source never replaces the actual protocol length with its internal length");
+assert.equal(displayCell(forward, forwardRow, "effective_length", { wire_length: 32 }), "32");
+assert.equal(fieldForColumn(forward, "upp_model"), undefined);
 assert.ok(!forwardDefinition.editor.includes("upp_model"));
 assert.equal(displayCell(forward, forwardRow, "category", { process_point_id: 2 }), "任务级观测量");
 assert.equal(displayCell(forward, forwardRow, "variable_name", { process_point_id: 2 }), "DeviceName");
@@ -134,7 +150,11 @@ assert.equal(communicationDiffers(forward, { ...mapping, scale: 1 }), false);
 assert.equal(communicationDiffers(forward, mapping), true);
 assert.equal(communicationDiffers(forward, { ...mapping, scale: 1, wire_length: null }, mapping), true);
 assert.equal(communicationRecommendation(forward, { process_point_id: null }, mapping), undefined);
-assert.equal(pointChangeSummary({ entity: "transmit_points", before: { upp_model: 1 }, after: { upp_model: 99 } }, forwardDefinition.fields), "数据分类：系统参数1 → 任务级观测量");
+assert.equal(pointChangeSummary({ entity: "transmit_points", before: { upp_model: 1 }, after: { upp_model: 99 } }, forwardDefinition.fields), "UPP模型号：1 → 99；数据分类：系统参数1 → 任务级观测量");
+assert.equal(pointChangeSummary({ entity: "transmit_points",
+  before: { name: "旧别名", enabled: false, scale: 1 },
+  after: { name: "内部数据名称", enabled: true, scale: 0.01 },
+}, forwardDefinition.fields), "协议系数：1 → 0.01");
 const serverRecommendation = { ...point, recommended_wire_type: "U16", recommended_wire_length: 2, recommended_scale: 1, recommended_conversion: "identity" };
 assert.deepEqual(communicationRecommendation({ ...forward, options: { ...options, process_points: [serverRecommendation] } }, mapping), { wire_type: "U16", wire_length: 2, scale: 1, conversion: "identity" });
 const permissions = { role: "engineer", can_edit: true, can_manage_project: false, edit_scope: "scoped", grants: [{ board_key: "DSP", scope: "internal" }], catalog: [] };

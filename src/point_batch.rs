@@ -116,10 +116,11 @@ fn failure(errors: Vec<Value>) -> AppError {
     error
 }
 
-fn check_fields(batch: &Batch, operation: &str) -> Result<()> {
+fn check_fields(batch: &Batch, operation: &str, dsp: bool) -> Result<()> {
     let allowed = point_tables::writable(&batch.kind);
     let required: &[&str] = match batch.kind.as_str() {
         "process" => &["name", "enum_name"],
+        "forward" if dsp => &["process_point_id"],
         _ => &["process_point_id", "name"],
     };
     let mut errors = Vec::new();
@@ -188,13 +189,10 @@ fn check_fields(batch: &Batch, operation: &str) -> Result<()> {
 
 pub async fn apply(tx: &mut PgConnection, pid: i64, c: &Change) -> Result<Value> {
     let batch = decode(c)?;
-    if crate::dsp_points::native_board(tx, pid, &batch.board_key)
+    let board = crate::dsp_points::native_board(tx, pid, &batch.board_key)
         .await?
-        .is_none()
-    {
-        return Err(AppError::bad("此板卡尚未启用点表存储"));
-    }
-    check_fields(&batch, &c.operation)?;
+        .ok_or(AppError::bad("此板卡尚未启用点表存储"))?;
+    check_fields(&batch, &c.operation, crate::dsp_sheet::is_dsp(&board))?;
     let mut records = Vec::new();
     let mut errors = Vec::new();
     for row in batch.rows {
@@ -343,7 +341,8 @@ mod tests {
         assert!(
             check_fields(
                 &batch("process", json!({"name":"DSP 点","enum_name":"DSP_POINT"})),
-                "create"
+                "create",
+                false
             )
             .is_ok()
         );
@@ -353,13 +352,23 @@ mod tests {
                     "forward",
                     json!({"name":"DSP 转发","process_point_id":9,"scale":0.1})
                 ),
-                "create"
+                "create",
+                false
             )
             .is_ok()
         );
-        assert!(check_fields(&batch("process", json!({"name":"DSP 点"})), "create").is_err());
-        assert!(check_fields(&batch("process", json!({"group_id":1})), "update").is_err());
-        assert!(check_fields(&batch("forward", json!({"name":"DSP 转发"})), "create").is_err());
+        assert!(
+            check_fields(&batch("process", json!({"name":"DSP 点"})), "create", false).is_err()
+        );
+        assert!(check_fields(&batch("process", json!({"group_id":1})), "update", false).is_err());
+        assert!(
+            check_fields(
+                &batch("forward", json!({"name":"DSP 转发"})),
+                "create",
+                false
+            )
+            .is_err()
+        );
     }
     #[test]
     fn validates_numeric_boolean_and_nullable_fields() {
@@ -373,7 +382,7 @@ mod tests {
                 json!({"process_point_id":4,"upp_model":2,"address":42,"wire_length":4,"scale":0.01,"byte_order":2,"enabled":false}),
             ),
         ] {
-            assert!(check_fields(&batch(kind, values), "update").is_ok());
+            assert!(check_fields(&batch(kind, values), "update", false).is_ok());
         }
         for (kind, values) in [
             ("process", json!({"element_count":"2"})),
@@ -384,7 +393,7 @@ mod tests {
             ("forward", json!({"scale":0})),
             ("forward", json!({"enabled":"false"})),
         ] {
-            assert!(check_fields(&batch(kind, values), "update").is_err());
+            assert!(check_fields(&batch(kind, values), "update", false).is_err());
         }
     }
     #[test]
@@ -397,7 +406,8 @@ mod tests {
             "variable_name":"NewDspValue","sheet_type":"Sys_F32","display_digits":2,
             "ram":"N","flash":"Y","category":"任务级观测量"})
                 ),
-                "create"
+                "create",
+                true
             )
             .is_ok()
         );
@@ -409,15 +419,23 @@ mod tests {
             json!({"metadata":{}}),
             json!({"display_digits":"2"}),
         ] {
-            assert!(check_fields(&batch("process", values), "update").is_err());
+            assert!(check_fields(&batch("process", values), "update", true).is_err());
         }
         assert!(
             check_fields(
                 &batch("process", json!({"name":"DSP 新数据", "variable_name":""})),
-                "create"
+                "create",
+                true
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn only_dsp_mappings_can_omit_a_separate_name() {
+        let mapping = batch("forward", json!({"process_point_id":9,"address":20}));
+        assert!(check_fields(&mapping, "create", true).is_ok());
+        assert!(check_fields(&mapping, "create", false).is_err());
     }
     #[test]
     fn dependencies_follow_json_board_and_referenced_process_point() {

@@ -51,18 +51,20 @@ export async function checkDspTransmitRules({ client, engineer, engineerId, equa
   const uncategorized = await edit("process", {
     name: "尚未分类", variable_name: "Uncategorized", sheet_type: "Sys_U16", element_count: 1,
   });
-  await reject("forward", { process_point_id: uncategorized.id, name: "不可推导模型", address: 6 });
+  await reject("forward", { process_point_id: uncategorized.id, address: 6 });
 
-  // Creating a mapping only requires its source, name and chosen address. The
+  // Creating a mapping only requires its source and chosen address. The
   // model is authoritative; the representation starts from worksheet advice.
-  const firstMapping = await edit("forward", { process_point_id: first.id, name: "电压主映射", address: 4000 });
+  const firstMapping = await edit("forward", { process_point_id: first.id, address: 4000 });
+  equal(firstMapping.name, first.name);
+  equal(firstMapping.enabled, true);
   equal(firstMapping.upp_model, 102);
   equal(firstMapping.wire_type, "S32");
   equal(firstMapping.wire_length, 4);
   equal(firstMapping.scale, 0.01);
   equal(firstMapping.conversion, "fixed_point");
-  const secondMapping = await edit("forward", { process_point_id: first.id, name: "电压备用映射", address: 4010 });
-  const otherMapping = await edit("forward", { process_point_id: second.id, name: "另一分类同偏移", address: 4000 });
+  const secondMapping = await edit("forward", { process_point_id: first.id, address: 4010 });
+  const otherMapping = await edit("forward", { process_point_id: second.id, address: 4000 });
   equal(otherMapping.upp_model, 103);
   equal(otherMapping.scale, 0.001);
 
@@ -75,19 +77,45 @@ export async function checkDspTransmitRules({ client, engineer, engineerId, equa
   equal(row.recommended_wire_length, 4);
   equal(row.recommended_scale, 0.01);
   equal(row.recommended_conversion, "fixed_point");
-  ok(!forwarded.definition.columns.includes("upp_model"));
+  equal(forwarded.definition.columns[forwarded.definition.columns.indexOf("category") + 1], "upp_model");
   ok(!forwarded.definition.editor.includes("upp_model"));
+  for (const removed of ["name", "enabled", "byte_length", "sheet_type"]) ok(!forwarded.definition.columns.includes(removed));
+  for (const removed of ["name", "enabled"]) ok(!forwarded.definition.editor.includes(removed));
+  equal(forwarded.definition.fields.effective_address.label, "UPP偏移地址");
+  equal(forwarded.definition.fields.effective_length.label, "UPP协议字节数");
   const internal = await read("process");
+  equal(forwarded.definition.fields.signal_name.label, internal.definition.fields.name.label);
+  equal(forwarded.definition.fields.variable_name.label, internal.definition.fields.variable_name.label);
   ok(!internal.definition.columns.includes("sheet_data_type"));
   ok(!internal.definition.columns.includes("sheet_upp_model"));
   equal(internal.rows.find(row => row.id === first.id).sheet_upp_model, 102);
   equal(internal.rows.find(row => row.id === first.id).sheet_data_type, "S32");
 
   // Older clients may send the matching model; they cannot choose a different one.
-  await edit("forward", { upp_model: 102, name: "兼容旧模板的映射" }, firstMapping.id);
+  const legacyCompatible = await edit("forward", { upp_model: 102, enabled: true, name: "旧客户端独立转发名称" }, firstMapping.id);
+  equal(legacyCompatible.name, first.name);
   await reject("forward", { upp_model: 103 }, firstMapping.id);
-  await reject("forward", { process_point_id: first.id, name: "伪造模型", address: 5000, upp_model: 1 });
+  await reject("forward", { process_point_id: first.id, address: 5000, upp_model: 1 });
+  await reject("forward", { enabled: false }, firstMapping.id);
+  await reject("forward", { process_point_id: first.id, address: 5000, enabled: false });
   await reject("process", { category: "" }, first.id);
+
+  // Multiple mappings share the current internal data name in the table and
+  // generated protocol; stale legacy mapping labels never override it.
+  const renamed = "规则电压：内部统一名称";
+  await edit("process", { name: renamed }, first.id);
+  const renamedMappings = (await read("forward")).rows.filter(row => row.process_point_id === first.id);
+  equal(renamedMappings.length, 2);
+  for (const mapping of renamedMappings) {
+    equal(mapping.signal_name, renamed);
+    equal(mapping.name, renamed);
+  }
+  const generated = await client.call(`${url}/generate`);
+  equal(generated.blocked, false);
+  const xml = Object.entries(generated.files).find(([name]) => name.endsWith("DSP/UPP_SERVICE.xml"))[1];
+  equal(xml.split(`DataName="${renamed}"`).length - 1, 2);
+  const json = JSON.parse(Object.entries(generated.files).find(([name]) => name.endsWith("DSP/transmit.json"))[1]);
+  ok(json.points.filter(row => row.process_point_id === first.id).every(row => row.name === renamed));
 
   // A classification edit cascades to every mapping, with the whole operation
   // rejected if the unchanged offsets collide in the destination model.
@@ -134,7 +162,7 @@ export async function checkDspTransmitRules({ client, engineer, engineerId, equa
     name: "数组数据", variable_name: "RuleArray", sheet_type: "Sys_U16", element_count: 3,
     category: "任务级观测量", display_digits: 3,
   });
-  const arrayMapping = await edit("forward", { process_point_id: array.id, name: "数组字节映射", address: 5000 });
+  const arrayMapping = await edit("forward", { process_point_id: array.id, address: 5000 });
   equal(arrayMapping.wire_type, "STRING");
   equal(arrayMapping.wire_length, 6);
   equal(arrayMapping.scale, 1);
@@ -162,7 +190,7 @@ export async function checkDspTransmitRules({ client, engineer, engineerId, equa
 
   // New references and changed categories must not silently enlarge or alter
   // a previously reviewed set of derived effects during optimistic merging.
-  const staleCreate = await preview("forward", { process_point_id: first.id, name: "旧分类新增预览", address: 4020 });
+  const staleCreate = await preview("forward", { process_point_id: first.id, address: 4020 });
   ok(staleCreate.allowed);
   await edit("process", { category: "中断级观测量" }, first.id, engineer);
   await conflict(staleCreate);
@@ -175,7 +203,7 @@ export async function checkDspTransmitRules({ client, engineer, engineerId, equa
 
   const staleBeforeNewReference = await preview("process", { category: "任务级观测量" }, first.id);
   ok(staleBeforeNewReference.allowed);
-  await edit("forward", { process_point_id: first.id, name: "预览后新增映射", address: 4020 }, null, engineer);
+  await edit("forward", { process_point_id: first.id, address: 4020 }, null, engineer);
   await conflict(staleBeforeNewReference);
 
   const staleRelink = await preview("forward", { process_point_id: second.id }, secondMapping.id);
@@ -193,5 +221,5 @@ export async function checkDspTransmitRules({ client, engineer, engineerId, equa
   equal(final.process_points.find(row => row.id === first.id).notes, "应保留的并发备注");
   ok(final.transmit_points.filter(row => row.process_point_id === first.id).every(row => row.upp_model === 99));
   equal(final.transmit_points.find(row => row.id === firstMapping.id).wire_type, "F32");
-  console.log("PASS: DSP suggested wire types, category-derived models, multi-mapping history, atomic overlap rejection, scoped cascades and concurrent reference guards");
+  console.log("PASS: DSP derived names, mandatory mappings, suggested wire types, category models, atomic overlaps, scoped cascades and concurrent reference guards");
 }
