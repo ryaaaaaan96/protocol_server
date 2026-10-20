@@ -41,6 +41,8 @@
 | `metadata_fields` | 脚本可以修改的 `metadata` 子键，其他子键必须完整保留 |
 | `project_fields` | `project` 可以返回的显示值，包括可编辑字段的当前值 |
 | `owned_fields` | `reconcile` 可以持久更新的通用业务字段 |
+| `source_tables` | 可选 `["collect", "forward"]`；为每个处理来源提供只读 `collections`、`transmissions` 及 `endpoints` 上下文 |
+| `linked_fields` | 可选 `["address"]`，仅用于无 `calculation` 的转发表；允许 `reconcile` 原子联动转发偏移，手动输入由本表 `normalize` 判断 |
 
 自定义字段通过脚本映射到现有 `metadata`，不增加数据库列。`fields` 负责控件和标签，`behavior` 负责字段值，声明任意名字不会自动生成业务逻辑。
 
@@ -80,7 +82,9 @@
 
 字段可配置 `protocols: ["UPP"]` 或 `["MODBUS"]`，也可同时包含两者；省略表示通用。独立协议视图隐藏不适用列，总体视图保留混合列，但不适用的单元格显示空值且禁止编辑。自定义字段通过既有文本、数字、布尔、选项或引用控件编辑；业务必填和取值约束由表脚本校验。
 
-实例展开字段须声明在 `behavior.project_fields` 和 `fields` 中，不能加入 `editor`。`leading_columns` 声明展开视图新增的前置列；数组内的每个对象仅提供可见列的标量值，例如 `{instance_device: "DSP1", address: 50006}`。其余列继承模板，展开行按前置列自然排序，单表最多 100000 行。展开仅用于查看和复制，修改通过原模板完成；不改变总体视图、协议校验或存储身份。列表读表时，通用引擎为脚本提供 `row.device_instances`，其中 `address` 已按设备实例和协议计算；原始图投影可能没有此显示上下文，脚本应在此时保留空补丁。参见 `config/dc-ups/UPM/transmit.js`。
+实例展开字段须声明在 `behavior.project_fields` 和 `fields` 中，不能加入 `editor`。`leading_columns` 声明展开视图新增的前置列；数组内的每个对象仅提供可见列的标量值，例如 `{instance_device: "DSP1", address: 50006}`。其余列继承模板，展开行按前置列自然排序，单表最多 100000 行。展开仅用于查看和复制，修改通过原模板完成；不改变总体视图或存储身份。列表读表时，通用引擎为脚本提供 `row.device_instances`，其中 `address` 已统一计算；原始图投影可能没有此显示上下文，脚本应在此时保留空补丁。
+
+转发表可启用顶层 `instance_calculation: true`，复用同一 `behavior` 文件的 `instances` 操作。输入为 `context.rows = [{id, group_key, endpoint_key, protocol, base_address, devices}]`，其中 `base_address` 是已保存的模板 `address`；设备含稳定 `instance_index`，旧配置未指定时按组内配置顺序补充零起始序号。返回 `[{id, device_code, address}]`，须完整覆盖每个模板/设备组合一次，不得增加属性或借用 ID，最多 10000 个实例。脚本、JSON 参数和实例定义一起决定地址；Rust 检查整数、范围和覆盖，再用同一结果做地址重叠校验、界面显示、转发生成及派生采集输入。规则读取不回写数据库，错误阻止生成，预览与发布冻结脚本及参数。参见 `config/dc-ups/UPM/transmit.js`。
 
 ## 脚本接口
 
@@ -128,7 +132,7 @@ export function behavior(context, parameters) {
 | --- | --- | --- |
 | `normalize` | `row` 当前记录、`fields` 本次提交、`source` 关联处理点、`operation` | `{values: {...}}`，规范化后的提交字段 |
 | `project` | `rows` 本表记录、`sources` 本板卡处理点 | `[{id, values}]`，仅用于显示和编辑初值 |
-| `reconcile` | `rows` 本表记录、`sources` 本板卡处理点 | `[{id, values}]`，仅更新 `owned_fields` |
+| `reconcile` | `rows` 本表记录、`sources` 本板卡处理点 | `[{id, values}]`，仅更新 `owned_fields`、`linked_fields` |
 | `validate` | `rows` 本表记录、`sources` 本板卡处理点 | `[{id, level, code, message}]`，没有问题时返回 `[]` |
 
 `normalize` 返回的是完整提交补丁：先复制要保留的 `context.fields`，再移除自定义输入并转换为真实存储字段。它不是整条数据库记录。修改元数据时复制旧 `metadata`，避免删除 Excel 来源信息。
@@ -173,4 +177,4 @@ export function behavior(context, parameters) {
 
 当前扩展目标是复用已有数据模型、协议能力与控件。增加新项目、新字段、分类、显示和同表/关联源规则可通过 JSON 与 JS 完成；引入新的协议编码、存储关系、控件类型或系统权限能力，仍需扩展通用引擎。此契约不向项目脚本开放任意 SQL 或任意网络请求。
 
-集成验收示例见 `tests/table-behavior.mjs`：陌生名称板卡仅通过 JSON 和 JS 定义校准字段、采集策略、转发模型联动和依赖新字段的地址计算，并检查预览回滚、历史、脚本冻结、过期规则显式重算、采集设置独立保存和非法输出拒绝。
+集成验收示例见 `tests/table-behavior.mjs`：陌生名称板卡仅通过 JSON 和 JS 定义校准字段、采集策略、转发模型联动和依赖新字段的地址计算，并检查预览回滚、历史、脚本冻结、过期规则显式重算、采集设置独立保存和非法输出拒绝。运行 `node tests/integration.mjs --upm-address` 验证采集 Base 地址持久化、跨表权限与并发、实例公式修改及显示/生成/派生采集的一致性。

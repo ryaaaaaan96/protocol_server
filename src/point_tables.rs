@@ -186,13 +186,28 @@ pub(crate) fn validate_table_file(kind: &str, table: &Value) -> Result<()> {
         !required.contains(&key.as_str())
             && !matches!(
                 key.as_str(),
-                "calculation" | "hidden_source_sig_ids" | "mapping" | "behavior" | "presentation"
+                "calculation"
+                    | "hidden_source_sig_ids"
+                    | "mapping"
+                    | "behavior"
+                    | "presentation"
+                    | "instance_calculation"
             )
     }) || required.iter().any(|key| !object.contains_key(*key))
     {
         return Err(AppError::bad(
             "单表配置须完整包含 label、description、columns、editor、ordering、inline、fields",
         ));
+    }
+    if let Some(value) = table.get("instance_calculation") {
+        if kind != "forward"
+            || !value.is_boolean()
+            || value == true && table.get("behavior").is_none()
+        {
+            return Err(AppError::bad(
+                "instance_calculation 仅支持转发表布尔值，启用时必须配置 behavior",
+            ));
+        }
     }
     if let Some(markers) = table.get("hidden_source_sig_ids") {
         if kind != "process"

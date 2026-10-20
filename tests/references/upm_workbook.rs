@@ -364,7 +364,13 @@ mod tests {
         assert_ne!(source["sig_id"], 2001);
         let config: Value =
             serde_json::from_slice(&std::fs::read("config/dc-ups/project.json").unwrap()).unwrap();
-        let mut graph = json!({"project_config":config["topology"],"process_points":data.process,"collect_points":data.collect,"transmit_points":data.transmit});
+        let definitions =
+            crate::project_files::ProjectFiles::load_from(std::path::Path::new("config"))
+                .unwrap()
+                .definition(Some("dc-ups"))
+                .unwrap()["boards"]
+                .clone();
+        let mut graph = json!({"project_config":config["topology"],"table_definitions":definitions,"process_points":data.process,"collect_points":data.collect,"transmit_points":data.transmit});
         let mut ids = BTreeMap::new();
         for (index, p) in graph["process_points"]
             .as_array_mut()

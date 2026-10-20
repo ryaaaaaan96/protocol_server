@@ -375,15 +375,23 @@ pub fn parse_workbook(bytes: Vec<u8>, board: &Value, definition: &Value) -> Resu
         // table is parsed. Project the full template once so cross-row aliases
         // agree with ordinary table reads; IDs here are local to this import.
         let defs = &board["table_definitions"];
-        let projected_sources = if kind != "process" && defs[kind].get("behavior").is_some() {
-            let mut source_rows = out.process.clone();
-            for (index, point) in source_rows.iter_mut().enumerate() {
-                point["id"] = json!(index + 1);
-            }
-            crate::table_runtime::sources(defs, &source_rows)?
-        } else {
-            vec![]
-        };
+        let behavior_kind = if kind == "transmit" { "forward" } else { kind };
+        let projected_sources =
+            if kind != "process" && defs[behavior_kind].get("behavior").is_some() {
+                let mut source_rows = out.process.clone();
+                for (index, point) in source_rows.iter_mut().enumerate() {
+                    point["id"] = json!(index + 1);
+                }
+                crate::table_runtime::related_sources(
+                    defs,
+                    &source_rows,
+                    &out.collect,
+                    &out.transmit,
+                    crate::topology::rows(board, "point_endpoints"),
+                )?
+            } else {
+                vec![]
+            };
         for rule in rules {
             let mut count = 0;
             for row in rows.iter().filter(|r| {
@@ -740,6 +748,15 @@ mod tests {
         for g in board["point_groups"].as_array_mut().unwrap() {
             g["code"] = json!(format!("GROUP_{}", g["code"].as_str().unwrap()));
         }
+        let layouts =
+            board["table_definitions"]["forward"]["behavior"]["parameters"]["modbus_layouts"]
+                .as_object_mut()
+                .unwrap();
+        let old = std::mem::take(layouts);
+        *layouts = old
+            .into_iter()
+            .map(|(key, value)| (format!("GROUP_{key}"), value))
+            .collect();
         for e in board["point_endpoints"].as_array_mut().unwrap() {
             e["code"] = json!(format!("EP_{}", e["code"].as_str().unwrap()));
             e.as_object_mut().unwrap().remove("subset_of");
@@ -795,7 +812,7 @@ mod tests {
             .cloned()
             .collect();
         assert!(errors.is_empty(), "{errors:?}");
-        let files = crate::native_points::generate(&graph);
+        let files = crate::native_points::generate(&graph).unwrap();
         assert!(
             files
                 .keys()

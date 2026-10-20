@@ -14,7 +14,8 @@ export type PointField = {
   protocols?: string[];
 };
 export type PointDefinition = {
-  behavior?: Record<string, unknown> & { owned_fields?: string[] };
+  behavior?: Record<string, unknown> & { owned_fields?: string[]; linked_fields?: string[] };
+  instance_calculation?: boolean;
   presentation?: {
     category_filter?: string;
     search_placeholder?: string;
@@ -79,7 +80,7 @@ export function hasRecommendation(data: PointTableData): boolean {
 }
 
 export function hasRecalculation(definition: PointDefinition): boolean {
-  return !!definition.calculation || !!definition.behavior?.owned_fields?.length;
+  return !!definition.calculation || !!definition.behavior?.owned_fields?.length || !!definition.behavior?.linked_fields?.length;
 }
 
 export function recommendationFields(data: PointTableData): string[] {

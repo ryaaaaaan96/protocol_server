@@ -25,11 +25,11 @@ CSU 与 upm-demo 都没有父板卡，分别在 `topology.roots` 中声明。UPM
 脚本使用 `export default function calculate(points, parameters)`。每条输入包含 `source_id`、模板寄存器地址、类型、字节数、寄存器区及源分组的 `devices`。每条输出只能包含 `source_id`、`device_code`、`address`、`dev_id`。本例公式为：
 
 ```js
-address = point.address + device.modbus_base;
+address = device.address;
 dev_id = parameters.upm_dev_id;
 ```
 
-LOCAL 基址为 0；DSP1～DSP8 的基址为 50000～57000，间隔 1000，地址单位为 Modbus 寄存器。寄存器数量继承协议字节数，按 `ceil(wire_length / 2)` 得到。数据类型、读写权限、精度、名称等直接继承源记录，不允许脚本篡改。
+`device.address` 由 UPM 转发表的实例规则统一计算；本采集脚本直接使用它，避免重复维护两套基址公式。当前 LOCAL 模板基址为 0；DSP 模板基址为 50000、实例间隔为 1000，具体公式和参数在 `UPM/transmit.js`、`UPM/transmit.json` 中维护，地址单位为 Modbus 寄存器。寄存器数量继承协议字节数，按 `ceil(wire_length / 2)` 得到。数据类型、读写权限、精度、名称等直接继承源记录，不允许脚本篡改。
 
 当前完整数据为 **86 条 LOCAL + 445 × 8 条 DSP = 3646 条**。这些记录都读取同一个 UPM 从站；来源 DSP 设备的内部 `dev_id` 不作为 Modbus 从站号使用。默认从站号为 1，采集周期为 1000 毫秒；这是演示配置，实际值在 JSON 参数中修改。
 

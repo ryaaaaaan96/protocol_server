@@ -110,6 +110,7 @@ pub fn evaluate(graph: &Value, key: &str, mapping: &Value) -> Result<Vec<Value>>
     let target = board(config, key).ok_or(fail("目标板卡尚未导入拓扑"))?;
     check_source(config, target, &rule)?;
     let source = board(config, &rule.source.board_key).unwrap();
+    let calculated_instances = crate::point_instances::graph(source, graph)?;
     let mut input = vec![];
     let mut expected = BTreeMap::new();
     let mut source_rows: Vec<_> = rows(graph, "transmit_points")
@@ -127,13 +128,10 @@ pub fn evaluate(graph: &Value, key: &str, mapping: &Value) -> Result<Vec<Value>>
             .iter()
             .find(|g| g["code"] == point["group_key"])
             .ok_or(fail("源分组不存在"))?;
-        let devices = group["devices"]
-            .as_array()
-            .filter(|v| !v.is_empty())
+        let devices = calculated_instances
+            .get(&num(row, "id"))
             .cloned()
-            .unwrap_or_else(|| {
-                vec![json!({"code":"default","name":"默认设备","dev_id":0,"modbus_base":0})]
-            });
+            .ok_or(fail("源转发缺少已计算的设备实例"))?;
         for device in &devices {
             if expected
                 .insert(
@@ -145,6 +143,7 @@ pub fn evaluate(graph: &Value, key: &str, mapping: &Value) -> Result<Vec<Value>>
                 return Err(fail("源记录或设备标识重复"));
             }
         }
+        let _ = group;
         input.push(json!({"source_id":row["id"],"address":row["address"],"wire_length":row["wire_length"],"wire_type":row["wire_type"],"register_type":row["register_type"],"devices":devices}));
     }
     if expected.len() > 10_000
@@ -264,7 +263,13 @@ mod tests {
                 .unwrap();
         let mut rule = definition["mapping"].clone();
         rule["script"] = json!(include_str!("../config/dc-ups/upm-demo/collect.js"));
-        let graph = json!({"project_config":config,"process_points":[
+        let definitions =
+            crate::project_files::ProjectFiles::load_from(std::path::Path::new("config"))
+                .unwrap()
+                .definition(Some("dc-ups"))
+                .unwrap()["boards"]
+                .clone();
+        let graph = json!({"project_config":config,"table_definitions":definitions,"process_points":[
             {"id":1,"board_key":"UPM","group_key":"LOCAL","name":"本地","enum_name":"LOCAL_VALUE"},
             {"id":2,"board_key":"UPM","group_key":"DSP","name":"DSP测点","enum_name":"DSP_VALUE"}],
             "transmit_points":[

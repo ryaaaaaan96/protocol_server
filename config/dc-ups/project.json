@@ -28,7 +28,7 @@
                 "code": "LOCAL",
                 "name": "UPM 本地设备",
                 "dev_id": 0,
-                "modbus_base": 0
+                "instance_index": 0
               }
             ],
             "collect_enabled": false
@@ -41,49 +41,49 @@
                 "code": "DSP1",
                 "name": "DSP 设备 1",
                 "dev_id": 1,
-                "modbus_base": 50000
+                "instance_index": 0
               },
               {
                 "code": "DSP2",
                 "name": "DSP 设备 2",
                 "dev_id": 2,
-                "modbus_base": 51000
+                "instance_index": 1
               },
               {
                 "code": "DSP3",
                 "name": "DSP 设备 3",
                 "dev_id": 3,
-                "modbus_base": 52000
+                "instance_index": 2
               },
               {
                 "code": "DSP4",
                 "name": "DSP 设备 4",
                 "dev_id": 4,
-                "modbus_base": 53000
+                "instance_index": 3
               },
               {
                 "code": "DSP5",
                 "name": "DSP 设备 5",
                 "dev_id": 5,
-                "modbus_base": 54000
+                "instance_index": 4
               },
               {
                 "code": "DSP6",
                 "name": "DSP 设备 6",
                 "dev_id": 6,
-                "modbus_base": 55000
+                "instance_index": 5
               },
               {
                 "code": "DSP7",
                 "name": "DSP 设备 7",
                 "dev_id": 7,
-                "modbus_base": 56000
+                "instance_index": 6
               },
               {
                 "code": "DSP8",
                 "name": "DSP 设备 8",
                 "dev_id": 8,
-                "modbus_base": 57000
+                "instance_index": 7
               }
             ],
             "collect_enabled": true

@@ -31,7 +31,8 @@ export async function checkDerivedCollection({client,url,graph,equal,ok,projectC
     const group=source.point_groups.find(g=>g.code===point.group_key);
     for(const device of group.devices){
       const row=indexed.get(`${record.id}:${device.code}`);ok(row);
-      equal(row.address,record.address+device.modbus_base);
+      const layout=schema.boards.UPM.forward.behavior.parameters.modbus_layouts[point.group_key];
+      equal(row.address,record.address+layout.template_base+device.instance_index*layout.device_stride);
       equal(row.register_count,Math.ceil(record.wire_length/2));
       equal(row.wire_type,record.wire_type);equal(row.scale,record.scale);
     }

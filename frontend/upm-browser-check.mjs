@@ -12,6 +12,8 @@ for(const [kind,file] of [["process","process"],["collect","collect"],["forward"
   definitions[kind]=JSON.parse(await readFile(new URL(`../config/dc-ups/UPM/${file}.json`,import.meta.url),"utf8"));
 const script=await readFile(new URL("../config/dc-ups/UPM/transmit.js",import.meta.url),"utf8");
 const {behavior}=await import(`data:text/javascript;base64,${Buffer.from(script).toString("base64")}`);
+const collectScript=await readFile(new URL("../config/dc-ups/UPM/collect.js",import.meta.url),"utf8");
+const {behavior:collectBehavior}=await import(`data:text/javascript;base64,${Buffer.from(collectScript).toString("base64")}`);
 const points=[
   {id:1,board_key:"UPM",group_key:"LOCAL",name:"本地电压",enum_name:"LOCAL_VOLTAGE",sig_id:101,internal_type:"U16",element_count:1,byte_length:2},
   {id:2,board_key:"UPM",group_key:"DSP",name:"DSP 电压",enum_name:"DSP_VOLTAGE",sig_id:201,internal_type:"U16",element_count:1,byte_length:2},
@@ -35,10 +37,15 @@ const data=kind=>({
       endpoint_name:board.point_endpoints.find(e=>e.code===row.endpoint_key)?.name,edit_values:{...row}};
     if(kind==="forward") {
       const protocol=board.point_endpoints.find(e=>e.code===row.endpoint_key)?.protocol;
-      result.device_instances=board.point_groups.find(g=>g.code===p.group_key).devices.map(device=>({
-        ...device,address:row.address+(protocol==="MODBUS"?device.modbus_base:0),
-      }));
+      const devices=board.point_groups.find(g=>g.code===p.group_key).devices;
+      const addresses=behavior({action:"instances",rows:[{id:row.id,group_key:p.group_key,protocol,base_address:row.address,devices}]},definitions.forward.behavior.parameters);
+      result.device_instances=devices.map(device=>({...device,address:addresses.find(item=>item.device_code===device.code).address}));
       Object.assign(result,behavior({action:"project",rows:[result],sources:points}).at(0).values);
+    }
+    if(kind==="collect") {
+      const sources=points.map(point=>({...point,transmissions:forward.filter(mapping=>mapping.process_point_id===point.id).map(mapping=>({...mapping,protocol:board.point_endpoints.find(e=>e.code===mapping.endpoint_key).protocol}))}));
+      Object.assign(result,collectBehavior({action:"project",rows:[result],sources}).at(0).values);
+      result.edit_values.base_address=result.base_address;
     }
     return result;
   }),
@@ -137,12 +144,18 @@ try {
   await expect(page.locator('[data-column-key="device_addresses"]')).toHaveCount(0);
   await expect(page.locator(".notice").filter({hasText:"转发表的子集"})).toContainText("DSP / UPP_SERVICE");
   await expect(page.locator("tbody tr")).toHaveCount(1);
+  await expect(page.locator('tbody [data-column-key="base_address"]')).toHaveText("0");
+  await page.locator('tbody [data-column-key="base_address"]').dblclick();
+  await page.getByLabel("编辑 Base 地址",{exact:true}).fill("12");
+  await page.getByLabel("编辑 Base 地址",{exact:true}).press("Enter");
+  await expect(page.locator('tbody [data-column-key="address"]')).toHaveText("6");
   await page.locator('tbody [data-column-key="poll_interval"]').dblclick();
   await page.getByLabel("编辑 UPP 轮询间隔",{exact:true}).fill("8");
   await page.getByLabel("编辑 UPP 轮询间隔",{exact:true}).press("Enter");
   await page.getByRole("button",{name:"检查",exact:true}).click();
   assert.ok(requests.at(-1).path.endsWith("/collect/batch/preview"));
   assert.equal(requests.at(-1).body.rows[0].values.poll_interval,8);
+  assert.equal(requests.at(-1).body.rows[0].values.base_address,12);
   await page.getByRole("button",{name:"继续编辑",exact:true}).click();
   await page.getByRole("tab",{name:/转发点表 · MODBUS/}).click();
   await expect(page.locator("tbody tr")).toHaveCount(8);

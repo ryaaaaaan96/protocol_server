@@ -24,6 +24,10 @@ struct Rule {
     project_fields: Vec<String>,
     #[serde(default)]
     owned_fields: Vec<String>,
+    #[serde(default)]
+    linked_fields: Vec<String>,
+    #[serde(default)]
+    source_tables: Vec<String>,
 }
 
 fn fail(message: impl std::fmt::Display) -> AppError {
@@ -82,6 +86,7 @@ fn parse(value: &Value) -> Result<Rule> {
         ("metadata_fields", &rule.metadata_fields),
         ("project_fields", &rule.project_fields),
         ("owned_fields", &rule.owned_fields),
+        ("linked_fields", &rule.linked_fields),
     ] {
         let mut seen = BTreeSet::new();
         if fields.len() > 128
@@ -105,6 +110,22 @@ fn parse(value: &Value) -> Result<Rule> {
         .any(|key| !rule.project_fields.contains(key))
     {
         return Err(fail("editable_fields 必须同时声明在 project_fields 中"));
+    }
+    if rule
+        .linked_fields
+        .iter()
+        .any(|key| rule.owned_fields.contains(key))
+    {
+        return Err(fail("linked_fields 与 owned_fields 不能重复"));
+    }
+    if rule.source_tables.len() > 2
+        || rule
+            .source_tables
+            .iter()
+            .any(|key| !["collect", "forward"].contains(&key.as_str()))
+        || rule.source_tables.iter().collect::<BTreeSet<_>>().len() != rule.source_tables.len()
+    {
+        return Err(fail("source_tables 仅支持不重复的 collect、forward"));
     }
     Ok(rule)
 }
@@ -400,7 +421,9 @@ pub fn reconcile(
         value,
         &json!({"action":"reconcile","rows":rows,"sources":sources}),
     )?;
-    let patches = patches(output, rows, &parsed.owned_fields)?;
+    let mut allowed = parsed.owned_fields.clone();
+    allowed.extend(parsed.linked_fields.iter().cloned());
+    let patches = patches(output, rows, &allowed)?;
     let original = index(rows)?;
     for (id, values) in &patches {
         metadata_preserved(&parsed, original[id], values)?;

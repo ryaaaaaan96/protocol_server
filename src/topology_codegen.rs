@@ -7,7 +7,7 @@ pub fn generate(graph: &Value) -> Result<Value> {
     let mut files = if blocked {
         Default::default()
     } else {
-        crate::native_points::generate(&crate::table_runtime::effective(graph)?)
+        crate::native_points::generate(&crate::table_runtime::effective(graph)?)?
     };
     if !blocked {
         for (board, data) in graph["derived_collections"]

@@ -442,9 +442,11 @@ async fn apply_change(
         let defs =
             crate::table_runtime::board_definitions(tx, pid, strv(&c.values, "board_key")).await?;
         let behavior = ["process", "collect", "forward"].iter().any(|kind| {
-            defs[kind]["behavior"]["owned_fields"]
-                .as_array()
-                .is_some_and(|fields| !fields.is_empty())
+            ["owned_fields", "linked_fields"].iter().any(|key| {
+                defs[kind]["behavior"][key]
+                    .as_array()
+                    .is_some_and(|fields| !fields.is_empty())
+            })
         });
         if c.operation != "recalculate" || rule.is_null() && !behavior {
             return Err(AppError::bad("此表没有配置布局或联动计算规则"));

@@ -83,6 +83,13 @@ pub fn validate_declarations(kind: &str, definition: &Value) -> Result<()> {
             )));
         }
     }
+    for field in rule["linked_fields"].as_array().into_iter().flatten() {
+        if kind != "forward" || field != "address" || definition.get("calculation").is_some() {
+            return Err(AppError::bad(
+                "linked_fields 仅支持未配置 calculation 的转发表 address",
+            ));
+        }
+    }
     for field in rule["editable_fields"]
         .as_array()
         .into_iter()
@@ -126,31 +133,119 @@ pub fn sources(definitions: &Value, source: &[Value]) -> Result<Vec<Value>> {
     crate::table_behavior::project(&definitions["process"], &mut projected, &[])?;
     Ok(projected)
 }
+fn source_tables(definitions: &Value) -> std::collections::BTreeSet<&str> {
+    ["process", "collect", "forward"]
+        .into_iter()
+        .flat_map(|kind| {
+            definitions[kind]["behavior"]["source_tables"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+        })
+        .collect()
+}
+/// Related mappings are read-only script context. IDs remain native record IDs.
+pub fn related_sources(
+    definitions: &Value,
+    source: &[Value],
+    collect: &[Value],
+    forward: &[Value],
+    endpoints: &[Value],
+) -> Result<Vec<Value>> {
+    let mut projected = sources(definitions, source)?;
+    let requested = source_tables(definitions);
+    if requested.is_empty() {
+        return Ok(projected);
+    }
+    for point in &mut projected {
+        point["endpoints"] = json!(endpoints);
+        for (kind, key, mappings) in [
+            ("collect", "collections", collect),
+            ("forward", "transmissions", forward),
+        ] {
+            if !requested.contains(kind) {
+                continue;
+            }
+            point[key] = json!(
+                mappings
+                    .iter()
+                    .filter(|row| row["process_point_id"] == point["id"]
+                        || row["process_enum"] == point["enum_name"]
+                            && row["process_group"] == point["group_key"])
+                    .map(|row| {
+                        let mut row = row.clone();
+                        row["protocol"] = endpoints
+                            .iter()
+                            .find(|endpoint| endpoint["code"] == row["endpoint_key"])
+                            .map(|endpoint| endpoint["protocol"].clone())
+                            .unwrap_or(Value::Null);
+                        row
+                    })
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+    Ok(projected)
+}
+pub fn graph_sources(graph: &Value, board: &Value) -> Result<Vec<Value>> {
+    let code = strv(board, "code");
+    let points = rows(graph, "process_points")
+        .iter()
+        .filter(|row| row["board_key"] == code)
+        .cloned()
+        .collect::<Vec<_>>();
+    let collect = rows(graph, "collect_points")
+        .iter()
+        .filter(|row| row["board_key"] == code)
+        .cloned()
+        .collect::<Vec<_>>();
+    let forward = rows(graph, "transmit_points")
+        .iter()
+        .filter(|row| row["board_key"] == code)
+        .cloned()
+        .collect::<Vec<_>>();
+    related_sources(
+        &graph["table_definitions"][code],
+        &points,
+        &collect,
+        &forward,
+        rows(board, "point_endpoints"),
+    )
+}
 /// Process projections may use other rows in the same board. Always project
 /// the complete source table before selecting a linked row or mapping subset.
-pub async fn all_sources(
-    tx: &mut PgConnection,
-    pid: i64,
-    board: &str,
-    definitions: &Value,
-) -> Result<Vec<Value>> {
+pub async fn all_sources(tx: &mut PgConnection, pid: i64, board: &Value) -> Result<Vec<Value>> {
     let points: Vec<Value> = sqlx::query_scalar(
         "SELECT to_jsonb(p) FROM points.process_points p WHERE project_id=$1 AND board_key=$2 ORDER BY p.id",
     )
     .bind(pid)
-    .bind(board)
+    .bind(strv(board, "code"))
     .fetch_all(&mut *tx)
     .await?;
-    sources(definitions, &points)
+    let requested = source_tables(&board["table_definitions"]);
+    let collect: Vec<Value> = if requested.contains("collect") {
+        sqlx::query_scalar("SELECT to_jsonb(c) FROM points.collect_points c WHERE project_id=$1 AND board_key=$2 ORDER BY c.id")
+        .bind(pid).bind(strv(board, "code")).fetch_all(&mut *tx).await?
+    } else {
+        vec![]
+    };
+    let forward: Vec<Value> = if requested.contains("forward") {
+        sqlx::query_scalar("SELECT to_jsonb(t) FROM points.transmit_points t WHERE project_id=$1 AND board_key=$2 ORDER BY t.id")
+        .bind(pid).bind(strv(board, "code")).fetch_all(&mut *tx).await?
+    } else {
+        vec![]
+    };
+    related_sources(
+        &board["table_definitions"],
+        &points,
+        &collect,
+        &forward,
+        rows(board, "point_endpoints"),
+    )
 }
-pub async fn source(
-    tx: &mut PgConnection,
-    pid: i64,
-    board: &str,
-    id: i64,
-    definitions: &Value,
-) -> Result<Value> {
-    all_sources(tx, pid, board, definitions)
+pub async fn source(tx: &mut PgConnection, pid: i64, board: &Value, id: i64) -> Result<Value> {
+    all_sources(tx, pid, board)
         .await?
         .into_iter()
         .find(|point| num(point, "id") == id)
@@ -162,12 +257,7 @@ pub fn effective(graph: &Value) -> Result<Value> {
     for board in rows(&graph["project_config"], "board_types") {
         let code = strv(board, "code");
         let defs = &graph["table_definitions"][code];
-        let raw: Vec<_> = rows(graph, "process_points")
-            .iter()
-            .filter(|p| p["board_key"] == code)
-            .cloned()
-            .collect();
-        let source = sources(defs, &raw)?;
+        let source = graph_sources(graph, board)?;
         for (kind, entity) in [
             ("process", "process_points"),
             ("collect", "collect_points"),
@@ -202,12 +292,7 @@ pub fn issues(graph: &Value) -> Result<Vec<Value>> {
     for board in rows(&graph["project_config"], "board_types") {
         let code = strv(board, "code");
         let defs = &graph["table_definitions"][code];
-        let raw: Vec<_> = rows(graph, "process_points")
-            .iter()
-            .filter(|p| p["board_key"] == code)
-            .cloned()
-            .collect();
-        let source = sources(defs, &raw)?;
+        let source = graph_sources(graph, board)?;
         for (kind, entity) in [
             ("process", "process_points"),
             ("collect", "collect_points"),
@@ -275,12 +360,11 @@ async fn reconcile_kinds(
     let defs = board_definitions(tx, pid, board).await?;
     let mut graph = crate::topology::snapshot(tx, pid, false).await?;
     for &(kind, entity) in kinds {
-        let raw: Vec<_> = rows(&graph, "process_points")
+        let config = rows(&graph["project_config"], "board_types")
             .iter()
-            .filter(|p| p["board_key"] == board)
-            .cloned()
-            .collect();
-        let source = sources(&defs, &raw)?;
+            .find(|item| item["code"] == board)
+            .ok_or(AppError::bad("联动板卡不存在"))?;
+        let source = graph_sources(&graph, config)?;
         let data: Vec<_> = rows(&graph, entity)
             .iter()
             .filter(|p| p["board_key"] == board)

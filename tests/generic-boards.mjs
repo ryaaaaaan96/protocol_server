@@ -10,6 +10,10 @@ export function genericFixture(manifest,directory) {
   manifest.topology={version:2,board_types:[board],root:{type:board.code,quantity:1},mounts:[]};
   manifest.workspace={boards:{CONTROL_X:manifest.workspace.boards.UPM}};
   manifest.workbook_boards=[board.code];
+  const tableFile=path.join(directory,"UPM/transmit.json");
+  const table=JSON.parse(fs.readFileSync(tableFile,"utf8"));
+  table.behavior.parameters.modbus_layouts=Object.fromEntries(Object.entries(table.behavior.parameters.modbus_layouts).map(([key,value])=>[`G_${key}`,value]));
+  fs.writeFileSync(tableFile,JSON.stringify(table));
   const filename=path.join(directory,"UPM/workbook.json");
   const mapping=JSON.parse(fs.readFileSync(filename,"utf8"));
   for(const kind of ["process","collect","transmit"]) for(const source of mapping[kind]) {

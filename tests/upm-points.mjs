@@ -26,7 +26,7 @@ export async function checkUpmPoints({client,engineer,engineerId,viewer,viewerId
   const dsp=JSON.stringify(before.process_points.filter(p=>p.board_key==="DSP"));
   const upm=before.project_config.board_types.find(b=>b.code==="UPM");
   equal(upm.point_groups.find(g=>g.code==="DSP").devices.length,8);
-  equal(upm.point_groups.find(g=>g.code==="DSP").devices.at(-1).modbus_base,57000);
+  equal(upm.point_groups.find(g=>g.code==="DSP").devices.at(-1).instance_index,7);
   const process=await client.call(`${table}/process`),collect=await client.call(`${table}/collect`),forward=await client.call(`${table}/forward`);
   equal(collect.rows.length,445);
   ok(collect.rows.every(r=>r.group_key==="DSP"));
@@ -45,7 +45,8 @@ export async function checkUpmPoints({client,engineer,engineerId,viewer,viewerId
     equal(row.instance_rows.length,devices.length);
     for(const [index,device] of devices.entries()) {
       equal(row.instance_rows[index].instance_device,device.code);
-      equal(row.instance_rows[index].address,row.address+(row.protocol==="MODBUS"?device.modbus_base:0));
+      const layout=forward.definition.behavior.parameters.modbus_layouts[row.group_key];
+      equal(row.instance_rows[index].address,row.address+(row.protocol==="MODBUS"?layout.template_base+device.instance_index*layout.device_stride:0));
     }
     equal(row.edit_values.address,row.address);
   }

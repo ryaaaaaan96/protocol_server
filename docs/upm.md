@@ -34,17 +34,25 @@ Excel sigID 的 `※` 表示未分配 UPM sigID、不上传 UPP；这些点仍�
 
 关系由 JSON 决定，不按 DSP/UPM 名称分支；无需新数据库表或迁移。服务器文件修改后通过“项目拓扑配置”读取并预览导入才应用到已有项目；无 Dump 的配置导入不重写点数据。Excel/Dump 导入保留导入值，最终子集不一致时拒绝；不在导入时静默同步其他板卡。
 
-DSP1～DSP8 的设备地址分别配置为 1～8，Modbus 基址按 `UPM板内Modbus地址分配` 设置为 50000～57000，间隔 1000：
+DSP1～DSP8 的通信编号 `dev_id` 分别为 1～8，稳定的 `instance_index` 分别为 0～7；两者独立配置：
 
 ```json
-{"code":"DSP1","name":"DSP 设备 1","dev_id":1,"modbus_base":50000}
+{"code":"DSP1","name":"DSP 设备 1","dev_id":1,"instance_index":0}
 ```
 
-Modbus 实际地址为 `modbus_base + address`，地址单位为寄存器，数量为 `ceil(wire_length / 2)`。LOCAL 的基址为 0。UPP 的 `address` 是模型内字节偏移；不同设备实例共用模型布局。设备实例地址由后台计算，采集与转发点表不显示“设备地址”汇总列；修改模板影响所有实例。
+`UPM/transmit.json` 启用 `instance_calculation: true`，对应 `transmit.js` 的 `instances` 操作计算实际地址。参数位于 `behavior.parameters.modbus_layouts`：
+
+```json
+{"DSP":{"template_base":50000,"device_stride":1000},"LOCAL":{"template_base":0,"device_stride":0}}
+```
+
+JS 公式为 `instance_index * device_stride + template_base + base_address`。例如测点偏移为 6，DSP1 为 50006、DSP8 为 57006。`base_address` 在实例计算输入中取自已保存的转发 `address`；地址单位为寄存器，数量为 `ceil(wire_length / 2)`。UPP 的 `address` 仍是模型内字节偏移。未启用脚本的旧板卡继续兼容 `modbus_base + address`；UPM 的新规则不读取旧 `modbus_base`。
+
+UPM 的 DSP 采集表新增可编辑“Base 地址”，保存于采集记录的 `metadata.base_address`，与 UPP 采集地址完全独立。未设置时显示关联 Modbus 转发的当前偏移，不在读取时回写数据库；多个不同偏移时显示空值。保存一个整数后，`transmit.js` 将同一内部点的 Modbus 转发偏移同步为该值，同事务检查地址、权限、并发及历史，UPP 地址、采集周期和优先级保留。清空该列解除联动，保留当前转发偏移；已联动的转发偏移应通过采集表修改。修改共享模板影响全部实例，采集与转发表不显示“设备地址”汇总列。
 
 转发点表默认“按设备展开”，显示设备实例及实际协议地址；DSP1～DSP8 分别显示，LOCAL 仅显示本地实例。展开视图可搜索、分页、设置列与复制，不能单独编辑计算地址。切换“编辑共享模板”可编辑原始偏移及其他参数，或通过行菜单“共享模板详情”定位来源定义；有未保存修改时不能切换视图。总体视图仍按模板关联，不复制数据库记录。
 
-展开由 `UPM/transmit.json` 的 `presentation.row_expansion` 声明，`transmit.js` 选择后台 `device_instances` 的设备名和实际地址；新增同类表仅需配置 JSON/JS，前端不计算地址。
+展开由 `UPM/transmit.json` 的 `presentation.row_expansion` 声明。后台统一执行本表实例公式，显示、冲突校验、转发生成和 upm-demo 采集都使用该结果；`transmit.js` 的显示投影只选取设备名与实际地址。新增同类表仅需配置 JSON/JS，前端不计算地址。修改公式或参数不重写测点，越界或重叠会阻止生成；已生成产物包含当时的脚本与参数。
 
 Modbus 优先采用备注中的 `0x03`（HOLDING）或 `0x04`（INPUT）；缺少备注时，本地 RO 使用 INPUT，其余使用 HOLDING。DSP 对外偏移采用 HOLDING。字节序初始为 0，可在 UPM 协议表中修改，部署前需核对固件。
 

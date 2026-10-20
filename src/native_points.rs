@@ -223,13 +223,12 @@ pub async fn apply(
         crate::table_runtime::source(
             tx,
             pid,
-            board_key,
+            &board,
             fields
                 .get("process_point_id")
                 .unwrap_or(&old["process_point_id"])
                 .as_i64()
                 .unwrap_or(0),
-            definitions,
         )
         .await?
     };
@@ -366,10 +365,11 @@ pub async fn table_rows(
             .map(|g| g["name"].clone())
             .unwrap_or_else(|| row["group_key"].clone());
     }
+    crate::native_protocol::project_instances(&mut result, &board, kind)?;
     let sources = if kind == "process" {
         Vec::new()
     } else {
-        crate::table_runtime::all_sources(tx, pid, board_key, &board["table_definitions"]).await?
+        crate::table_runtime::all_sources(tx, pid, &board).await?
     };
     crate::table_behavior::project(&board["table_definitions"][kind], &mut result, &sources)?;
     Ok(result)
@@ -767,18 +767,20 @@ pub async fn history(
     Ok(())
 }
 
-pub fn generate(g: &Value) -> BTreeMap<String, String> {
+pub fn generate(g: &Value) -> Result<BTreeMap<String, String>> {
     let mut files = BTreeMap::new();
     let Some(boards) = g["project_config"]["board_types"].as_array() else {
-        return files;
+        return Ok(files);
     };
     for board in boards.iter().filter(|b| b["point_storage"] == "native") {
         if crate::board_rules::raw(board)
+            || g["table_definitions"][strv(board, "code")]["forward"]["instance_calculation"]
+                == true
             || rows(board, "point_endpoints")
                 .iter()
                 .any(|e| e["direction"] == "collect" || e["protocol"] == "MODBUS")
         {
-            files.extend(crate::native_protocol::generate(g, board));
+            files.extend(crate::native_protocol::generate(g, board)?);
             continue;
         }
         let code = strv(board, "code");
@@ -863,7 +865,7 @@ pub fn generate(g: &Value) -> BTreeMap<String, String> {
             files.insert(format!("board_types/{code}/{endpoint}.xml"), xml);
         }
     }
-    files
+    Ok(files)
 }
 
 #[cfg(test)]
@@ -886,7 +888,7 @@ mod tests {
     }
 
     fn generate(graph: &Value) -> BTreeMap<String, String> {
-        super::generate(&crate::table_runtime::effective(graph).unwrap())
+        super::generate(&crate::table_runtime::effective(graph).unwrap()).unwrap()
     }
 
     fn graph() -> Value {

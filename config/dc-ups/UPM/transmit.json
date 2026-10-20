@@ -2,7 +2,8 @@
   "version": 1,
   "enabled": true,
   "label": "转发点表",
-  "description": "LOCAL 和 DSP 内部点分别映射到 Modbus 或 UPP；Modbus 按设备基址展开，同一点可对应多个对外地址。",
+  "instance_calculation": true,
+  "description": "LOCAL 和 DSP 内部点分别映射到 Modbus 或 UPP；Modbus 由 JS 按模板基址、实例间隔和测点偏移展开。",
   "presentation": {
     "overview_hidden_fields": ["signal_name"],
     "row_expansion": {
@@ -13,11 +14,18 @@
   "behavior": {
     "engine": "javascript",
     "script_file": "transmit.js",
-    "parameters": {},
+    "parameters": {
+      "modbus_layouts": {
+        "LOCAL": {"template_base": 0, "device_stride": 0},
+        "DSP": {"template_base": 50000, "device_stride": 1000}
+      }
+    },
+    "source_tables": ["collect"],
     "editable_fields": [],
     "metadata_fields": [],
     "project_fields": ["instance_rows", "instance_device"],
-    "owned_fields": []
+    "owned_fields": [],
+    "linked_fields": ["address"]
   },
   "columns": [
     "signal_name",
@@ -105,7 +113,7 @@
       "label": "协议地址 / 偏移",
       "type": "number",
       "default": 0,
-      "hint": "UPP 按字节；Modbus 按寄存器。DSP 模板为相对偏移，设备基址定义于 project.json。"
+      "hint": "UPP 按字节；Modbus 按寄存器。采集表已设置 Base 地址时由它联动；实例地址由本表 JS 与 modbus_layouts 参数计算。"
     },
     "wire_type": {
       "label": "通信类型",

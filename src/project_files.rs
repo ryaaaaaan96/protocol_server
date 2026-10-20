@@ -402,9 +402,10 @@ fn load_table_directory(project_path: &Path, manifest: &Manifest) -> Result<Valu
                             | "mapping"
                             | "behavior"
                             | "presentation"
+                            | "instance_calculation"
                     ))
                     && REQUIRED.iter().all(|key| object.contains_key(*key)),
-                "{}: 表格须完整包含 version、enabled、label、description、columns、editor、ordering、inline、fields，可选 calculation、hidden_source_sig_ids、mapping、behavior、presentation，不支持其他属性",
+                "{}: 表格须完整包含 version、enabled、label、description、columns、editor、ordering、inline、fields，可选 calculation、hidden_source_sig_ids、mapping、behavior、presentation、instance_calculation，不支持其他属性",
                 path.display()
             );
             ensure!(

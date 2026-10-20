@@ -49,7 +49,10 @@ pub struct PointDevice {
     pub code: String,
     pub name: String,
     pub dev_id: u16,
+    #[serde(default)]
     pub modbus_base: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_index: Option<u16>,
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -220,12 +223,15 @@ impl Config {
             let mut devices = BTreeSet::new();
             let mut device_ids = BTreeSet::new();
             for group in &t.point_groups {
+                let mut indices = BTreeSet::new();
                 if group.devices.len() > 1024
-                    || group.devices.iter().any(|device| {
+                    || group.devices.iter().enumerate().any(|(index, device)| {
                         !model::identifier(&device.code)
                             || device.name.trim().is_empty()
                             || !devices.insert(&device.code)
                             || !device_ids.insert(device.dev_id)
+                            || !indices
+                                .insert(device.instance_index.map(usize::from).unwrap_or(index))
                     })
                 {
                     return Err(AppError::bad(

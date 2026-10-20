@@ -34,21 +34,7 @@ pub async fn collect_rows(tx: &mut PgConnection, pid: i64, board: &str) -> Resul
 }
 
 fn devices(board: &Value, group: &Value) -> Vec<Value> {
-    let configured: Vec<Value> = board["point_groups"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|g| &g["code"] == group)
-        .and_then(|g| g["devices"].as_array())
-        .into_iter()
-        .flatten()
-        .cloned()
-        .collect();
-    if configured.is_empty() {
-        vec![json!({"code":"default","dev_id":0,"modbus_base":0})]
-    } else {
-        configured
-    }
+    crate::point_instances::devices(board, group)
 }
 fn endpoint<'a>(board: &'a Value, row: &Value) -> Option<&'a Value> {
     board["point_endpoints"]
@@ -69,41 +55,43 @@ pub fn project_row(row: &mut Value, board: &Value, kind: &str) {
     if modbus {
         row["register_count"] = json!((num(row, "wire_length") + 1) / 2);
     }
-    // Provide structured, computed instances to table scripts without copying
-    // template records or exposing device addressing as an editable field.
-    row["device_instances"] = json!(
-        devices(board, &row["group_key"])
-            .into_iter()
-            .map(|mut device| {
-                device["address"] = json!(
-                    num(row, "address")
-                        + if kind == "forward" && modbus {
-                            num(&device, "modbus_base")
-                        } else {
-                            0
-                        }
-                );
-                device
-            })
-            .collect::<Vec<_>>()
-    );
-    row["device_addresses"] = json!(
-        devices(board, &row["group_key"])
-            .iter()
-            .map(|d| {
-                if kind == "forward" && modbus {
-                    format!(
-                        "{}: {}",
-                        strv(d, "code"),
-                        num(d, "modbus_base") + num(row, "address")
-                    )
-                } else {
-                    format!("{}: {}", strv(d, "code"), num(d, "dev_id"))
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("；")
-    );
+}
+
+pub fn project_instances(data: &mut [Value], board: &Value, kind: &str) -> Result<()> {
+    let calculated = if kind == "forward" {
+        crate::point_instances::calculate(board, &board["table_definitions"]["forward"], data, &[])?
+    } else {
+        BTreeMap::new()
+    };
+    for row in data {
+        let instances = if kind == "forward" {
+            calculated[&num(row, "id")].clone()
+        } else {
+            devices(board, &row["group_key"])
+                .into_iter()
+                .map(|mut device| {
+                    device["address"] = row["address"].clone();
+                    device
+                })
+                .collect()
+        };
+        let modbus = endpoint(board, row).is_some_and(|endpoint| endpoint["protocol"] == "MODBUS");
+        row["device_addresses"] = json!(
+            instances
+                .iter()
+                .map(|d| {
+                    if kind == "forward" && modbus {
+                        format!("{}: {}", strv(d, "code"), num(d, "address"))
+                    } else {
+                        format!("{}: {}", strv(d, "code"), num(d, "dev_id"))
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("；")
+        );
+        row["device_instances"] = json!(instances);
+    }
+    Ok(())
 }
 
 /// Keep this board's raw integer representation. `scale` is engineering
@@ -125,6 +113,14 @@ pub fn validate(g: &Value) -> Vec<Value> {
 }
 fn validate_board(g: &Value, board: &Value, issues: &mut Vec<Value>) {
     let raw = crate::board_rules::raw(board);
+    let calculated = match crate::point_instances::graph(board, g) {
+        Ok(value) => value,
+        Err(error) => {
+            issues.push(json!({"key":format!("instances:{}",strv(board,"code")),"level":"error","entity":"transmit_points",
+                "id":0,"board_key":board["code"],"code":"instance_calculation","message":error.1}));
+            BTreeMap::new()
+        }
+    };
     let mut add = |entity: &str, row: &Value, code: &str, message: &str, warning: bool| {
         issues.push(json!({"key":format!("{entity}:{}:{code}",row["id"]),
             "level":if warning {"warning"} else {"error"},"entity":entity,"id":row["id"],
@@ -215,6 +211,7 @@ fn validate_board(g: &Value, board: &Value, issues: &mut Vec<Value>) {
         for row in rows(g, table).iter().filter(|r| {
             r["board_key"] == board["code"]
                 && (raw
+                    || g["table_definitions"][strv(board,"code")]["forward"]["instance_calculation"] == true
                     || direction == "collect"
                     || endpoint(board, r).is_some_and(|e| e["protocol"] == "MODBUS"))
         }) {
@@ -312,21 +309,24 @@ fn validate_board(g: &Value, board: &Value, issues: &mut Vec<Value>) {
                 );
             }
             let length = if modbus {
-                (num(row, "wire_length") + 1) / 2
+                num(row, "wire_length").saturating_add(1) / 2
             } else {
                 num(row, "wire_length")
             };
-            let instances = devices(board, &point["group_key"]);
+            let instances = if direction == "transmit" {
+                calculated.get(&num(row, "id")).cloned().unwrap_or_default()
+            } else {
+                devices(board, &point["group_key"])
+            };
             if instances.is_empty() {
                 add(table, row, "devices", "点表分组缺少设备实例", false);
             }
             for device in instances {
-                let address = num(row, "address")
-                    + if modbus {
-                        num(&device, "modbus_base")
-                    } else {
-                        0
-                    };
+                let address = if direction == "transmit" {
+                    num(&device, "address")
+                } else {
+                    num(row, "address")
+                };
                 if address + length > 65536 || address < 0 || length < 1 {
                     add(
                         table,
@@ -425,8 +425,9 @@ pub async fn import(
     Ok(())
 }
 
-pub fn generate(g: &Value, board: &Value) -> BTreeMap<String, String> {
+pub fn generate(g: &Value, board: &Value) -> Result<BTreeMap<String, String>> {
     let mut files = BTreeMap::new();
+    let calculated = crate::point_instances::graph(board, g)?;
     for (kind, table) in [
         ("process", "process_points"),
         ("collect", "collect_points"),
@@ -440,7 +441,8 @@ pub fn generate(g: &Value, board: &Value) -> BTreeMap<String, String> {
             format!("board_types/{}/{kind}.json", strv(board, "code")),
             serde_json::to_string_pretty(&json!({
             "version":1,"board_key":board["code"],"groups":board["point_groups"],
-            "endpoints":board["point_endpoints"],"points":points}))
+            "endpoints":board["point_endpoints"],"points":points,
+            "table_definition":if kind == "transmit" { &g["table_definitions"][strv(board,"code")]["forward"] } else { &Value::Null }}))
             .unwrap(),
         );
     }
@@ -458,21 +460,15 @@ pub fn generate(g: &Value, board: &Value) -> BTreeMap<String, String> {
         let Some(ep) = endpoint(board, row) else {
             continue;
         };
-        for device in devices(board, &point["group_key"]) {
+        for device in calculated.get(&num(row, "id")).into_iter().flatten() {
             let mut item = row.clone();
             if crate::board_rules::inherited_name(board) {
                 item["name"] = point["name"].clone();
             }
             item["device"] = device.clone();
             item["protocol"] = ep["protocol"].clone();
-            item["address"] = json!(
-                num(row, "address")
-                    + if ep["protocol"] == "MODBUS" {
-                        num(&device, "modbus_base")
-                    } else {
-                        0
-                    }
-            );
+            item["base_address"] = row["address"].clone();
+            item["address"] = device["address"].clone();
             if ep["protocol"] == "MODBUS" {
                 item["register_count"] = json!((num(row, "wire_length") + 1) / 2);
             }
@@ -486,7 +482,7 @@ pub fn generate(g: &Value, board: &Value) -> BTreeMap<String, String> {
         ),
         serde_json::to_string_pretty(&expanded).unwrap(),
     );
-    files
+    Ok(files)
 }
 
 #[cfg(test)]
@@ -508,6 +504,7 @@ mod tests {
         let mut row = original.clone();
         project_row(&mut row, &board, "forward");
         let mut projected = vec![row];
+        project_instances(&mut projected, &board, "forward").unwrap();
         crate::table_behavior::project(definition, &mut projected, &[]).unwrap();
         assert_eq!(projected[0]["address"], 6);
         assert_eq!(projected[0]["register_count"], 2);
@@ -522,9 +519,11 @@ mod tests {
         let mut upp = original.clone();
         upp["endpoint_key"] = json!("BYTES");
         project_row(&mut upp, &board, "forward");
+        project_instances(std::slice::from_mut(&mut upp), &board, "forward").unwrap();
         assert_eq!(upp["device_instances"][1]["address"], 6);
         let mut collect = original.clone();
         project_row(&mut collect, &board, "collect");
+        project_instances(std::slice::from_mut(&mut collect), &board, "collect").unwrap();
         assert_eq!(collect["device_instances"][1]["address"], 6);
         // Raw graph validation uses the same script without table-only context.
         crate::table_behavior::project(definition, &mut [original], &[]).unwrap();

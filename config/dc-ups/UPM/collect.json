@@ -3,12 +3,23 @@
   "enabled": true,
   "label": "采集点表",
   "description": "对应 UPM-DSP采集数据。LOCAL 不建立采集记录；※ 参数保持为空。",
+  "behavior": {
+    "engine": "javascript",
+    "script_file": "collect.js",
+    "parameters": {},
+    "source_tables": ["forward"],
+    "editable_fields": ["base_address"],
+    "metadata_fields": ["base_address"],
+    "project_fields": ["base_address"],
+    "owned_fields": []
+  },
   "columns": [
     "signal_name",
     "enum_name",
     "resolved_sig_id",
     "upp_model",
     "address",
+    "base_address",
     "wire_type",
     "wire_length",
     "scale",
@@ -24,6 +35,7 @@
     "endpoint_key",
     "upp_model",
     "address",
+    "base_address",
     "wire_type",
     "wire_length",
     "scale",
@@ -45,6 +57,7 @@
   "inline": {
     "upp_model": "upp_model",
     "address": "address",
+    "base_address": "base_address",
     "wire_type": "wire_type",
     "wire_length": "wire_length",
     "scale": "scale",
@@ -56,6 +69,12 @@
     "scan_priority": "scan_priority"
   },
   "fields": {
+    "base_address": {
+      "label": "Base 地址",
+      "type": "number",
+      "nullable": true,
+      "hint": "Modbus 测点偏移，单位为寄存器；修改后联动对应转发。首次显示当前转发偏移，保存后写入本采集记录；留空解除联动并保留当前转发偏移。"
+    },
     "enum_name": {
       "label": "ENMU"
     },

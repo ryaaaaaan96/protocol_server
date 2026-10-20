@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { genericFixture, checkGenericBoards } from "./generic-boards.mjs";
 import { tableBehaviorFixture, checkTableBehavior } from "./table-behavior.mjs";
 import { checkUpmPoints } from "./upm-points.mjs";
+import { checkUpmAddresses } from "./upm-addresses.mjs";
 import { checkDspPoints } from "./dsp-points.mjs";
 import { checkTableCalculation } from "./table-calculation.mjs";
 import { checkDspTransmitRules } from "./dsp-transmit-rules.mjs";
@@ -33,12 +34,12 @@ migration.pathname=`/${dbname}`;appUrl.pathname=`/${dbname}`;
 const password=crypto.randomBytes(20).toString("hex");
 const projectConfigs=fs.mkdtempSync(path.join(root,".runtime/test-project-configs-"));
 const fixtureSource=path.join(root,"config/dc-ups");
-for(const [baseKey,workbook] of [["table_behavior",false],["generic",true],["upm",true],["dsp_native",true],["dsp_native_other",false],["dsp_rules",false],["dsp_calculation",false],["cli",false],["excel",false],["broken",true]]){
+for(const [baseKey,workbook] of [["table_behavior",false],["generic",true],["upm",true],["upm_address",false],["dsp_native",true],["dsp_native_other",false],["dsp_rules",false],["dsp_calculation",false],["cli",false],["excel",false],["broken",true]]){
   const key=fixtureKey(baseKey);
   const directory=path.join(projectConfigs,key);fs.cpSync(fixtureSource,directory,{recursive:true});
   const manifest=JSON.parse(fs.readFileSync(path.join(directory,"project.json"),"utf8"));
   manifest.key=key;manifest.name=key;
-  if(!["upm","generic","table_behavior"].includes(baseKey)) {
+  if(!["upm","upm_address","generic","table_behavior"].includes(baseKey)) {
     const derived=manifest.topology.board_types.filter(b=>b.point_storage==="derived").map(b=>b.code);
     manifest.topology.board_types=manifest.topology.board_types.filter(b=>!derived.includes(b.code));
     const mounts=manifest.topology.mounts;
@@ -64,6 +65,9 @@ for(const [baseKey,workbook] of [["table_behavior",false],["generic",true],["upm
   }
   if(baseKey==="generic")genericFixture(manifest,directory);
   if(baseKey==="table_behavior")tableBehaviorFixture(manifest,directory);
+  if(baseKey==="upm_address") {
+    for(const board of manifest.topology.board_types) for(const endpoint of board.point_endpoints || []) delete endpoint.subset_of;
+  }
   if(!workbook)manifest.workbook=null;
   if(baseKey==="broken") { manifest.workbook="sources/invalid.xlsx"; fs.writeFileSync(path.join(directory,manifest.workbook),"not an xlsx file"); }
   fs.writeFileSync(path.join(directory,"project.json"),JSON.stringify(manifest));
@@ -152,6 +156,7 @@ async function runIntegration(){
   server=spawn("target/debug/protocol-server",[],{env:testEnv,stdio:["ignore",log,log]});
   const client=new Client(); let ready=false;
   for(let attempt=0;attempt<100;attempt++){
+    if(server.exitCode!==null)break;
     try { ready=(await client.raw("/health")).status===200;if(ready)break; }catch{}
     await new Promise(resolve=>setTimeout(resolve,100));
   }
@@ -187,6 +192,7 @@ async function runIntegration(){
   if (process.argv.includes("--behavior")) { await checkTableBehavior({client,equal,ok,fixtureKey,projectConfigs}); console.log(`PASS: ${assertions} assertions`); return; }
   if (process.argv.includes("--generic")) { await checkGenericBoards({client,equal,ok,fixtureKey,projectConfigs,testEnv}); console.log(`PASS: ${assertions} assertions`); return; }
   if (process.argv.includes("--upm")) { await checkUpmPoints({client,engineer:e,engineerId:engineer.id,viewer:v,viewerId:viewer.id,equal,ok,fixtureKey,projectConfigs,testEnv}); console.log(`PASS: ${assertions} assertions`); return; }
+  if (process.argv.includes("--upm-address")) { await checkUpmAddresses({client,engineer:e,engineerId:engineer.id,equal,ok,fixtureKey,projectConfigs}); console.log(`PASS: ${assertions} assertions`); return; }
   await checkGenericBoards({client,equal,ok,fixtureKey,projectConfigs,testEnv});
   if (!process.argv.some(arg=>["--folders","--excel","--databases","--calculation"].includes(arg))) await checkTableBehavior({client,equal,ok,fixtureKey,projectConfigs});
   if (process.argv.includes("--calculation")) {
