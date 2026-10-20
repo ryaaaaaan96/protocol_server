@@ -188,17 +188,13 @@
     },
     "mounts": [
       {
-        "parent": "CSU",
+        "parent": "UPM_DEMO",
         "child": "UPM",
         "quantity": 24,
         "connections": [
           {
             "protocol": "MODBUS",
-            "transport": "CANFD"
-          },
-          {
-            "protocol": "UPP",
-            "transport": "CANFD"
+            "transport": "RS485"
           }
         ]
       },

@@ -481,21 +481,26 @@ mod tests {
     }
     #[test]
     fn type_counts_do_not_expand_instances() {
-        let c = Config::parse(example()).unwrap();
+        let mut c = Config::parse(example()).unwrap();
         let n = c.counts().unwrap();
         assert_eq!(c.board_types.len(), 6);
         assert_eq!(n["CSU"], 1);
+        assert_eq!(n["UPM_DEMO"], 1);
         assert_eq!(n["UPM"], 24);
         assert_eq!(n["DSP"], 192);
         assert_eq!(n["IDU_T"], 1);
         assert_eq!(n["IDU_R"], 4);
-        assert_eq!(c.mounts[0].connections.len(), 2);
-        assert!(
-            c.mounts[0]
-                .connections
-                .iter()
-                .all(|c| c.transport == "CANFD")
-        );
+        let upm = c.mounts.iter_mut().find(|m| m.child == "UPM").unwrap();
+        assert_eq!(upm.parent, "UPM_DEMO");
+        assert_eq!(upm.connections.len(), 1);
+        assert_eq!(upm.connections[0].protocol, "MODBUS");
+        assert_eq!(upm.connections[0].transport, "RS485");
+        // Multiple protocols on a mount still share a single device count.
+        upm.connections.push(Connection {
+            protocol: "UPP".into(),
+            transport: "CANFD".into(),
+        });
+        assert_eq!(c.counts().unwrap(), n);
     }
     #[test]
     fn rejects_invalid_hierarchy() {
