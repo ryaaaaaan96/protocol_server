@@ -4,6 +4,8 @@
 
 处理表可选 `hidden_source_sig_ids: ["※"]`：当原始 `source_sig_id`（或 `metadata.source_sig_id`）匹配标记且 `sig_id` 为空时，在处理表和总体视图默认隐藏该点；查看开关可显示并编辑。分配编号后自动恢复显示。此配置不影响存储、关联或协议生成，最多 16 个标记、每个最多 64 字节。
 
+采集端点可配置 `subset_of: {"board_key":"SOURCE_BOARD","endpoint_key":"OUT"}`，引用另一 native 板卡协议相同的转发端点。采集只包含所需源项，六个协议字段（`upp_model`、`address`、`wire_type`、`wire_length`、`scale`、`access`）须唯一匹配；源修改在预览事务中同步已有采集项，接收端调度与字节序独立保留。权限不足、源删除或存储表示不兼容时整笔拒绝。规则加载不重写点；已有项目须经拓扑配置导入应用。详见 [UPM 子集与同步](upm.md#dsp-转发子集)。
+
 ## 新增板卡
 
 1. 在 `config/<项目>/` 创建板卡目录，准备完整的 `process.json`、`collect.json`、`transmit.json`。不使用的表设置 `enabled: false`。

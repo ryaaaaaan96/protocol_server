@@ -16,6 +16,7 @@ mod native_protocol;
 mod permissions;
 mod point_batch;
 mod point_order;
+mod point_subsets;
 mod point_tables;
 mod project_config;
 mod project_dump;

@@ -662,6 +662,7 @@ mod tests {
         }
         for e in board["point_endpoints"].as_array_mut().unwrap() {
             e["code"] = json!(format!("EP_{}", e["code"].as_str().unwrap()));
+            e.as_object_mut().unwrap().remove("subset_of");
         }
         for kind in ["process", "collect", "transmit"] {
             for source in definition[kind].as_array_mut().unwrap() {

@@ -59,6 +59,14 @@ pub struct PointEndpoint {
     pub protocol: String,
     #[serde(default = "transmit_direction", skip_serializing_if = "is_transmit")]
     pub direction: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subset_of: Option<EndpointSource>,
+}
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EndpointSource {
+    pub board_key: String,
+    pub endpoint_key: String,
 }
 fn transmit_direction() -> String {
     "transmit".into()
@@ -217,6 +225,36 @@ impl Config {
                 return Err(AppError::bad(
                     "板卡类型代码、模板代码须唯一且为有效标识符，名称不能为空",
                 ));
+            }
+        }
+        for board in &self.board_types {
+            for endpoint in &board.point_endpoints {
+                let Some(source) = &endpoint.subset_of else {
+                    continue;
+                };
+                let target = self
+                    .board_types
+                    .iter()
+                    .find(|candidate| candidate.code == source.board_key);
+                let source_endpoint = target.and_then(|candidate| {
+                    candidate
+                        .point_endpoints
+                        .iter()
+                        .find(|candidate| candidate.code == source.endpoint_key)
+                });
+                if endpoint.direction != "collect"
+                    || board.code == source.board_key
+                    || target.is_none_or(|candidate| {
+                        candidate.point_storage.as_deref() != Some("native")
+                    })
+                    || source_endpoint.is_none_or(|candidate| {
+                        candidate.direction != "transmit" || candidate.protocol != endpoint.protocol
+                    })
+                {
+                    return Err(AppError::bad(
+                        "subset_of 只能由采集端点引用另一 native 板卡中协议一致的转发端点",
+                    ));
+                }
             }
         }
         if !codes.contains(&self.root.kind) || self.root.quantity == 0 || self.root.quantity > 1024
@@ -391,7 +429,41 @@ fn validate_references(config: &Config, used: &[Value]) -> Result<()> {
 mod tests {
     use super::*;
     fn example() -> Value {
-        serde_json::from_str::<Value>(include_str!("../config/dc-ups/project.json")).unwrap()["topology"].clone()
+        let mut value = serde_json::from_str::<Value>(include_str!(
+            "../config/dc-ups/project.json"
+        ))
+        .unwrap()["topology"]
+            .clone();
+        for board in value["board_types"].as_array_mut().unwrap() {
+            for endpoint in board
+                .get_mut("point_endpoints")
+                .and_then(Value::as_array_mut)
+                .into_iter()
+                .flatten()
+            {
+                endpoint.as_object_mut().unwrap().remove("subset_of");
+            }
+        }
+        value
+    }
+    #[test]
+    fn collection_subset_references_a_compatible_foreign_transmit_endpoint() {
+        let source = serde_json::from_str::<Value>(include_str!("../config/dc-ups/project.json"))
+            .unwrap()["topology"]
+            .clone();
+        Config::parse(source.clone()).unwrap();
+        for relation in [
+            json!({"board_key":"MISSING","endpoint_key":"UPP_SERVICE"}),
+            json!({"board_key":"DSP","endpoint_key":"MISSING"}),
+            json!({"board_key":"UPM","endpoint_key":"UPP_SERVICE"}),
+        ] {
+            let mut value = source.clone();
+            value["board_types"][1]["point_endpoints"][0]["subset_of"] = relation;
+            assert!(Config::parse(value).is_err());
+        }
+        let mut value = source;
+        value["board_types"][2]["point_endpoints"][0]["protocol"] = json!("MODBUS");
+        assert!(Config::parse(value).is_err());
     }
     #[test]
     fn type_counts_do_not_expand_instances() {

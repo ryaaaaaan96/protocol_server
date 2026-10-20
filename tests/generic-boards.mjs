@@ -6,7 +6,7 @@ export function genericFixture(manifest,directory) {
   const board=structuredClone(manifest.topology.board_types.find(b=>b.code==="UPM"));
   board.code="CONTROL_X";board.name="通用控制板";board.model_code="CUSTOM_MODEL";board.point_rules.sheet_layout=false;board.point_rules.value_options={};
   for(const group of board.point_groups)group.code=`G_${group.code}`;
-  for(const endpoint of board.point_endpoints){endpoint.code=`E_${endpoint.code}`;endpoint.direction ||= "transmit";}
+  for(const endpoint of board.point_endpoints){endpoint.code=`E_${endpoint.code}`;endpoint.direction ||= "transmit";delete endpoint.subset_of;}
   manifest.topology={version:2,board_types:[board],root:{type:board.code,quantity:1},mounts:[]};
   manifest.workspace={boards:{CONTROL_X:manifest.workspace.boards.UPM}};
   manifest.workbook_boards=[board.code];

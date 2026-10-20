@@ -77,7 +77,10 @@ function comparableTopology(value) {
       if (Array.isArray(group.devices) && !group.devices.length) delete group.devices;
       if (group.collect_enabled == null) delete group.collect_enabled;
     }
-    for (const endpoint of board.point_endpoints || []) if (endpoint.direction === "transmit") delete endpoint.direction;
+    for (const endpoint of board.point_endpoints || []) {
+      if (endpoint.direction === "transmit") delete endpoint.direction;
+      if (endpoint.subset_of == null) delete endpoint.subset_of;
+    }
     const rules = board.point_rules;
     if (rules) {
       for (const key of ["sheet_layout", "raw_representation", "inherit_name", "source_range_warnings", "warn_missing_sig_id"]) if (rules[key] === false) delete rules[key];

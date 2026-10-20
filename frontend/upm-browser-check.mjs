@@ -115,6 +115,7 @@ try {
   await expect(overviewCell("process:name",1)).toHaveText("未转发测点");
   await expect(overviewCell("forward:scale",1)).toHaveText("—");
   await page.getByRole("tab",{name:/采集点表/}).click();
+  await expect(page.locator(".notice").filter({hasText:"转发表的子集"})).toContainText("DSP / UPP_SERVICE");
   await expect(page.locator("tbody tr")).toHaveCount(1);
   await page.locator('tbody [data-column-key="poll_interval"]').dblclick();
   await page.getByLabel("编辑 UPP 轮询间隔",{exact:true}).fill("8");

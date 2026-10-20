@@ -43,6 +43,46 @@ export async function checkUpmPoints({client,engineer,engineerId,viewer,viewerId
   equal((await client.call(`${table}/collect`)).rows.find(r=>r.id===polling.id).poll_interval,7);
   const history=(await client.call(`${url}/sql`,"POST",{sql:"SELECT entity_type,after_data FROM history.events WHERE kind='point' AND entity_type='collect' ORDER BY id DESC LIMIT 1"})).rows;
   equal(history[0].entity_type,"collect");equal(history[0].after_data.poll_interval,7);
+  // JSON endpoint subsets synchronize within the original preview/commit and
+  // keep receiver-only settings, permissions and concurrent merges intact.
+  const dspTable=`${url}/boards/DSP/point-tables`;
+  const sourceRows=(await client.call(`${dspTable}/forward`)).rows;
+  const linkedSource=sourceRows.find(t=>t.wire_type==="S32" &&
+    before.process_points.find(p=>p.id===t.process_point_id)?.internal_type==="F32" &&
+    collect.rows.some(c=>c.id!==polling.id && c.upp_model===t.upp_model && c.address===t.address));
+  ok(linkedSource);
+  const linked=collect.rows.find(c=>c.upp_model===linkedSource.upp_model && c.address===linkedSource.address);
+  const sourceChange=async(values,who=client,operation="update")=>who.raw(`${dspTable}/forward/preview`,"POST",{
+    revision:(await graph()).revision,operation,id:linkedSource.id,values,
+  });
+  await edit("collect",{poll_interval:17,scan_priority:2},linked.id);
+  const pendingReceiver=await preview("collect",{poll_interval:19},linked.id);
+  ok(pendingReceiver.data.allowed);
+  const updatedScale=Number(linkedSource.scale)*2;
+  const sourcePending=await sourceChange({scale:updatedScale});
+  ok(sourcePending.data.allowed,JSON.stringify(sourcePending.data.errors));
+  ok(JSON.stringify(sourcePending.data.impact).includes("collect_points"));
+  await commit(sourcePending.data);
+  let linkedCurrent=(await client.call(`${table}/collect`)).rows.find(r=>r.id===linked.id);
+  equal(linkedCurrent.scale,updatedScale);equal(linkedCurrent.poll_interval,17);equal(linkedCurrent.scan_priority,2);
+  equal(linkedCurrent.byte_order,linked.byte_order);
+  await commit(pendingReceiver.data);
+  linkedCurrent=(await client.call(`${table}/collect`)).rows.find(r=>r.id===linked.id);
+  equal(linkedCurrent.scale,updatedScale);equal(linkedCurrent.poll_interval,19);
+  const subsetMismatch=await preview("collect",{scale:updatedScale*2},linked.id);
+  equal(subsetMismatch.data.allowed,false);
+  ok(subsetMismatch.data.errors.some(error=>error.code==="source_subset"));
+  const deletion=await sourceChange({},client,"delete");
+  equal(deletion.data.allowed,false);
+  ok(deletion.data.errors.some(error=>error.code==="source_subset"));
+  await client.call(`${url}/members`,"PUT",{user_id:engineerId,role:"engineer",edit_scope:"scoped",grants:[{board_key:"DSP",scope:"protocol",endpoint_key:"UPP_SERVICE"}]});
+  equal((await sourceChange({scale:Number(linkedSource.scale)},engineer)).status,403);
+  const restored=await sourceChange({scale:Number(linkedSource.scale)});
+  ok(restored.data.allowed);await commit(restored.data);
+  equal((await client.call(`${table}/collect`)).rows.find(r=>r.id===linked.id).scale,Number(linkedSource.scale));
+  const subsetHistory=(await client.call(`${url}/sql`,"POST",{sql:`SELECT after_data FROM history.events WHERE kind='point' AND entity_type='collect' AND record_id=${linked.id} ORDER BY id DESC LIMIT 1`})).rows;
+  equal(Number(subsetHistory[0].after_data.scale),Number(linkedSource.scale));
+  console.log("PASS: JSON collection subset, atomic source synchronization, independent polling, permissions, deletion guard and concurrent merge");
   const stable=JSON.stringify(await graph());
   const invalid=await preview("collect",{process_point_id:alias.id,endpoint_key:"DSP_UPP",upp_model:1,address:100,wire_type:"U16",wire_length:2});
   equal(invalid.data.allowed,false);equal(JSON.stringify(await graph()),stable);

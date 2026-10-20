@@ -94,7 +94,11 @@
             "code": "DSP_UPP",
             "name": "UPM-DSP UPP 采集",
             "protocol": "UPP",
-            "direction": "collect"
+            "direction": "collect",
+            "subset_of": {
+              "board_key": "DSP",
+              "endpoint_key": "UPP_SERVICE"
+            }
           },
           {
             "code": "MODBUS_SERVICE",

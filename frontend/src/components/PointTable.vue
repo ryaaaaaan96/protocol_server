@@ -577,6 +577,11 @@ function text(row: Row, key: string) {
       <button class="button small" :class="{ primary: categoryFilter == null }" :aria-pressed="categoryFilter == null" :disabled="busy || !!review || !!orderDraft" @click="selectCategory(null)">全部分类 <small>{{ matched.length }}</small></button>
       <button v-for="category in categories" :key="category.key" class="button small" :class="{ primary: categoryFilter === category.key }" :aria-pressed="categoryFilter === category.key" :disabled="busy || !!review || !!orderDraft" @click="selectCategory(category.key)">{{ category.label }} <small>{{ category.count }}</small></button>
     </div>
+    <p v-if="kind === 'collect' && data.options.endpoints.some(endpoint => endpoint.subset_of)" class="notice">
+      本采集表是
+      <span v-for="endpoint in data.options.endpoints.filter(endpoint => endpoint.subset_of)" :key="endpoint.code">{{ endpoint.subset_of.board_key }} / {{ endpoint.subset_of.endpoint_key }} </span>
+      转发表的子集。已选项的协议参数随源转发修改同步；采集周期、优先级和字节序独立保留。新增或调整采集项须匹配源转发参数。
+    </p>
     <div v-if="grid.changedRows.value || grid.hasHistory.value" class="point-grid-draft" role="status" aria-live="polite">
       <span class="point-draft-summary"><i />{{ grid.changedRows.value }} 行 · {{ grid.changedCells.value }} 处修改 <small>{{ draftWithinScope ? '尚未保存' : '缺少编辑授权 · 草稿保留' }}</small></span>
       <div class="inline">

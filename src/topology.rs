@@ -193,7 +193,7 @@ pub async fn preview(
     c.calculation_rule = calculation_rule(&s, &mut tx, pid, &c).await?;
     // SQLx manages the savepoint and rolls it back on early return/drop.
     let mut proposed = tx.begin().await?;
-    let applied = apply_change(&s, &mut proposed, pid, &c).await;
+    let applied = apply_change(&s, &mut proposed, pid, &c, &before).await;
     let applied = match applied {
         Ok(record) => record,
         Err(e) => {
@@ -277,21 +277,23 @@ pub async fn commit(
     } else {
         None
     };
-    let row = apply_change(&s, &mut tx, pid, &c).await.map_err(|error| {
-        if merged {
-            let mut conflict = crate::change_merge::conflict(
-                &c,
-                revision,
-                &format!("合并后无法应用修改：{}", error.1),
-            );
-            if let Some(errors) = error.2.and_then(|details| details.get("errors").cloned()) {
-                conflict.2.as_mut().unwrap()["errors"] = errors;
+    let row = apply_change(&s, &mut tx, pid, &c, &before)
+        .await
+        .map_err(|error| {
+            if merged {
+                let mut conflict = crate::change_merge::conflict(
+                    &c,
+                    revision,
+                    &format!("合并后无法应用修改：{}", error.1),
+                );
+                if let Some(errors) = error.2.and_then(|details| details.get("errors").cloned()) {
+                    conflict.2.as_mut().unwrap()["errors"] = errors;
+                }
+                conflict
+            } else {
+                error
             }
-            conflict
-        } else {
-            error
-        }
-    })?;
+        })?;
     let after = snapshot(&mut tx, pid, true).await?;
     crate::permissions::check_change(&access, &before, &after)?;
     if target.is_some_and(|expected| expected != crate::change_merge::document(&after)) {
@@ -363,7 +365,13 @@ pub async fn commit(
     ))
 }
 
-async fn apply_change(s: &AppState, tx: &mut PgConnection, pid: i64, c: &Change) -> Result<Value> {
+async fn apply_change(
+    s: &AppState,
+    tx: &mut PgConnection,
+    pid: i64,
+    c: &Change,
+    before: &Value,
+) -> Result<Value> {
     let rule = calculation_rule(s, tx, pid, c).await?;
     crate::table_calculation::guard(&c.calculation_rule, &rule)?;
     if !rule.is_null() && c.operation != "delete" {
@@ -437,6 +445,11 @@ async fn apply_change(s: &AppState, tx: &mut PgConnection, pid: i64, c: &Change)
                 record = current.clone();
             }
         }
+    }
+    // Runs after the complete batch/layout calculation, before permissions,
+    // validation, preview diffs, concurrent merge checks and history snapshots.
+    if c.entity != "project_config" {
+        crate::point_subsets::synchronize(tx, pid, before).await?;
     }
     Ok(record)
 }
