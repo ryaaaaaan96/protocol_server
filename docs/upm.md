@@ -40,7 +40,11 @@ DSP1～DSP8 的设备地址分别配置为 1～8，Modbus 基址按 `UPM板内Mo
 {"code":"DSP1","name":"DSP 设备 1","dev_id":1,"modbus_base":50000}
 ```
 
-Modbus 实际地址为 `modbus_base + address`，地址单位为寄存器，数量为 `ceil(wire_length / 2)`。LOCAL 的基址为 0。UPP 的 `address` 是模型内字节偏移；不同设备实例共用模型布局。界面“设备地址”列展示各实例地址，修改模板影响所有实例。
+Modbus 实际地址为 `modbus_base + address`，地址单位为寄存器，数量为 `ceil(wire_length / 2)`。LOCAL 的基址为 0。UPP 的 `address` 是模型内字节偏移；不同设备实例共用模型布局。设备实例地址由后台计算，采集与转发点表不显示“设备地址”汇总列；修改模板影响所有实例。
+
+转发点表默认“按设备展开”，显示设备实例及实际协议地址；DSP1～DSP8 分别显示，LOCAL 仅显示本地实例。展开视图可搜索、分页、设置列与复制，不能单独编辑计算地址。切换“编辑共享模板”可编辑原始偏移及其他参数，或通过行菜单“共享模板详情”定位来源定义；有未保存修改时不能切换视图。总体视图仍按模板关联，不复制数据库记录。
+
+展开由 `UPM/transmit.json` 的 `presentation.row_expansion` 声明，`transmit.js` 选择后台 `device_instances` 的设备名和实际地址；新增同类表仅需配置 JSON/JS，前端不计算地址。
 
 Modbus 优先采用备注中的 `0x03`（HOLDING）或 `0x04`（INPUT）；缺少备注时，本地 RO 使用 INPUT，其余使用 HOLDING。DSP 对外偏移采用 HOLDING。字节序初始为 0，可在 UPM 协议表中修改，部署前需核对固件。
 

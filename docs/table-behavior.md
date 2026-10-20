@@ -58,6 +58,7 @@
 | `overview_hidden_fields` | 仅在总体视图隐藏的列，必须已列入 `columns`；省略时保留全部列 |
 | `overview_leading_fields` | 处理表指定列排在总体视图最前，其余列在转发表后；省略时处理表按原顺序整体在前。转发表配置此项时仅调整其自身列顺序 |
 | `suggestion` | 指定来源引用和服务端已计算的建议字段，允许用户主动采用建议 |
+| `row_expansion` | `{field: "instance_rows", leading_columns: ["instance_device"]}`；把脚本显示字段中的对象数组展开为只读行，保留共享模板编辑入口 |
 
 例如转发表可声明：
 
@@ -78,6 +79,8 @@
 `source_key` 必须是已声明的引用字段，其 `reference` 与建议配置一致。来源选项使用服务端提供的 `process_points`、`endpoints`、`native_groups` 等引用；`fields` 将目标列映射到来源属性。所需建议值缺失时不作浏览器推算。只有当前端点协议适用、同时列入 `editor` 的目标会被“采用建议”修改。
 
 字段可配置 `protocols: ["UPP"]` 或 `["MODBUS"]`，也可同时包含两者；省略表示通用。独立协议视图隐藏不适用列，总体视图保留混合列，但不适用的单元格显示空值且禁止编辑。自定义字段通过既有文本、数字、布尔、选项或引用控件编辑；业务必填和取值约束由表脚本校验。
+
+实例展开字段须声明在 `behavior.project_fields` 和 `fields` 中，不能加入 `editor`。`leading_columns` 声明展开视图新增的前置列；数组内的每个对象仅提供可见列的标量值，例如 `{instance_device: "DSP1", address: 50006}`。其余列继承模板，展开行按前置列自然排序，单表最多 100000 行。展开仅用于查看和复制，修改通过原模板完成；不改变总体视图、协议校验或存储身份。列表读表时，通用引擎为脚本提供 `row.device_instances`，其中 `address` 已按设备实例和协议计算；原始图投影可能没有此显示上下文，脚本应在此时保留空补丁。参见 `config/dc-ups/UPM/transmit.js`。
 
 ## 脚本接口
 

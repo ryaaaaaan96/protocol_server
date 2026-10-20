@@ -16,6 +16,7 @@ import {
 } from "../domain/pointTables";
 import { Search, Plus, ChevronLeft, ChevronRight, GripVertical, Ellipsis, ChevronDown, Undo2, Redo2, Pencil, Check, Copy, CircleHelp } from "@lucide/vue";
 import { columnApplies, displayCell } from "../domain/pointGrid";
+import { expandedPointTable } from "../domain/pointExpansion";
 import { usePointGrid } from "../composables/usePointGrid";
 import { pageSizeOptions, usePageSize } from "../composables/usePageSize";
 import { usePermissionContext } from "../composables/useProjectPermissions";
@@ -53,11 +54,26 @@ const data = ref<PointTableData | null>(null),
   error = ref(""),
   query = ref(""),
   page = ref(1);
+const templateData = ref<PointTableData | null>(null);
+const expanded = ref(false);
+const expandable = computed(() => !!templateData.value?.definition.presentation?.row_expansion);
+function changeExpansion(value: boolean) {
+  if (!templateData.value || dirty.value || busy.value || review.value) return;
+  try {
+    const next = value ? expandedPointTable(templateData.value) : templateData.value;
+    expanded.value = value;
+    data.value = next;
+    page.value = 1;
+  } catch (e) {
+    actionError.value = (e as Error).message;
+    emit("error", actionError.value);
+  }
+}
 const showHelp = ref(false);
 const showNonUploaded = ref(false);
 const permissions = usePermissionContext();
 function scopeEditable(row?: Row | null, values?: Row) {
-  return !!data.value && !data.value.derived && allowsPoint(permissions.state.value, props.boardKey, props.kind, data.value,
+  return !!data.value && !expanded.value && !data.value.derived && allowsPoint(permissions.state.value, props.boardKey, props.kind, data.value,
     row && values ? { ...row, edit_values: { ...row.edit_values, ...values } } : row);
 }
 const canEditTable = computed(() => !data.value?.derived && props.canWrite && scopeEditable());
@@ -83,6 +99,7 @@ watch(
       cancelled = true;
     });
     data.value = null;
+    templateData.value = null;
     error.value = "";
     editing.value = false;
     orderDraft.value = null;
@@ -99,7 +116,9 @@ watch(
           const protocol = result.options.endpoints.find((endpoint: Row) => endpoint.code === props.endpointKey)?.protocol;
           result.definition = definitionForProtocol(result.definition, protocol);
         }
-        data.value = result;
+        templateData.value = result;
+        expanded.value = !!result.definition.presentation?.row_expansion;
+        data.value = expanded.value ? expandedPointTable(result) : result;
       }
     } catch (e) {
       if (!cancelled) error.value = (e as Error).message;
@@ -110,7 +129,7 @@ watch(
 watch(
   () => [data.value, props.focusId],
   () => {
-    const row = data.value?.rows.find((r) => r.id === props.focusId);
+    const row = templateData.value?.rows.find((r) => r.id === props.focusId);
     if (row) open(row);
   },
 );
@@ -290,7 +309,7 @@ const menuItems = computed(() => {
   if (!menu) return [];
   if (menu.type === "row") {
     return [
-      ...(!data.value?.derived ? [{ key: "detail", label: "记录详情" }] : []),
+      ...(!data.value?.derived ? [{ key: "detail", label: expanded.value ? "共享模板详情" : "记录详情" }] : []),
       { key: "copy-row", label: "复制此行" },
       ...(grid.selectedRowIds.value.length ? [{ key: "copy-rows", label: "复制选中行" }] : []),
       ...(props.kind === "process" && props.allowForward ? [{ key: "forward", label: "转发配置" }] : []),
@@ -359,6 +378,7 @@ function menuAction(action: string) {
 }
 watch([data, page, pageSize, query, displayColumns, busy, review], () => { tableMenu.value = null; });
 function cellHint(row: Row, column: string) {
+  if (expanded.value) return "设备实例为计算视图，可选择和复制；通过共享模板详情修改定义，修改影响同组全部实例。";
   const key = grid.field(column);
   if (data.value && !columnApplies(data.value, column, { ...row, ...grid.values(row) })) return "此字段不适用于当前端点协议。";
   if (data.value && hasRecommendation(data.value) && key && recommendationFields(data.value).includes(key))
@@ -414,6 +434,11 @@ watch(pages, (n) => {
 });
 function open(row: Row | null) {
   if (!discard()) return;
+  if (expanded.value) {
+    row = templateData.value?.rows.find(item => item.id === (row?.template_id ?? row?.id)) || null;
+    if (!row) return;
+    changeExpansion(false);
+  }
   selected.value = row;
   editing.value = true;
 }
@@ -558,6 +583,10 @@ function text(row: Row, key: string) {
         />
       </div>
       <div class="inline">
+        <div v-if="expandable" class="inline" role="group" aria-label="转发表显示方式">
+          <button class="button small" :class="{ primary: expanded }" :aria-pressed="expanded" :disabled="dirty || busy || !!review || editing" @click="changeExpansion(true)">按设备展开</button>
+          <button class="button small" :class="{ primary: !expanded }" :aria-pressed="!expanded" :disabled="dirty || busy || !!review || editing" @click="changeExpansion(false)">编辑共享模板</button>
+        </div>
         <label v-if="props.kind === 'process' && def.hidden_source_sig_ids?.length" class="inline"><input v-model="showNonUploaded" type="checkbox" :disabled="dirty || busy || !!review" />显示未分配 sigID 的点</label>
         <button v-if="hasRecalculation(def) && canEditTable" class="button small" :disabled="dirty || busy || !!review" :title="def.calculation ? '按当前配置计算整张表的字节数和偏移，预览后保存' : '重新计算脚本声明的联动字段，预览后保存'" @click="previewCalculation">{{ def.calculation ? '重算协议布局' : '重算表规则' }}</button>
         <button v-if="canEditTable" class="button small" :disabled="!grid.activeRow.value || !grid.active.value || !grid.editable(grid.activeRow.value, grid.active.value.column)" @click="grid.activeRow.value && grid.active.value && grid.start(grid.activeRow.value, grid.active.value.column)"><Pencil :size="14" />编辑单元格</button>
@@ -577,6 +606,7 @@ function text(row: Row, key: string) {
       <button v-for="category in categories" :key="category.key" class="button small" :class="{ primary: categoryFilter === category.key }" :aria-pressed="categoryFilter === category.key" :disabled="busy || !!review || !!orderDraft" @click="selectCategory(category.key)">{{ category.label }} <small>{{ category.count }}</small></button>
     </div>
     <p v-if="data.derived" class="notice">本采集表由源转发表和映射规则自动生成。请在源点表调整数据，在配置文件中调整采集参数和地址展开规则。</p>
+    <p v-if="expanded" class="notice">当前按设备实例展开，协议地址由后台计算。此视图用于查看和复制；通过“编辑共享模板”或行菜单“共享模板详情”修改定义，修改会影响同组全部设备。</p>
     <p v-if="kind === 'collect' && data.options.endpoints.some(endpoint => endpoint.subset_of)" class="notice">
       本采集表是
       <span v-for="endpoint in data.options.endpoints.filter(endpoint => endpoint.subset_of)" :key="endpoint.code">{{ endpoint.subset_of.board_key }} / {{ endpoint.subset_of.endpoint_key }} </span>
@@ -667,7 +697,7 @@ function text(row: Row, key: string) {
       </template>
       <span v-if="copyFeedback" class="point-copy-feedback">{{ copyFeedback }}</span>
       <template v-else-if="grid.active.value && grid.activeRow.value"><strong>{{ def.fields[grid.active.value.column].column_label || def.fields[grid.active.value.column].label }}</strong><span>{{ cellHint(grid.activeRow.value, grid.active.value.column) }}</span></template>
-      <span v-else-if="!selectionLabel">{{ scopeEditable() ? `选择一个单元格开始${canEditTable ? '编辑' : '查看'}。计算列随来源数据更新。` : '本表未获编辑授权，可以查看和复制。请联系管理员分配板卡和协议权限。' }}</span>
+      <span v-else-if="!selectionLabel">{{ expanded ? '设备展开视图可选择和复制，修改请进入共享模板。' : scopeEditable() ? `选择一个单元格开始${canEditTable ? '编辑' : '查看'}。计算列随来源数据更新。` : '本表未获编辑授权，可以查看和复制。请联系管理员分配板卡和协议权限。' }}</span>
       <button v-if="data && hasRecommendation(data) && grid.activeRow.value && canEditTable && communicationDiffers(data, grid.values(grid.activeRow.value), grid.activeRow.value)" class="button small" :disabled="busy || !!review || !!orderDraft || !scopeEditable(grid.activeRow.value)" @click="grid.applyRecommendation(grid.activeRow.value)">应用通信建议</button>
     </div>
     <Empty

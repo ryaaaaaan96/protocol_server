@@ -145,7 +145,7 @@ function done(merged = false) {
           @click="selectGroup(group.code)">{{ group.code }} · {{ group.name }}</button>
         <button v-if="groups.length > 1" class="button small" :aria-pressed="groupKey == null" @click="selectGroup()">全部分组</button>
       </div>
-      <p v-if="groups.some(group => group.devices?.length)" class="notice">同组设备共用点表模板，每个设备的地址独立配置。Modbus 实际地址在“设备地址”列显示。</p>
+      <p v-if="groups.some(group => group.devices?.length)" class="notice">同组设备共用点表模板，系统根据设备实例配置计算实际通信地址。</p>
       <div class="entity-tabs" role="tablist" aria-label="板卡内表格">
         <button v-if="hasOverview" role="tab" :aria-selected="sheetKey === 'overview'" :class="{ selected: sheetKey === 'overview' }"
           @click="selectSheet('overview')">总体视图</button>

@@ -91,6 +91,14 @@ export function tableBehaviorFixture(manifest, directory) {
   const addBehavior = (filename, behavior, fields, editable, script) => {
     const file = path.join(directory, "UPM", `${filename}.json`);
     const definition = JSON.parse(fs.readFileSync(file, "utf8"));
+    // This fixture replaces the source table's behavior, including its display hook.
+    const expansion = definition.presentation?.row_expansion;
+    if (expansion) {
+      for (const key of [expansion.field, ...expansion.leading_columns]) {
+        if (!definition.columns.includes(key) && !definition.editor.includes(key)) delete definition.fields[key];
+      }
+      delete definition.presentation.row_expansion;
+    }
     definition.behavior = {engine:"javascript", script_file:`${filename}-behavior.js`, ...behavior};
     Object.assign(definition.fields, fields);
     definition.columns.push(...Object.keys(fields));

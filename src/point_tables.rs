@@ -333,6 +333,7 @@ fn validate_presentation(table: &Value, fields: &serde_json::Map<String, Value>)
             "overview_leading_fields",
             "computed_dependencies",
             "suggestion",
+            "row_expansion",
         ]
         .contains(&key.as_str())
     }) {
@@ -343,6 +344,41 @@ fn validate_presentation(table: &Value, fields: &serde_json::Map<String, Value>)
             .as_str()
             .is_some_and(|key| presentation_key(key) && fields.contains_key(key))
     };
+    if let Some(expansion) = presentation.get("row_expansion") {
+        let expansion = expansion
+            .as_object()
+            .filter(|v| {
+                v.len() == 2 && v.contains_key("field") && v.contains_key("leading_columns")
+            })
+            .ok_or(AppError::bad(
+                "presentation.row_expansion 须包含 field 和 leading_columns",
+            ))?;
+        let field = &expansion["field"];
+        let mut seen = BTreeSet::new();
+        if !known(field)
+            || !table["behavior"]["project_fields"]
+                .as_array()
+                .is_some_and(|keys| keys.contains(field))
+            || table["editor"]
+                .as_array()
+                .is_some_and(|keys| keys.contains(field))
+            || expansion["leading_columns"]
+                .as_array()
+                .is_none_or(|columns| {
+                    columns.is_empty()
+                        || columns.len() > 16
+                        || columns.iter().any(|column| {
+                            !known(column)
+                                || column == field
+                                || !seen.insert(column.as_str().unwrap_or(""))
+                        })
+                })
+        {
+            return Err(AppError::bad(
+                "row_expansion.field 必须引用只读脚本显示字段，leading_columns 须为 1～16 个已声明的不重复字段",
+            ));
+        }
+    }
     if presentation
         .get("category_filter")
         .is_some_and(|v| !known(v))
@@ -788,6 +824,9 @@ mod tests {
             json!(null),
             json!([]),
             json!({"unsupported":true}),
+            json!({"row_expansion":true}),
+            json!({"row_expansion":{"field":"missing","leading_columns":["signal_name"]}}),
+            json!({"row_expansion":{"field":"signal_name","leading_columns":["signal_name"]}}),
             json!({"category_filter":"missing"}),
             json!({"category_filter":[]}),
             json!({"empty_text":false}),
@@ -837,6 +876,24 @@ mod tests {
             "computed_dependencies":{"effective_type":["recommended_wire_type"]}
         });
         validate_table_file("forward", &table).unwrap();
+    }
+
+    #[test]
+    fn row_expansion_requires_declared_readonly_fields() {
+        let base = configuration()["boards"]["UPM"]["forward"].clone();
+        validate_table_file("forward", &base).unwrap();
+        for expansion in [
+            json!({"field":"instance_rows"}),
+            json!({"field":"instance_rows","leading_columns":[]}),
+            json!({"field":"instance_rows","leading_columns":["missing"]}),
+            json!({"field":"instance_rows","leading_columns":["instance_rows"]}),
+            json!({"field":"instance_rows","leading_columns":["instance_device","instance_device"]}),
+            json!({"field":"instance_rows","leading_columns":["instance_device"],"extra":true}),
+        ] {
+            let mut table = base.clone();
+            table["presentation"]["row_expansion"] = expansion;
+            assert!(validate_table_file("forward", &table).is_err());
+        }
     }
 
     #[test]

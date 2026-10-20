@@ -17,8 +17,7 @@
     "acquisition_mode",
     "poll_interval",
     "set_priority",
-    "scan_priority",
-    "device_addresses"
+    "scan_priority"
   ],
   "editor": [
     "process_point_id",

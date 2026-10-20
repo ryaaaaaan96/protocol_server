@@ -10,6 +10,8 @@ const board=manifest.topology.board_types.find(b=>b.code==="UPM");
 const definitions={};
 for(const [kind,file] of [["process","process"],["collect","collect"],["forward","transmit"]])
   definitions[kind]=JSON.parse(await readFile(new URL(`../config/dc-ups/UPM/${file}.json`,import.meta.url),"utf8"));
+const script=await readFile(new URL("../config/dc-ups/UPM/transmit.js",import.meta.url),"utf8");
+const {behavior}=await import(`data:text/javascript;base64,${Buffer.from(script).toString("base64")}`);
 const points=[
   {id:1,board_key:"UPM",group_key:"LOCAL",name:"本地电压",enum_name:"LOCAL_VOLTAGE",sig_id:101,internal_type:"U16",element_count:1,byte_length:2},
   {id:2,board_key:"UPM",group_key:"DSP",name:"DSP 电压",enum_name:"DSP_VOLTAGE",sig_id:201,internal_type:"U16",element_count:1,byte_length:2},
@@ -29,8 +31,16 @@ const data=kind=>({
     endpoints:board.point_endpoints.filter(e=>kind==="collect"?e.direction==="collect":e.direction!=="collect")},
   rows:(kind==="process"?points:kind==="collect"?collect:forward).map(row=>{
     const p=kind==="process"?row:points.find(p=>p.id===row.process_point_id);
-    return {...row,group_key:p.group_key,signal_name:p.name,enum_name:p.enum_name,
+    const result={...row,group_key:p.group_key,signal_name:p.name,enum_name:p.enum_name,
       endpoint_name:board.point_endpoints.find(e=>e.code===row.endpoint_key)?.name,edit_values:{...row}};
+    if(kind==="forward") {
+      const protocol=board.point_endpoints.find(e=>e.code===row.endpoint_key)?.protocol;
+      result.device_instances=board.point_groups.find(g=>g.code===p.group_key).devices.map(device=>({
+        ...device,address:row.address+(protocol==="MODBUS"?device.modbus_base:0),
+      }));
+      Object.assign(result,behavior({action:"project",rows:[result],sources:points}).at(0).values);
+    }
+    return result;
   }),
 });
 const errors=[],requests=[];
@@ -85,6 +95,7 @@ try {
   await expect(overviewRows()).toHaveCount(2);
   await expect(overviewCell("forward:endpoint_name",0)).toHaveText("Modbus 对外表");
   await expect(overviewCell("forward:endpoint_name",1)).toHaveText("CSU-UPM UPP 对外表");
+  await expect(page.locator('[data-column-key="forward:device_addresses"]')).toHaveCount(0);
   await expect(overviewCell("forward:upp_model",0)).toHaveAttribute("aria-readonly","true");
   await expect(overviewCell("forward:register_type",1)).toHaveAttribute("aria-readonly","true");
   await overviewCell("process:name").dblclick();
@@ -105,11 +116,17 @@ try {
   await page.getByRole("button",{name:"继续编辑",exact:true}).click();
   await page.getByRole("tab",{name:/转发点表 · MODBUS/}).click();
   await expect(page.locator("tbody tr")).toHaveCount(1);
+  await expect(page.getByRole("button",{name:"按设备展开",exact:true})).toHaveAttribute("aria-pressed","true");
+  await expect(page.locator('tbody [data-column-key="instance_device"]')).toHaveText("LOCAL");
+  await expect(page.locator('tbody [data-column-key="address"]')).toHaveText("31000");
+  await expect(page.locator('tbody [data-column-key="address"]')).toHaveAttribute("aria-readonly","true");
   await expect(page.getByRole("columnheader",{name:/Modbus 寄存器区/})).toBeVisible();
+  await expect(page.locator('[data-column-key="device_addresses"]')).toHaveCount(0);
   await expect(page.getByRole("columnheader",{name:/UPP 模型号/})).toHaveCount(0);
   await page.getByRole("tab",{name:/转发点表 · UPP/}).click();
   await expect(page.locator("tbody tr")).toHaveCount(1);
   await expect(page.getByRole("columnheader",{name:/UPP 模型号/})).toBeVisible();
+  await expect(page.locator('[data-column-key="device_addresses"]')).toHaveCount(0);
   await expect(page.getByRole("columnheader",{name:/Modbus 寄存器区/})).toHaveCount(0);
   await page.getByRole("button",{name:"DSP · DSP 设备共享模板",exact:true}).click();
   await page.getByRole("tab",{name:"总体视图",exact:true}).click();
@@ -117,6 +134,7 @@ try {
   await expect(overviewCell("process:name",1)).toHaveText("未转发测点");
   await expect(overviewCell("forward:scale",1)).toHaveText("—");
   await page.getByRole("tab",{name:/采集点表/}).click();
+  await expect(page.locator('[data-column-key="device_addresses"]')).toHaveCount(0);
   await expect(page.locator(".notice").filter({hasText:"转发表的子集"})).toContainText("DSP / UPP_SERVICE");
   await expect(page.locator("tbody tr")).toHaveCount(1);
   await page.locator('tbody [data-column-key="poll_interval"]').dblclick();
@@ -127,8 +145,51 @@ try {
   assert.equal(requests.at(-1).body.rows[0].values.poll_interval,8);
   await page.getByRole("button",{name:"继续编辑",exact:true}).click();
   await page.getByRole("tab",{name:/转发点表 · MODBUS/}).click();
+  await expect(page.locator("tbody tr")).toHaveCount(8);
+  await expect(page.locator('tbody [data-column-key="instance_device"]')).toHaveText(["DSP1","DSP2","DSP3","DSP4","DSP5","DSP6","DSP7","DSP8"]);
+  await expect(page.locator('tbody [data-column-key="address"]')).toHaveText(["50000","51000","52000","53000","54000","55000","56000","57000"]);
+  await expect(page.locator('[data-column-key="device_addresses"]')).toHaveCount(0);
+  await expect(page.locator("tbody")).not.toContainText("DSP1: 50000；DSP8: 57000");
+  const beforeReadOnly=requests.length;
+  await page.locator('tbody [data-column-key="address"]').last().dblclick();
+  await expect(page.getByLabel("编辑 协议地址 / 偏移",{exact:true})).toHaveCount(0);
+  assert.equal(requests.length,beforeReadOnly);
+  await page.getByRole("textbox",{name:"搜索当前表格",exact:true}).fill("DSP8");
   await expect(page.locator("tbody tr")).toHaveCount(1);
-  await expect(page.locator("tbody")).toContainText("DSP1: 50000；DSP8: 57000");
+  await expect(page.locator('tbody [data-column-key="address"]')).toHaveText("57000");
+  await page.getByRole("textbox",{name:"搜索当前表格",exact:true}).fill("");
+  await expect(page.locator("tbody tr")).toHaveCount(8);
+  await page.locator("tbody tr").last().getByRole("button",{name:/记录操作/}).click();
+  await page.getByRole("menuitem",{name:"共享模板详情",exact:true}).click();
+  await expect(page.locator("dialog")).toContainText("编辑转发点表");
+  await page.locator("dialog").getByRole("button",{name:"关闭",exact:true}).last().click();
+  await expect(page.locator("tbody tr")).toHaveCount(1);
+  await expect(page.locator('tbody [data-column-key="address"]')).toHaveText("0");
+  await page.locator('tbody [data-column-key="address"]').dblclick();
+  await page.getByLabel("编辑 协议地址 / 偏移",{exact:true}).fill("6");
+  await page.getByLabel("编辑 协议地址 / 偏移",{exact:true}).press("Enter");
+  await expect(page.getByRole("button",{name:"按设备展开",exact:true})).toBeDisabled();
+  await page.getByRole("button",{name:"检查",exact:true}).click();
+  assert.ok(requests.at(-1).path.endsWith("/forward/batch/preview"));
+  assert.equal(requests.at(-1).body.rows[0].id,3);
+  assert.deepEqual(requests.at(-1).body.rows[0].values,{address:6});
+  await page.getByRole("button",{name:"继续编辑",exact:true}).click();
+  await page.getByRole("button",{name:"放弃修改",exact:true}).click();
+  await page.getByRole("button",{name:"按设备展开",exact:true}).click();
+  await expect(page.locator("tbody tr")).toHaveCount(8);
+  // The generic view never mutates storage IDs, associations or source data.
+  const expansionChecks=await page.evaluate(async source=>{
+    const {expandedPointTable}=await import('/src/domain/pointExpansion.ts');
+    const original=JSON.stringify(source),expanded=expandedPointTable(source);
+    const invalid=structuredClone(source);
+    invalid.rows[0].instance_rows[0].process_point_id=999;
+    let rejected=false;
+    try {expandedPointTable(invalid);} catch {rejected=true;}
+    return {unchanged:JSON.stringify(source)===original,rejected,
+      ids:new Set(expanded.rows.map(row=>row.id)).size,count:expanded.rows.length,
+      editors:expanded.definition.editor,templates:[...new Set(expanded.rows.map(row=>row.template_id))]};
+  },data("forward"));
+  assert.deepEqual(expansionChecks,{unchanged:true,rejected:true,ids:10,count:10,editors:[],templates:[3,1,2]});
   await page.route("**/__upm_import",route=>route.fulfill({contentType:"text/html; charset=utf-8",body:`<!doctype html><html><head><meta charset="utf-8"></head><body><div id="test"></div><script type="module">
     import {createApp,h} from '/node_modules/.vite/deps/vue.js';
     import ImportModal from '/src/components/ImportModal.vue';
@@ -146,5 +207,5 @@ try {
   await expect(page.locator(".confirm-checkbox")).toContainText("确认替换 UPM 控制板 板卡的点表");
   await expect(page.locator(".confirm-checkbox")).toContainText("保留项目拓扑和其他板卡数据");
   assert.deepEqual(errors,[]);
-  console.log("PASS: UPM local/DSP templates, collection cell editing and separate Modbus/UPP views");
+  console.log("PASS: UPM collection editing, hidden device addresses, JSON/JS device expansion and shared template editing");
 } finally { await browser?.close();await server.close(); }

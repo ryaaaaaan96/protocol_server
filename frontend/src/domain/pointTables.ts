@@ -22,6 +22,7 @@ export type PointDefinition = {
     overview_hidden_fields?: string[];
     overview_leading_fields?: string[];
     computed_dependencies?: Record<string, string[]>;
+    row_expansion?: { field: string; leading_columns: string[] };
     suggestion?: { reference: string; source_key: string; fields: Record<string, string>; description?: string };
   };
   mapping?: Record<string, unknown>;

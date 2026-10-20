@@ -4,7 +4,20 @@
   "label": "转发点表",
   "description": "LOCAL 和 DSP 内部点分别映射到 Modbus 或 UPP；Modbus 按设备基址展开，同一点可对应多个对外地址。",
   "presentation": {
-    "overview_hidden_fields": ["signal_name"]
+    "overview_hidden_fields": ["signal_name"],
+    "row_expansion": {
+      "field": "instance_rows",
+      "leading_columns": ["instance_device"]
+    }
+  },
+  "behavior": {
+    "engine": "javascript",
+    "script_file": "transmit.js",
+    "parameters": {},
+    "editable_fields": [],
+    "metadata_fields": [],
+    "project_fields": ["instance_rows", "instance_device"],
+    "owned_fields": []
   },
   "columns": [
     "signal_name",
@@ -19,8 +32,7 @@
     "register_count",
     "scale",
     "access",
-    "byte_order",
-    "device_addresses"
+    "byte_order"
   ],
   "editor": [
     "process_point_id",
@@ -54,6 +66,12 @@
     "byte_order": "byte_order"
   },
   "fields": {
+    "instance_rows": {
+      "label": "实例展开数据"
+    },
+    "instance_device": {
+      "label": "设备实例"
+    },
     "enum_name": {
       "label": "ENMU"
     },

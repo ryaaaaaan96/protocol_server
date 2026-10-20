@@ -37,6 +37,18 @@ export async function checkUpmPoints({client,engineer,engineerId,viewer,viewerId
   equal(forward.rows.filter(r=>r.endpoint_key==="UPP_SERVICE").length,29);
   ok(forward.rows.some(r=>r.group_key==="DSP" && r.device_addresses.includes("DSP1: 50000") && r.device_addresses.includes("DSP8: 57000")));
   ok(forward.rows.filter(r=>r.endpoint_key==="MODBUS_SERVICE").every(r=>r.register_count===Math.ceil(r.wire_length/2)));
+  ok(!collect.definition.columns.includes("device_addresses"));
+  ok(!forward.definition.columns.includes("device_addresses"));
+  equal(forward.definition.presentation.row_expansion.field,"instance_rows");
+  for(const row of forward.rows) {
+    const devices=upm.point_groups.find(group=>group.code===row.group_key).devices;
+    equal(row.instance_rows.length,devices.length);
+    for(const [index,device] of devices.entries()) {
+      equal(row.instance_rows[index].instance_device,device.code);
+      equal(row.instance_rows[index].address,row.address+(row.protocol==="MODBUS"?device.modbus_base:0));
+    }
+    equal(row.edit_values.address,row.address);
+  }
   const polling=collect.rows.find(r=>r.acquisition_mode==="poll" && r.poll_interval===3);
   const first=await preview("collect",{poll_interval:7},polling.id);
   equal(first.status,200);ok(first.data.allowed,JSON.stringify(first.data.errors));

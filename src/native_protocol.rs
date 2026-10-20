@@ -69,6 +69,24 @@ pub fn project_row(row: &mut Value, board: &Value, kind: &str) {
     if modbus {
         row["register_count"] = json!((num(row, "wire_length") + 1) / 2);
     }
+    // Provide structured, computed instances to table scripts without copying
+    // template records or exposing device addressing as an editable field.
+    row["device_instances"] = json!(
+        devices(board, &row["group_key"])
+            .into_iter()
+            .map(|mut device| {
+                device["address"] = json!(
+                    num(row, "address")
+                        + if kind == "forward" && modbus {
+                            num(&device, "modbus_base")
+                        } else {
+                            0
+                        }
+                );
+                device
+            })
+            .collect::<Vec<_>>()
+    );
     row["device_addresses"] = json!(
         devices(board, &row["group_key"])
             .iter()
@@ -474,6 +492,43 @@ pub fn generate(g: &Value, board: &Value) -> BTreeMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn device_expansion_projects_actual_addresses_without_changing_templates() {
+        let files =
+            crate::project_files::ProjectFiles::load_from(std::path::Path::new("config")).unwrap();
+        let definition = &files.definition(Some("dc-ups")).unwrap()["boards"]["UPM"]["forward"];
+        let board = json!({"point_groups":[{"code":"SHARED","devices":[
+            {"code":"UNIT1","modbus_base":50000,"dev_id":1},
+            {"code":"UNIT8","modbus_base":57000,"dev_id":8}
+        ]}],"point_endpoints":[{"code":"REGISTERS","protocol":"MODBUS"},
+            {"code":"BYTES","protocol":"UPP"}]});
+        let original = json!({"id":7,"group_key":"SHARED","endpoint_key":"REGISTERS",
+            "address":6,"wire_length":4,"metadata":{}});
+        let mut row = original.clone();
+        project_row(&mut row, &board, "forward");
+        let mut projected = vec![row];
+        crate::table_behavior::project(definition, &mut projected, &[]).unwrap();
+        assert_eq!(projected[0]["address"], 6);
+        assert_eq!(projected[0]["register_count"], 2);
+        assert_eq!(projected[0]["device_instances"][1]["dev_id"], 8);
+        assert_eq!(
+            projected[0]["instance_rows"],
+            json!([
+                {"instance_device":"UNIT1","address":50006},
+                {"instance_device":"UNIT8","address":57006}
+            ])
+        );
+        let mut upp = original.clone();
+        upp["endpoint_key"] = json!("BYTES");
+        project_row(&mut upp, &board, "forward");
+        assert_eq!(upp["device_instances"][1]["address"], 6);
+        let mut collect = original.clone();
+        project_row(&mut collect, &board, "collect");
+        assert_eq!(collect["device_instances"][1]["address"], 6);
+        // Raw graph validation uses the same script without table-only context.
+        crate::table_behavior::project(definition, &mut [original], &[]).unwrap();
+    }
 
     #[test]
     fn source_range_warning_does_not_allow_new_invalid_edits() {
