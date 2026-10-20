@@ -106,6 +106,8 @@ pub fn project_forward(row: &mut Value, point: &Value) {
     row["name"] = point["name"].clone();
     row["field_name"] = point["name"].clone();
     row["enabled"] = json!(true);
+    row["conversion"] = wire_defaults(point, row["wire_type"].as_str())["conversion"].clone();
+    row["byte_order"] = json!(0);
     let mut point = point.clone();
     project(&mut point);
     for field in ["category", "variable_name", "sheet_type"] {
@@ -483,14 +485,19 @@ mod tests {
         let point = json!({"name":"更新后的数据名称","enum_name":"SAMPLE",
             "internal_type":"U16","element_count":1,"byte_length":2,
             "metadata":{"category":"系统参数1"}});
-        let mut mapping = json!({"name":"旧转发名称","enabled":false,
-            "edit_values":{"name":"旧转发名称","enabled":false}});
+        let mut mapping = json!({"name":"旧转发名称","enabled":false,"wire_type":"U16",
+            "conversion":"fixed_point","byte_order":2,
+            "edit_values":{"name":"旧转发名称","enabled":false,"conversion":"fixed_point","byte_order":2}});
         project_forward(&mut mapping, &point);
         assert_eq!(mapping["name"], point["name"]);
         assert_eq!(mapping["field_name"], point["name"]);
         assert_eq!(mapping["enabled"], true);
+        assert_eq!(mapping["conversion"], "identity");
+        assert_eq!(mapping["byte_order"], 0);
         assert_eq!(mapping["edit_values"]["name"], "旧转发名称");
         assert_eq!(mapping["edit_values"]["enabled"], false);
+        assert_eq!(mapping["edit_values"]["conversion"], "fixed_point");
+        assert_eq!(mapping["edit_values"]["byte_order"], 2);
     }
 
     #[test]

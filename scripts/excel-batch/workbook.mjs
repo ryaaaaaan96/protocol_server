@@ -5,10 +5,10 @@ export const columns = {
   // This offline example follows the DSP internal worksheet. Other boards may
   // define a different set of editable fields in their own process.json.
   process: ["name", "variable_name", "sheet_type", "enum_table", "display_digits", "element_count", "default_value", "max_value", "min_value", "unit", "access", "ram", "flash", "eeprom", "calibration", "structure", "cpu", "upload_level", "category", "notes"],
-  forward: ["process_point_id", "endpoint_key", "address", "wire_type", "wire_length", "scale", "access", "byte_order", "conversion"],
+  forward: ["process_point_id", "endpoint_key", "address", "wire_type", "wire_length", "scale", "access"],
 };
 const legacyProcessColumns = ["group_key", "enum_name", "sig_id", "internal_type", "flags", "callback", "process_enabled", "boot_restore", "manual_restore"];
-const legacyForwardColumns = ["name", "enabled", "upp_model"];
+const legacyForwardColumns = ["name", "enabled", "upp_model", "byte_order", "conversion"];
 const numbers = new Set(["sig_id", "display_digits", "element_count", "process_point_id", "upp_model", "address", "wire_length", "byte_order"]);
 const booleans = new Set(["process_enabled", "boot_restore", "manual_restore", "enabled"]);
 const required = {
@@ -41,8 +41,8 @@ const descriptions = {
   upp_model: "兼容旧模板；DSP 型号由内部点的数据分类固定推导，填写不同值将拒绝", address: "UPP偏移地址（必填，单位字节）",
   wire_type: "数据类型 U8/U16/S16/U32/S32/F32/STRING；留空采用内部 DateType / ArrayCnt 推导建议，偏离建议时提示",
   wire_length: "UPP协议字节数；留空按所选类型计算", scale: "比例系数，支持小数；留空按转换方式及内部显示精度建议",
-  access: "访问属性 RO/WO/RW，默认 RO", byte_order: "字节序，默认 0",
-  conversion: "identity/fixed_point/array_bytes；留空按内部类型与通信类型推导", enabled: "兼容旧模板；DSP 转发记录全部参与协议，不能填写 false",
+  access: "访问属性 RO/WO/RW，默认 RO", byte_order: "兼容旧模板；DSP 不单独配置字节序，规范为 0",
+  conversion: "兼容旧模板；DSP 按内部类型与通信类型自动推导", enabled: "兼容旧模板；DSP 转发记录全部参与协议，不能填写 false",
   ram: "RAM：Y/N，默认 N", flash: "FLASH：Y/N，默认 Y",
   eeprom: "EEPROM：Y/N，默认 N", calibration: "Calibration：Y/N，默认 Y",
   structure: "STRUCT，留空表示未指定", cpu: "数据来自CPU：CPU1/CPU2，默认 CPU2",
@@ -174,7 +174,7 @@ export async function writeTemplate(file, kind) {
   if (kind === "forward") {
     help.addRow(["数据名称", "由关联内部点统一提供，无需另填转发字段名称；所有转发记录参与协议，不提供单独启用开关。"]);
     help.addRow(["分类", "UPP 模型号由关联内部点的数据分类固定推导，无需填写。请先为内部点选择有效分类。"]);
-    help.addRow(["建议配置", "wire_type/wire_length/scale/conversion 可留空，由服务端成套建议。手工类型偏离建议会提示，仍须通过转换、长度及地址校验。"]);
+    help.addRow(["建议配置", "wire_type/wire_length/scale 可留空，由服务端成套建议。数据转换由内部与通信类型自动推导，DSP 不单独配置字节序。手工类型偏离建议会提示，仍须通过类型、长度及地址校验。"]);
   }
   help.addRow(["规则", "第 1 行保留英文字段名，第 2 行开始填数据；仅处理指定工作表，每批最多 200 行。"]);
   help.addRow(["空值", "空单元格省略，采用字段默认值。代码和 ID 请用 --references 查询，不能跨项目复用。"]);

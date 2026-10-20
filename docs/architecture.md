@@ -62,7 +62,7 @@ erDiagram
 
 转发以 `process_point_id` 关联内部点，修改变量名不会断开关系。数据库外键防止跨项目引用，应用校验确保相同板卡且端点、分组在生效 JSON 中存在。移除被数据或授权引用的配置会被拒绝。
 
-`address` 是明确的 UPP 字节偏移，拖动行只改 `display_order`。内部 F32 与线上 S32 可使用显式 `fixed_point` 转换；数组可用 `array_bytes` 映射。DSP 内部没有 sigID；通用存储中的可空 `sig_id` 仅为兼容字段，不属于 DSP sheet 的显示或编辑定义。
+`address` 是明确的 UPP 字节偏移，拖动行只改 `display_order`。DSP 转换自动确定：同类型为 `identity`，内部 F32 与线上 S32 为 `fixed_point`，数组到 STRING 为 `array_bytes`；长度、系数及类型组合仍须通过校验。DSP 不提供转换方式和字节序的独立输入。通用 `conversion`、`byte_order` 列保留兼容其他板卡和旧 Dump；DSP 写入、读取及生成使用自动转换结果，字节序兼容值为 0，旧值不影响 DSP 校验和生成。字节序属于接收端配置，UPM 本次不配置。DSP 内部没有 sigID；通用存储中的可空 `sig_id` 仅为兼容字段，不属于 DSP sheet 的显示或编辑定义。
 
 原工作簿 `UPM-DSP采集数据!O2` 按型号分段计算偏移：常规字段为 `6 + 同型号前面各行的通信字节数之和`，每个型号重新起算。六个名称使用固定偏移：固件版本号版本 48、机器型号 8、机器版本号 24、序列号 62、机器型号编码 94、设备类型编码 96。导入读取 Excel 已计算的 O 列结果；网页新增默认偏移为 6，需按协议设置，不自动寻找空位或紧排。界面 `effective_address`（UPP偏移地址）和导出 XML 的 `OffsetAddr` 均直接使用 `address`，不再加帧头或型号。相同板卡、端点及型号内，DSP 所有转发字段的 `[address, address + wire_length)` 区间不能重叠；不同型号可以使用相同偏移。
 

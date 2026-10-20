@@ -68,7 +68,7 @@ test("templates cover each table without overwriting existing files", async t =>
       }
     }
     if (kind === "forward") {
-      for (const derived of ["upp_model", "name", "enabled"]) assert.equal(actualHeaders.includes(derived), false);
+      for (const derived of ["upp_model", "name", "enabled", "conversion", "byte_order"]) assert.equal(actualHeaders.includes(derived), false);
     }
     await assert.rejects(writeTemplate(file, kind), { code: "EEXIST" });
     await assert.rejects(readRows(file, kind), /当前 0 行/);

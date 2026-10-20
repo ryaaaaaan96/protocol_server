@@ -46,7 +46,7 @@ export async function checkExcelBatch({client, equal, ok, fixtureKey}) {
     const forwardFile=path.join(temporary,"forward.xlsx"),forwardReport=path.join(temporary,"forward-report.json");
     await populate(forwardFile,"forward",{process_point_id:point.id,endpoint_key:"UPP_SERVICE",address:6,wire_type:"S32",wire_length:4,scale:0.01,access:"RO",byte_order:0,conversion:"fixed_point"});
     const forwardBook=new ExcelJS.Workbook();await forwardBook.xlsx.readFile(forwardFile);
-    for(const removed of ["upp_model","name","enabled"])ok(!forwardBook.getWorksheet("forward").getRow(1).values.includes(removed));
+    for(const removed of ["upp_model","name","enabled","conversion","byte_order"])ok(!forwardBook.getWorksheet("forward").getRow(1).values.includes(removed));
     ok((await cli([...common,"--kind","forward","--file",forwardFile,"--commit","--report",forwardReport])).includes("添加成功"));
     const result=JSON.parse(await fs.readFile(forwardReport,"utf8"));
     equal(result.record.rows[0].record.upp_model,102);
@@ -69,6 +69,6 @@ export async function checkExcelBatch({client, equal, ok, fixtureKey}) {
     ok(rejected,"Duplicate Excel points must fail atomically");
     equal((await client.call(`${url}/topology`)).process_points.length,1);
     equal((await client.call(`${url}/edit-lock`)).locked,false);
-    console.log("PASS: Node.js DSP sheet Excel preview/commit without sigID, metadata, JSON board references, decimal scale, explicit conversion and duplicate rollback");
+    console.log("PASS: Node.js DSP sheet Excel preview/commit without sigID, metadata, JSON board references, decimal scale, automatic conversion and duplicate rollback");
   } finally { await fs.rm(temporary,{recursive:true,force:true}); }
 }

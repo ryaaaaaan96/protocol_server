@@ -75,10 +75,10 @@ try {
         if (values.wire_type === "F32") {
           const id = payload.rows?.[0]?.id ?? payload.id;
           const mapping = { ...mappings.find(item => item.id === id), ...values };
-          const valid = mapping.wire_length === 4 && mapping.conversion === "identity" && mapping.scale === 1;
+          const valid = mapping.wire_length === 4 && mapping.scale === 1;
           return route.fulfill({ json: valid
             ? { ...preview, warnings: [{ name: "母线电压", message: "当前 F32 偏离建议 S32，请确认接收端协议。" }] }
-            : { ...preview, allowed: false, errors: [{ message: "F32 直接映射需要 4 字节、identity 转换和系数 1。" }] } });
+            : { ...preview, allowed: false, errors: [{ message: "F32 直接映射需要 4 字节和系数 1。" }] } });
         }
         if (values.ram === "Y") {
           const before = { id: 1, board_key: "DSP", name: "母线电压", enum_name: "DC_BUS_VOLTAGE", internal_type: "F32", metadata: { source_variable: "DcBusVoltage", ram: "N", cpu: "CPU2", enum_table: "bit0:有效\nbit1:故障" } };
@@ -212,7 +212,7 @@ try {
   await expect(cell("upp_model")).toHaveText("1");
   await expect(cell("upp_model")).toHaveAttribute("aria-readonly", "true");
   for (const key of ["name", "enabled", "byte_length"]) await expect(cell(key)).toHaveCount(0);
-  assert.deepEqual(await page.locator(".point-table thead th[data-column-key] .point-column-label").allTextContents(), ["数据名称", "VariateName", "数据分类", "UPP模型号", "UPP偏移地址", "UPP协议字节数", "数据类型", "协议系数", "数据转换", "读写属性", "字节序"]);
+  assert.deepEqual(await page.locator(".point-table thead th[data-column-key] .point-column-label").allTextContents(), ["数据名称", "VariateName", "数据分类", "UPP模型号", "UPP偏移地址", "UPP协议字节数", "数据类型", "协议系数", "读写属性"]);
   await expect(cell("resolved_sig_id")).toHaveCount(0);
   await expect(cell("category")).toHaveText("系统参数1");
   const classification = page.getByRole("group", { name: "转发数据分类", exact: true });
@@ -240,22 +240,19 @@ try {
   await cell("scale").dblclick();
   await page.getByLabel("编辑 协议系数", { exact: true }).fill("0.025");
   await page.getByLabel("编辑 协议系数", { exact: true }).press("Enter");
-  await cell("byte_order").dblclick();
-  await page.getByLabel("编辑 字节序", { exact: true }).selectOption("2");
+  for (const key of ["byte_order", "conversion"]) await expect(cell(key)).toHaveCount(0);
   await page.getByRole("button", { name: "检查", exact: true }).click();
   await expect(page.locator("dialog")).toContainText("草稿检查结果");
   const changed = requests.at(-1).body.rows[0].values;
   assert.equal(changed.process_point_id, 2);
   assert.equal(changed.scale, 0.025);
-  assert.equal(changed.byte_order, 2);
+  for (const key of ["byte_order", "conversion"]) assert.ok(!(key in changed));
   assert.ok(!("wire_type" in changed), "switching an existing mapping preserves manual communication values");
   await page.getByRole("button", { name: "继续编辑", exact: true }).click();
   await page.getByRole("button", { name: "放弃修改", exact: true }).click();
   await cell("effective_type").dblclick();
   await page.getByLabel(`编辑 ${forwardDefinition.fields.wire_type.label}`, { exact: true }).selectOption("F32");
   await expect(cell("effective_type")).toHaveAttribute("title", /当前 F32 偏离建议/);
-  await cell("conversion").dblclick();
-  await page.getByLabel("编辑 数据转换", { exact: true }).selectOption("identity");
   await cell("scale").dblclick();
   await page.getByLabel("编辑 协议系数", { exact: true }).fill("1");
   await page.getByLabel("编辑 协议系数", { exact: true }).press("Enter");
@@ -279,7 +276,7 @@ try {
   await page.getByRole("button", { name: "检查关联影响", exact: true }).click();
   await expect(page.locator("dialog")).toContainText("关联检查通过");
   assert.equal(requests.at(-1).body.values.address, 18);
-  for (const key of ["name", "enabled"]) assert.ok(!(key in requests.at(-1).body.values));
+  for (const key of ["name", "enabled", "byte_order", "conversion"]) assert.ok(!(key in requests.at(-1).body.values));
   assert.equal(requests.at(-1).body.expected.scale, 0.001);
   await page.locator("dialog").getByRole("button", { name: "关闭", exact: true }).last().click();
   await page.getByRole("button", { name: "新建DSP UPP转发表", exact: true }).click();
@@ -295,28 +292,25 @@ try {
   await expect(page.getByLabel(forwardDefinition.fields.wire_type.label, { exact: true })).toHaveValue("F32");
   await expect(page.getByLabel("UPP协议字节数", { exact: true })).toHaveValue("2");
   await page.getByLabel("UPP协议字节数", { exact: true }).fill("4");
-  await page.getByLabel("数据转换", { exact: true }).selectOption("identity");
+  for (const label of ["数据转换", "字节序"]) await expect(page.getByLabel(label, { exact: true })).toHaveCount(0);
   await page.getByLabel("协议系数", { exact: true }).fill("1");
   await page.getByRole("button", { name: "检查关联影响", exact: true }).click();
   await expect(page.locator("dialog")).toContainText("关联检查通过");
   await expect(page.locator("dialog .point-communication-warnings")).toContainText("当前 F32 偏离建议 S32");
   const overrideCreate = requests.at(-1).body.values;
-  assert.deepEqual(Object.fromEntries(["wire_type", "wire_length", "scale", "conversion"].map(key => [key, overrideCreate[key]])), {
-    wire_type: "F32", wire_length: 4, scale: 1, conversion: "identity",
+  assert.deepEqual(Object.fromEntries(["wire_type", "wire_length", "scale"].map(key => [key, overrideCreate[key]])), {
+    wire_type: "F32", wire_length: 4, scale: 1,
   });
   await page.locator("dialog").getByRole("button", { name: "应用通信建议", exact: true }).click();
   await expect(page.getByLabel(forwardDefinition.fields.wire_type.label, { exact: true })).toHaveValue("S32");
-  await expect(page.getByLabel("数据转换", { exact: true })).toHaveValue("fixed_point");
   await page.getByRole("button", { name: "检查关联影响", exact: true }).click();
   const forwardCreate = requests.at(-1).body.values;
   assert.equal(forwardCreate.process_point_id, 1);
   assert.equal(forwardCreate.endpoint_key, "UPP_SERVICE");
-  assert.equal(forwardCreate.byte_order, 0);
   assert.equal(forwardCreate.wire_type, "S32");
   assert.equal(forwardCreate.wire_length, 4);
   assert.equal(forwardCreate.scale, 0.001);
-  assert.equal(forwardCreate.conversion, "fixed_point");
-  for (const key of ["upp_model", "name", "enabled"]) assert.ok(!(key in forwardCreate));
+  for (const key of ["upp_model", "name", "enabled", "byte_order", "conversion"]) assert.ok(!(key in forwardCreate));
   for (const key of ["endpoint_id", "context_id", "signal_id", "field_id"]) assert.ok(!(key in forwardCreate), `${key} must not be injected`);
   await page.route("**/__native_import", route => route.fulfill({ contentType: "text/html", body: `<!doctype html><html><body><div id="test"></div><script type="module">
     import { createApp, h } from '/node_modules/.vite/deps/vue.js';
@@ -348,7 +342,7 @@ try {
   await expect(importButton).toBeEnabled();
   await Promise.all([page.waitForResponse(response => response.url().endsWith("/imports/98/commit")), importButton.click()]);
   assert.deepEqual(errors, []);
-  console.log("PASS: native DSP groups/counts, independent point creation, reference edits, fractional scale, byte order preview payloads without legacy relations, and DSP-only import confirmation");
+  console.log("PASS: native DSP groups/counts, point creation, reference edits, fractional scale, previews without conversion/byte-order inputs, and DSP-only import confirmation");
 } finally {
   await browser?.close();
   await server.close();

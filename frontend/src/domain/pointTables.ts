@@ -60,8 +60,8 @@ export function isDspForward(data: PointTableData): boolean {
     !!data.definition.fields.category;
 }
 
-export const communicationFields = ["wire_type", "wire_length", "scale", "conversion"] as const;
-export type CommunicationRecommendation = { wire_type: string; wire_length: number; scale: number; conversion: string };
+export const communicationFields = ["wire_type", "wire_length", "scale"] as const;
+export type CommunicationRecommendation = { wire_type: string; wire_length: number; scale: number };
 
 /** Recommendations belong to the selected internal point; existing mappings remain independent. */
 export function communicationRecommendation(data: PointTableData, values: Row, row?: Row): CommunicationRecommendation | undefined {
@@ -78,9 +78,8 @@ export function communicationRecommendation(data: PointTableData, values: Row, r
   const widths: Record<string, number> = { U8: 1, U16: 2, S16: 2, U32: 4, S32: 4, F32: 4 };
   const length = Number(source.recommended_wire_length ?? (type === "STRING" ? source.byte_length : widths[type]));
   const scale = Number(source.recommended_scale ?? (internal === "F32" && type === "S32" ? source.precision ?? 1 : 1));
-  const conversion = source.recommended_conversion ?? (type === "STRING" ? "array_bytes" : internal === "F32" && type === "S32" ? "fixed_point" : "identity");
   if (!type || !Number.isSafeInteger(length) || length < 1 || !Number.isFinite(scale) || scale <= 0) return undefined;
-  return { wire_type: type, wire_length: length, scale, conversion };
+  return { wire_type: type, wire_length: length, scale };
 }
 
 export function communicationHint(data: PointTableData, values: Row, row?: Row): string {
@@ -89,7 +88,7 @@ export function communicationHint(data: PointTableData, values: Row, row?: Row):
   const current = values.wire_type ?? row?.wire_type;
   const prefix = `根据 DateType 和 ArrayCnt，建议 ${suggestion.wire_type}，${suggestion.wire_length} 字节，协议系数 ${suggestion.scale}。`;
   return prefix + (current != null && current !== "" && current !== suggestion.wire_type
-    ? `当前 ${current} 偏离建议；请确认通信类型、长度及转换方式符合接收端协议。`
+    ? `当前 ${current} 偏离建议；请确认通信类型、长度和协议系数符合接收端协议，转换方式自动确定。`
     : "可按接收端协议调整，修改不会改变内部 DateType。");
 }
 
@@ -228,7 +227,7 @@ export function pointChangeSummary(change: Row, fields?: Record<string, PointFie
   if (!process && fields?.recommended_wire_type && fields.category) {
     // Shared storage compatibility fields are not separate DSP user settings.
     const visible = (record: Row) => Object.fromEntries(Object.entries(record)
-      .filter(([key]) => !["name", "enabled"].includes(key) || fields[key]));
+      .filter(([key]) => !["name", "enabled", "conversion", "byte_order"].includes(key) || fields[key]));
     before = visible(before);
     after = visible(after);
   }

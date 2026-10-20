@@ -147,11 +147,11 @@ export async function checkDspPoints({ client, engineer, viewer, engineerId, vie
     };
     await scoped([{board_key:"DSP",scope:"internal"}]);
     ok((await preview("process", {notes:"internal permitted preview"}, frequency.id, engineer)).allowed);
-    await accessFailure("forward", frequencyMapping.id, {byte_order:1});
+    await accessFailure("forward", frequencyMapping.id, {scale:frequencyMapping.scale * 2});
     ok((await read("process",engineer)).rows.every(row=>row.can_edit));
     ok((await read("forward",engineer)).rows.every(row=>!row.can_edit));
     await scoped([{board_key:"DSP",scope:"protocol",endpoint_key:"UPP_SERVICE"}]);
-    ok((await preview("forward", {byte_order:1}, frequencyMapping.id, engineer)).allowed);
+    ok((await preview("forward", {scale:frequencyMapping.scale * 2}, frequencyMapping.id, engineer)).allowed);
     await accessFailure("process",frequency.id,{notes:"internal forbidden"});
     ok((await read("forward",engineer)).rows.every(row=>row.can_edit));
     const deniedConfig = await engineer.raw(`${url}/changes/preview`,"POST",{
@@ -246,7 +246,7 @@ export async function checkDspPoints({ client, engineer, viewer, engineerId, vie
     const beforeInvalid = JSON.stringify(after.process_points);
     const beforeInvalidTransmit = JSON.stringify(after.transmit_points);
     const beforeInvalidHistory = await historyCount();
-    await rejectEdit("forward", secondMapping.id, { conversion: "identity" });
+    await rejectEdit("forward", secondMapping.id, { wire_type: "U32" });
     await rejectEdit("forward", secondMapping.id, { address: 14 });
     await rejectEdit("forward", secondMapping.id, { address: 65535 });
     await rejectEdit("forward", secondMapping.id, { wire_length: 2 });
@@ -355,7 +355,7 @@ export async function checkDspPoints({ client, engineer, viewer, engineerId, vie
     equal(numericMapping.upp_model, 103);
     equal(numericMapping.address, 3100);
     equal(numericMapping.scale, 0.01);
-    equal(numericMapping.byte_order, 1);
+    equal(numericMapping.byte_order, 0);
     equal(numericMapping.enabled, true);
     for (const [kind, records] of [["forward", forwardCreated], ["process", batchCreated]]) {
       for (const record of records) {
@@ -459,13 +459,15 @@ export async function checkDspPoints({ client, engineer, viewer, engineerId, vie
     // Simulate a pre-upgrade disabled mapping in this disposable database.
     // Hidden legacy flags and aliases cannot exclude a DSP mapping or change
     // the current internal name in table projections and generated files.
-    const oldMapping = (await inspection.query("SELECT name,enabled FROM points.transmit_points WHERE id=$1", [secondMapping.id])).rows[0];
-    await inspection.query("UPDATE points.transmit_points SET enabled=false,name='Obsolete forwarding alias' WHERE id=$1", [secondMapping.id]);
+    const oldMapping = (await inspection.query("SELECT name,enabled,conversion,byte_order FROM points.transmit_points WHERE id=$1", [secondMapping.id])).rows[0];
+    await inspection.query("UPDATE points.transmit_points SET enabled=false,name='Obsolete forwarding alias',conversion='identity',byte_order=3 WHERE id=$1", [secondMapping.id]);
     try {
       const legacyRow = (await read("forward")).rows.find(row => row.id === secondMapping.id);
       equal(legacyRow.enabled, true);
       equal(legacyRow.name, "频率：已保存");
       equal(legacyRow.signal_name, "频率：已保存");
+      equal(legacyRow.conversion, "fixed_point");
+      equal(legacyRow.byte_order, 0);
       const beforeLegacyReject = JSON.stringify(await graph()), legacyHistory = await historyCount();
       await rejectEdit("forward", frequencyMapping.id, { address: 2000 });
       await rejectEdit("forward", secondMapping.id, { address: 14 });
@@ -480,8 +482,10 @@ export async function checkDspPoints({ client, engineer, viewer, engineerId, vie
       const legacyExport = legacyJson.points.find(row => row.id === secondMapping.id);
       equal(legacyExport.enabled, true);
       equal(legacyExport.name, "频率：已保存");
+      equal(legacyExport.conversion, "fixed_point");
+      equal(legacyExport.byte_order, 0);
     } finally {
-      await inspection.query("UPDATE points.transmit_points SET name=$2,enabled=$3 WHERE id=$1", [secondMapping.id, oldMapping.name, oldMapping.enabled]);
+      await inspection.query("UPDATE points.transmit_points SET name=$2,enabled=$3,conversion=$4,byte_order=$5 WHERE id=$1", [secondMapping.id, oldMapping.name, oldMapping.enabled, oldMapping.conversion, oldMapping.byte_order]);
     }
 
     const generated = await client.call(`${url}/generate`);

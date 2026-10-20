@@ -79,8 +79,8 @@ export async function checkDspTransmitRules({ client, engineer, engineerId, equa
   equal(row.recommended_conversion, "fixed_point");
   equal(forwarded.definition.columns[forwarded.definition.columns.indexOf("category") + 1], "upp_model");
   ok(!forwarded.definition.editor.includes("upp_model"));
-  for (const removed of ["name", "enabled", "byte_length", "sheet_type"]) ok(!forwarded.definition.columns.includes(removed));
-  for (const removed of ["name", "enabled"]) ok(!forwarded.definition.editor.includes(removed));
+  for (const removed of ["name", "enabled", "byte_length", "sheet_type", "conversion", "byte_order"]) ok(!forwarded.definition.columns.includes(removed));
+  for (const removed of ["name", "enabled", "conversion", "byte_order"]) ok(!forwarded.definition.editor.includes(removed));
   equal(forwarded.definition.fields.effective_address.label, "UPP偏移地址");
   equal(forwarded.definition.fields.effective_length.label, "UPP协议字节数");
   const internal = await read("process");
@@ -92,8 +92,10 @@ export async function checkDspTransmitRules({ client, engineer, engineerId, equa
   equal(internal.rows.find(row => row.id === first.id).sheet_data_type, "S32");
 
   // Older clients may send the matching model; they cannot choose a different one.
-  const legacyCompatible = await edit("forward", { upp_model: 102, enabled: true, name: "旧客户端独立转发名称" }, firstMapping.id);
+  const legacyCompatible = await edit("forward", { upp_model: 102, enabled: true, name: "旧客户端独立转发名称", conversion: "identity", byte_order: 2 }, firstMapping.id);
   equal(legacyCompatible.name, first.name);
+  equal(legacyCompatible.conversion, "fixed_point");
+  equal(legacyCompatible.byte_order, 0);
   await reject("forward", { upp_model: 103 }, firstMapping.id);
   await reject("forward", { process_point_id: first.id, address: 5000, upp_model: 1 });
   await reject("forward", { enabled: false }, firstMapping.id);
@@ -147,11 +149,12 @@ export async function checkDspTransmitRules({ client, engineer, engineerId, equa
   }
 
   // Legal deviations remain editable and produce a visible preview warning.
-  const override = await preview("forward", { wire_type: "F32", conversion: "identity", scale: 1 }, firstMapping.id);
+  const override = await preview("forward", { wire_type: "F32", scale: 1 }, firstMapping.id);
   ok(override.allowed, JSON.stringify(override.errors));
   ok(override.warnings?.some(warning => warning.field === "wire_type" && warning.recommended_wire_type === "S32" && warning.actual_wire_type === "F32"), JSON.stringify(override.warnings));
   await commit(override);
   equal((await graph()).transmit_points.find(row => row.id === firstMapping.id).wire_type, "F32");
+  equal((await graph()).transmit_points.find(row => row.id === firstMapping.id).conversion, "identity");
   await reject("forward", { wire_type: "U16", wire_length: 2, conversion: "identity", scale: 1 }, firstMapping.id);
   const unrelated = await preview("process", { notes: "不会重复提示其他映射的覆盖" }, second.id);
   ok(unrelated.allowed);

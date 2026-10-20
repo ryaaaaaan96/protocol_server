@@ -2,7 +2,7 @@
   "version": 1,
   "enabled": true,
   "label": "DSP UPP转发表",
-  "description": "按 DSP 内部数据的名称和分类展示 UPP 转发；模型号由分类固定推导，所有记录参与转发。数据类型按 DateType 和 ArrayCnt 给出建议，可按通信协议调整，提交前显示偏离建议的提示并校验转换、长度及地址。",
+  "description": "按 DSP 内部数据的名称和分类展示 UPP 转发；模型号由分类固定推导，所有记录参与转发。数据类型按 DateType 和 ArrayCnt 给出建议，可按通信协议调整；转换方式自动确定，提交前校验类型、长度、系数及地址。",
   "columns": [
     "signal_name",
     "variable_name",
@@ -12,9 +12,7 @@
     "effective_length",
     "effective_type",
     "scale",
-    "conversion",
-    "access",
-    "byte_order"
+    "access"
   ],
   "editor": [
     "process_point_id",
@@ -23,9 +21,7 @@
     "wire_type",
     "wire_length",
     "scale",
-    "access",
-    "byte_order",
-    "conversion"
+    "access"
   ],
   "ordering": {
     "mode": "display",
@@ -37,8 +33,6 @@
   "inline": {
     "scale": "scale",
     "access": "access",
-    "byte_order": "byte_order",
-    "conversion": "conversion",
     "signal_name": "process_point_id",
     "effective_address": "address",
     "effective_type": "wire_type",
@@ -82,7 +76,7 @@
         "F32",
         "STRING"
       ],
-      "hint": "由 DateType 和 ArrayCnt 建议，可手动调整；偏离建议时提示，仍须满足通信长度和转换规则。"
+      "hint": "由 DateType 和 ArrayCnt 建议，可手动调整；转换方式由内部类型与通信类型自动确定，偏离建议时提示并校验。"
     },
     "effective_length": {
       "label": "UPP协议字节数"
@@ -104,26 +98,6 @@
         "WO"
       ],
       "default": "RO"
-    },
-    "byte_order": {
-      "label": "字节序",
-      "options": [
-        "0",
-        "1",
-        "2",
-        "3"
-      ],
-      "default": 0,
-      "type": "number"
-    },
-    "conversion": {
-      "label": "数据转换",
-      "options": [
-        "identity",
-        "fixed_point",
-        "array_bytes"
-      ],
-      "hint": "identity：直接映射；fixed_point：定点缩放；array_bytes：数组字节映射。"
     },
     "variable_name": {
       "label": "VariateName"

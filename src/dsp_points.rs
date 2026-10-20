@@ -257,6 +257,15 @@ pub async fn apply(
                     }
                 }
             }
+            // DSP representation determines conversion; byte order belongs to
+            // the receiving board. Retain normalized compatibility columns.
+            for (key, value) in [
+                ("conversion", crate::dsp_sheet::wire_defaults(&point, merged["wire_type"].as_str())["conversion"].clone()),
+                ("byte_order", json!(0)),
+            ] {
+                updates.insert(key.into(), value.clone());
+                merged[key] = value;
+            }
         }
     }
     if c.operation == "create" {
@@ -722,7 +731,13 @@ pub fn validate(g: &Value) -> Vec<Value> {
         if !scale.is_finite() || scale <= 0. {
             issue(&mut out, entity, t, "scale", "协议系数必须是有限正数", 0);
         }
-        let matching = match strv(t, "conversion") {
+        let automatic = crate::dsp_sheet::wire_defaults(p, Some(wire));
+        let conversion = if dsp {
+            strv(&automatic, "conversion")
+        } else {
+            strv(t, "conversion")
+        };
+        let matching = match conversion {
             "identity" => {
                 p["internal_type"] == t["wire_type"]
                     && p["byte_length"] == t["wire_length"]
@@ -750,7 +765,7 @@ pub fn validate(g: &Value) -> Vec<Value> {
                 entity,
                 t,
                 "conversion",
-                "内部点与通信字段不满足所选转换规则",
+                "内部类型、通信类型、字节数与协议系数不满足转换规则",
                 num(p, "id"),
             );
         }
@@ -885,7 +900,13 @@ pub fn generate(g: &Value) -> BTreeMap<String, String> {
                         && point["project_id"] == mapping["project_id"]
                 }) {
                     mapping["name"] = point["name"].clone();
+                    mapping["conversion"] = crate::dsp_sheet::wire_defaults(
+                        point,
+                        mapping["wire_type"].as_str(),
+                    )["conversion"]
+                        .clone();
                 }
+                mapping["byte_order"] = json!(0);
             }
         }
         transmit.sort_by_key(|t| {
@@ -1041,6 +1062,13 @@ mod tests {
         assert!(validate(&foreign).iter().any(|i| i["code"] == "reference"));
         let mut shape = original.clone();
         shape["transmit_points"][0]["conversion"] = json!("identity");
+        shape["transmit_points"][0]["byte_order"] = json!(3);
+        assert!(validate(&shape).is_empty());
+        let exported: Value =
+            serde_json::from_str(&generate(&shape)["board_types/DSP/transmit.json"]).unwrap();
+        assert_eq!(exported["points"][0]["conversion"], "fixed_point");
+        assert_eq!(exported["points"][0]["byte_order"], 0);
+        shape["transmit_points"][0]["wire_type"] = json!("U32");
         assert!(validate(&shape).iter().any(|i| i["code"] == "conversion"));
         let mut overlap = original.clone();
         let mut second = overlap["transmit_points"][0].clone();
