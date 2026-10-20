@@ -3275,7 +3275,8 @@ body {
   overflow: hidden;
 }
 .type-topology-canvas {
-  overflow-x: auto;
+  overflow: auto;
+  max-height: 78vh;
   background: radial-gradient(#d4e2e9 1px, transparent 1px);
   background-size: 18px 18px;
 }
@@ -3284,6 +3285,17 @@ body {
   width: 100%;
   min-width: 850px;
   height: auto;
+}
+.topology-layout-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.type-edge-label-background {
+  fill: #fff;
+  stroke: #dce8ed;
+  stroke-width: 1;
 }
 .type-node {
   cursor: pointer;

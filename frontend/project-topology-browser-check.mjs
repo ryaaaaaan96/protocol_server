@@ -54,6 +54,8 @@ try {
   browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({ baseURL: `http://127.0.0.1:${server.httpServer.address().port}`, viewport: { width: 1600, height: 1000 } });
   page.on("pageerror", error => errors.push(error.message));
+  const requests = [];
+  await page.route("**/api/**", route => { requests.push(route.request().url()); return route.abort(); });
   let config;
   await page.route("**/__topology", route => route.fulfill({ contentType: "text/html; charset=utf-8", body: `<!doctype html><html><head><meta charset="utf-8"></head><body><div id="app"></div><script type="module">
     import {createApp,h} from '/node_modules/.vite/deps/vue.js';import Topology from '/src/pages/ProjectTopology.vue';import '/src/style.css';
@@ -61,7 +63,7 @@ try {
     </script></body></html>` }));
   for (config of [manifest.topology, reordered, legacy]) {
     await page.goto("/__topology");
-    await expect(page.locator(".type-node")).toHaveCount(config.board_types.length);
+    await expect(page.locator(".type-node")).toHaveCount(config.board_types.length, { timeout: 30000 });
     await expect(page.locator(".type-connection-line")).toHaveCount(config.mounts.length);
     const positions = await page.locator(".type-node").evaluateAll(nodes => nodes.map(node => ({
       code: node.getAttribute("data-code"),
@@ -75,7 +77,7 @@ try {
     for (const a of positions) for (const b of positions) {
       if (a.code !== b.code && a.x === b.x) assert(Math.abs(a.y - b.y) >= 120, "Nodes never overlap");
     }
-    const labels = await page.locator(".type-edge-label, .type-edge-count").evaluateAll(nodes => nodes.map(node => {
+    const labels = await page.locator(".type-edge-protocol, .type-edge-count").evaluateAll(nodes => nodes.map(node => {
       const { x, y, width, height } = node.getBBox();
       return { x, y, width, height };
     }));
@@ -92,9 +94,28 @@ try {
       await upm.click();
       await expect.poll(() => page.evaluate(() => window.selectedBoard)).toBe("UPM");
     }
+    await page.getByLabel("布局方向", { exact: true }).selectOption("DOWN");
+    await expect(page.getByRole("button", { name: "自动整理", exact: true })).toBeEnabled({ timeout: 30000 });
+    await expect(page.locator(".type-node")).toHaveCount(config.board_types.length);
+    const vertical = await page.locator(".type-node").evaluateAll(nodes => nodes.map(node => ({
+      code: node.getAttribute("data-code"), y: Number(node.querySelector("rect").getAttribute("y")),
+    })));
+    for (const link of config.mounts) assert(vertical.find(node => node.code === link.parent).y < vertical.find(node => node.code === link.child).y);
+    await page.getByRole("button", { name: "自动整理", exact: true }).click();
+    await expect(page.getByRole("button", { name: "自动整理", exact: true })).toBeEnabled({ timeout: 30000 });
+    // Rapid switches must discard old worker results rather than restore them.
+    await page.getByLabel("布局方向", { exact: true }).selectOption("RIGHT");
+    await page.getByLabel("布局方向", { exact: true }).selectOption("DOWN");
+    await page.getByLabel("布局方向", { exact: true }).selectOption("RIGHT");
+    await expect(page.getByRole("button", { name: "自动整理", exact: true })).toBeEnabled({ timeout: 30000 });
+    const horizontal = await page.locator(".type-node").evaluateAll(nodes => nodes.map(node => ({
+      code: node.getAttribute("data-code"), x: Number(node.querySelector("rect").getAttribute("x")),
+    })));
+    for (const link of config.mounts) assert(horizontal.find(node => node.code === link.parent).x < horizontal.find(node => node.code === link.child).x);
   }
+  assert.deepEqual(requests, [], "Rearranging a diagram never requests or writes project data");
   assert.deepEqual(errors, []);
-  console.log("PASS: multiple roots, shared parent links/counts, order-independent layout, node selection and legacy topology");
+  console.log("PASS: worker layout, direction/rearrange controls, stale-result cancellation, readonly view, shared nodes/counts and legacy topology");
 } finally {
   await browser?.close();
   await server.close();
