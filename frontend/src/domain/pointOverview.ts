@@ -1,6 +1,6 @@
 import type { Row } from "../api";
 import { displayCell } from "./pointGrid";
-import { dspModel, type PointDefinition, type PointTableData } from "./pointTables";
+import { dspModel, hiddenProcessPoint, type PointDefinition, type PointTableData } from "./pointTables";
 
 export type OverviewKind = "process" | "forward";
 type PointKind = OverviewKind;
@@ -12,14 +12,15 @@ export function columnSource(key: string): { kind: PointKind; column: string } {
   const [kind, column] = key.split(":");
   return { kind: kind as PointKind, column };
 }
-export function overviewRows(data: OverviewData, groupKey?: string): OverviewRow[] {
+export function overviewRows(data: OverviewData, groupKey?: string, showNonUploaded = false): OverviewRow[] {
   const mappings = new Map<number, Row[]>();
   for (const row of data.forward.rows) {
     const list = mappings.get(row.process_point_id) || [];
     list.push(row);
     mappings.set(row.process_point_id, list);
   }
-  return data.process.rows.filter(row => groupKey == null || row.group_key === groupKey).flatMap(process => {
+  return data.process.rows.filter(row => (groupKey == null || row.group_key === groupKey) &&
+    (showNonUploaded || !hiddenProcessPoint(data.process.definition, row))).flatMap(process => {
     const linked = mappings.get(process.id);
     return linked?.length
       ? linked.map(forward => ({ key: `${process.id}:${forward.id}`, process, forward }))

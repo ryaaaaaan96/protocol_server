@@ -194,14 +194,30 @@ pub(crate) fn validate_table_file(kind: &str, table: &Value) -> Result<()> {
         "inline",
         "fields",
     ];
-    if object
-        .keys()
-        .any(|key| !required.contains(&key.as_str()) && key != "calculation")
-        || required.iter().any(|key| !object.contains_key(*key))
+    if object.keys().any(|key| {
+        !required.contains(&key.as_str())
+            && !matches!(key.as_str(), "calculation" | "hidden_source_sig_ids")
+    }) || required.iter().any(|key| !object.contains_key(*key))
     {
         return Err(AppError::bad(
             "单表配置须完整包含 label、description、columns、editor、ordering、inline、fields",
         ));
+    }
+    if let Some(markers) = table.get("hidden_source_sig_ids") {
+        if kind != "process"
+            || markers.as_array().is_none_or(|markers| {
+                markers.len() > 16
+                    || markers.iter().any(|marker| {
+                        marker
+                            .as_str()
+                            .is_none_or(|s| s.trim().is_empty() || s.len() > 64)
+                    })
+            })
+        {
+            return Err(AppError::bad(
+                "hidden_source_sig_ids 仅支持处理点表，须为最多 16 个非空标记的数组，每项不超过 64 字节",
+            ));
+        }
     }
     if let Some(rule) = table.get("calculation") {
         if kind != "forward" {
@@ -546,6 +562,29 @@ mod tests {
             .definition(Some("dc-ups"))
             .unwrap()
             .clone()
+    }
+
+    #[test]
+    fn source_sig_id_visibility_is_bounded_and_process_only() {
+        let base = configuration();
+        let mut table = base["boards"]["UPM"]["process"].clone();
+        validate_table_file("process", &table).unwrap();
+        for markers in [
+            json!(null),
+            json!("※"),
+            json!([""]),
+            json!([1]),
+            json!(["a".repeat(65)]),
+            json!(vec!["※"; 17]),
+        ] {
+            table["hidden_source_sig_ids"] = markers;
+            assert!(validate_table_file("process", &table).is_err());
+        }
+        for kind in ["collect", "forward"] {
+            let mut other = base["boards"]["UPM"][kind].clone();
+            other["hidden_source_sig_ids"] = json!(["※"]);
+            assert!(validate_table_file(kind, &other).is_err());
+        }
     }
 
     #[test]

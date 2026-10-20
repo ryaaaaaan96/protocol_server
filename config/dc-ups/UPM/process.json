@@ -2,6 +2,7 @@
   "version": 1,
   "enabled": true,
   "label": "处理点表",
+  "hidden_source_sig_ids": ["※"],
   "description": "LOCAL 本地测点与 DSP 采集点按模板维护；多个设备实例共用点定义，地址在项目 JSON 中配置。",
   "columns": [
     "name",
@@ -93,7 +94,8 @@
     "sig_id": {
       "label": "sigID",
       "type": "number",
-      "nullable": true
+      "nullable": true,
+      "hint": "※ 表示未分配 sigID、不上传 UPP；Modbus 转发仍可使用。填写有效 sigID 后恢复默认显示。"
     },
     "internal_type": {
       "label": "数据类型",

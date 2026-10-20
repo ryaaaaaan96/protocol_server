@@ -13,6 +13,7 @@ export type PointField = {
   multiline?: boolean;
 };
 export type PointDefinition = {
+  hidden_source_sig_ids?: string[];
   calculation?: { engine: "javascript" | "builtin"; script_file?: string; script?: string; parameters: Record<string, unknown> };
   label: string;
   description: string;
@@ -40,6 +41,13 @@ export type PointTableData = {
   rows: Row[];
   options: Record<string, Row[]>;
 };
+
+/** A source marker is informational; assigning a sigID enables the retained point. */
+export function hiddenProcessPoint(definition: PointDefinition, row: Row): boolean {
+  const marker = row.source_sig_id ?? row.metadata?.source_sig_id;
+  return row.sig_id == null && typeof marker === "string" &&
+    !!definition.hidden_source_sig_ids?.some(value => value.trim() === marker.trim());
+}
 
 function normalizedDataType(value: unknown): string | undefined {
   return typeof value === "string"

@@ -9,7 +9,7 @@ async function compile(path) {
   }).outputText;
 }
 const choicesUrl = moduleUrl(await compile("./src/domain/pointTables.ts"));
-const { pointChoices, pointDataType, pointIsString, isDspSheet, isDspForward, pointChangeSummary, communicationRecommendation, communicationHint, communicationDiffers, editableCommunicationRecommendation } = await import(choicesUrl);
+const { pointChoices, pointDataType, pointIsString, isDspSheet, isDspForward, pointChangeSummary, communicationRecommendation, communicationHint, communicationDiffers, editableCommunicationRecommendation, hiddenProcessPoint } = await import(choicesUrl);
 const { parseCell, displayCell, fieldForColumn } = await import(moduleUrl((await compile("./src/domain/pointGrid.ts")).replace('"./pointTables"', JSON.stringify(choicesUrl))));
 const { allowsPoint } = await import(moduleUrl(await compile("./src/domain/permissions.ts")));
 const { belongsToBoard, scopedRows } = await import(moduleUrl(await compile("./src/domain/board.ts")));
@@ -39,6 +39,15 @@ for (const entity of ["process_points", "transmit_points"]) {
 const options = { native_groups: [{ code: "LOCAL", name: "本机数据" }], process_points: [point, alternate], endpoints: [{ code: "UPP_SERVICE", name: "UPP 对外接口", protocol: "UPP" }] };
 const process = { storage: "native", board_key: "DSP", kind: "process", definition: processDefinition, options, rows: [], revision: 1 };
 const processRow = { ...point, group_name: "本机数据", resolved_sig_id: point.sig_id, edit_values: { ...point } };
+const visibilityDefinition = JSON.parse(await readFile(new URL("../config/dc-ups/UPM/process.json", import.meta.url), "utf8"));
+assert.equal(hiddenProcessPoint(visibilityDefinition, {sig_id:null,metadata:{source_sig_id:" ※ "}}), true);
+for (const row of [{sig_id:5,source_sig_id:"※"},{sig_id:0,source_sig_id:"※"},{sig_id:null,source_sig_id:""},{sig_id:null},{sig_id:null,source_sig_id:"0"}])
+  assert.equal(hiddenProcessPoint(visibilityDefinition,row), false);
+assert.equal(hiddenProcessPoint(processDefinition,{sig_id:null,source_sig_id:"※"}),false);
+const markedProcess = {...process,definition:visibilityDefinition};
+const markedRow = {sig_id:null,metadata:{source_sig_id:"※"},edit_values:{sig_id:null}};
+assert.equal(displayCell(markedProcess,markedRow,"sig_id",{}),"※（不上传 UPP）");
+assert.equal(displayCell(markedProcess,markedRow,"sig_id",{sig_id:123}),"123");
 assert.equal(isDspSheet(process), true);
 assert.equal(processDefinition.columns.length, 23);
 for (const key of ["sheet_data_type", "sheet_upp_model"]) assert.ok(!processDefinition.columns.includes(key));

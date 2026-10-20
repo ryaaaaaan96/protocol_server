@@ -2,6 +2,8 @@
 
 板卡名称只作为标识和显示文字。Rust 负责通用存储、导入、校验和事务；板卡差异由 JSON 声明。复用现有内部字段、UPP 采集/转发、Modbus 转发和布局规则时，新增板卡无需修改 Rust、Vue 或数据库表。全新协议编码或新的业务字段类型仍需扩展引擎。
 
+处理表可选 `hidden_source_sig_ids: ["※"]`：当原始 `source_sig_id`（或 `metadata.source_sig_id`）匹配标记且 `sig_id` 为空时，在处理表和总体视图默认隐藏该点；查看开关可显示并编辑。分配编号后自动恢复显示。此配置不影响存储、关联或协议生成，最多 16 个标记、每个最多 64 字节。
+
 ## 新增板卡
 
 1. 在 `config/<项目>/` 创建板卡目录，准备完整的 `process.json`、`collect.json`、`transmit.json`。不使用的表设置 `enabled: false`。

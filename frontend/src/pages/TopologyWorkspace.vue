@@ -5,6 +5,7 @@ import { api, type Row } from "../api";
 import { boardTypes } from "../domain/project";
 import { configuredBoardSheets, rows } from "../domain/board";
 import type { PointKind, PointSchema } from "../domain/pointTables";
+import { hiddenProcessPoint } from "../domain/pointTables";
 import Loading from "../components/Loading.vue";
 import Empty from "../components/Empty.vue";
 import PointTable from "../components/PointTable.vue";
@@ -73,7 +74,10 @@ watch(() => sheetKey.value === "overview" ? `${board.value?.name || props.boardK
 const points = computed(() => rows(props.graph || {}, "process_points").filter(point => point.board_key === props.boardKey));
 function count(kind: PointKind, endpointKey?: string) {
   const selected = points.value.filter(point => groupKey.value == null || point.group_key === groupKey.value);
-  if (kind === "process") return selected.length;
+  if (kind === "process") {
+    const definition = schema.value?.boards[props.boardKey]?.process;
+    return selected.filter(point => !definition || !hiddenProcessPoint(definition, point)).length;
+  }
   const ids = new Set(selected.map(point => point.id));
   return rows(props.graph || {}, kind === "collect" ? "collect_points" : "transmit_points").filter(point => point.board_key === props.boardKey && ids.has(point.process_point_id) && (!endpointKey || point.endpoint_key === endpointKey)).length;
 }

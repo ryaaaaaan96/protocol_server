@@ -16,6 +16,8 @@ UPM 内部按 `LOCAL` 和 `DSP` 两个设备模板组织。LOCAL 是本地设备
 
 内部点保存在 `points.process_points`，采集保存在 `points.collect_points`，两种对外映射共用 `points.transmit_points`，以端点区分。引用使用稳定记录 ID；sigID 属于各自接收设备，不能用 CSU 的 sigID 覆盖 UPM，也不能用 UPM 的 sigID 覆盖 DSP。
 
+Excel sigID 的 `※` 表示未分配 UPM sigID、不上传 UPP；这些点仍可用于 DSP 采集及 Modbus 转发。数据库保留 `sig_id = NULL`，原标记存于 `metadata.source_sig_id`，不将特殊字符写入数字字段。`UPM/process.json` 的 `hidden_source_sig_ids: ["※"]` 控制处理点表及总体视图默认隐藏这些点；勾选“显示未分配 sigID 的点”可查看和编辑，填入有效 sigID 并保存后恢复默认显示。空白或其他缺失编号不会被一并隐藏。此配置只影响显示，不删除记录或改变协议生成。
+
 ## 设备与地址
 
 DSP1～DSP8 的设备地址分别配置为 1～8，Modbus 基址按 `UPM板内Modbus地址分配` 设置为 50000～57000，间隔 1000：

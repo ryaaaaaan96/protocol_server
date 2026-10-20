@@ -394,11 +394,10 @@ fn load_table_directory(project_path: &Path, manifest: &Manifest) -> Result<Valu
             ];
             // All nine business/metadata properties are explicit; no global defaults are read.
             ensure!(
-                object
-                    .keys()
-                    .all(|key| REQUIRED.contains(&key.as_str()) || key == "calculation")
+                object.keys().all(|key| REQUIRED.contains(&key.as_str())
+                    || matches!(key.as_str(), "calculation" | "hidden_source_sig_ids"))
                     && REQUIRED.iter().all(|key| object.contains_key(*key)),
-                "{}: 表格须完整包含 version、enabled、label、description、columns、editor、ordering、inline、fields，可选 calculation，不支持其他属性",
+                "{}: 表格须完整包含 version、enabled、label、description、columns、editor、ordering、inline、fields，可选 calculation、hidden_source_sig_ids，不支持其他属性",
                 path.display()
             );
             ensure!(

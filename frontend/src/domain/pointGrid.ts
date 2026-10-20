@@ -4,6 +4,7 @@ import {
   dspModel,
   isDspForward,
   isDspSheet,
+  hiddenProcessPoint,
   sheetType,
   pointChoices,
   pointIsString,
@@ -187,6 +188,10 @@ export function displayCell(
   const sheet = isDspSheet(data);
   const format = (value: unknown) => sheet && value == null ? "" : pointText(value);
   const current = () => format(row[column]);
+
+  if (data.kind === "process" && ["sig_id", "resolved_sig_id"].includes(column) &&
+    hiddenProcessPoint(data.definition, { ...row, ...values }))
+    return `${String(row.source_sig_id ?? row.metadata?.source_sig_id).trim()}（不上传 UPP）`;
 
   if (sheet) {
     if (column === "type_length" && changed("sheet_type")) {

@@ -22,6 +22,7 @@ const data = ref<OverviewData | null>(null), error = ref(""), actionError = ref(
 const draft = ref<OverviewDraft>({}), undo = ref<OverviewDraft[]>([]), redo = ref<OverviewDraft[]>([]);
 const busy = ref(false), review = ref<Row | null>(null), checkOnly = ref(false);
 const query = ref(""), mappingFilter = ref("all"), page = ref(1);
+const showNonUploaded = ref(false);
 const columns = ref<TableColumn[]>([]), columnSettings = ref(false);
 const permissions = usePermissionContext();
 const root = ref<HTMLElement>(), head = ref<HTMLElement>(), frozenLeft = ref<Record<string, number>>({});
@@ -53,7 +54,7 @@ watch([def, columnKey], () => {
 }, { immediate: true });
 const visibleColumns = computed(() => orderedColumns(columns.value).filter(column => column.visible));
 const { pageSize, setPageSize } = usePageSize(computed(() => `point-page-size:${props.pid}:${props.boardKey}:overview`));
-const joined = computed(() => data.value ? overviewRows(data.value, props.groupKey) : []);
+const joined = computed(() => data.value ? overviewRows(data.value, props.groupKey, showNonUploaded.value) : []);
 const filtered = computed(() => joined.value.filter(row =>
   (mappingFilter.value === "all" || (mappingFilter.value === "missing") === !row.forward) &&
   (!query.value.trim() || def.value!.columns.some(key => text(row, key).toLowerCase().includes(query.value.trim().toLowerCase())))));
@@ -246,6 +247,7 @@ watch([head, visibleColumns], async (_, __, cleanup) => {
       <select v-model="mappingFilter" aria-label="转发配置筛选" :disabled="!!editor || busy || !!review">
         <option value="all">全部数据</option><option value="linked">已配置转发</option><option value="missing">未配置转发</option>
       </select>
+      <label v-if="data.process.definition.hidden_source_sig_ids?.length"><input v-model="showNonUploaded" type="checkbox" :disabled="dirty || busy || !!review" />显示未分配 sigID 的点</label>
       <span>{{ new Set(joined.map(row => row.process.id)).size }} 个内部点 · {{ joined.filter(row => row.forward).length }} 条转发</span>
     </div>
     <div v-if="dirty || undo.length || redo.length" class="point-draft-bar">

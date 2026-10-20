@@ -14,6 +14,7 @@ const points=[
   {id:1,board_key:"UPM",group_key:"LOCAL",name:"本地电压",enum_name:"LOCAL_VOLTAGE",sig_id:101,internal_type:"U16",element_count:1,byte_length:2},
   {id:2,board_key:"UPM",group_key:"DSP",name:"DSP 电压",enum_name:"DSP_VOLTAGE",sig_id:201,internal_type:"U16",element_count:1,byte_length:2},
   {id:3,board_key:"UPM",group_key:"DSP",name:"未转发测点",enum_name:"DSP_UNMAPPED",sig_id:202,internal_type:"U16",element_count:1,byte_length:2},
+  {id:4,board_key:"UPM",group_key:"LOCAL",name:"暂不上传测点",enum_name:"LOCAL_RESERVED",sig_id:null,metadata:{source_sig_id:"※"},internal_type:"U16",element_count:1,byte_length:2},
 ];
 const collect=[{id:1,board_key:"UPM",process_point_id:2,endpoint_key:"DSP_UPP",upp_model:99,address:6,
   wire_type:"U16",wire_length:2,scale:0.1,access:"RO",byte_order:0,acquisition_mode:"poll",poll_interval:3,set_priority:0,scan_priority:0}];
@@ -62,11 +63,26 @@ try {
   await page.goto("/__upm_test");
   await expect(page.getByRole("tab",{name:/处理点表/})).toHaveAttribute("aria-selected","true");
   await expect(page.getByRole("tab",{name:/采集点表/})).toHaveCount(0);
+  await expect(page.locator("tbody tr")).toHaveCount(1);
+  await page.getByLabel("显示未分配 sigID 的点",{exact:true}).check();
+  await expect(page.locator("tbody tr")).toHaveCount(2);
+  const reservedSigID=page.locator('tbody tr').nth(1).locator('[data-column-key="sig_id"]');
+  await expect(reservedSigID).toHaveText("※（不上传 UPP）");
+  await reservedSigID.dblclick();
+  await page.getByLabel("编辑 sigID",{exact:true}).fill("303");
+  await page.getByLabel("编辑 sigID",{exact:true}).press("Tab");
+  await expect(reservedSigID).toHaveText("303");
+  await expect(page.getByLabel("显示未分配 sigID 的点",{exact:true})).toBeDisabled();
   await page.getByRole("tab",{name:"总体视图",exact:true}).click();
   await expect(page.getByRole("grid",{name:"UPM 总体视图",exact:true})).toBeVisible();
   const overviewRows=()=>page.locator(".point-overview tbody tr");
   const overviewCell=(key,index=0)=>overviewRows().nth(index).locator(`[data-column-key="${key}"]`);
   await expect(overviewRows()).toHaveCount(2); // One LOCAL point, two independent endpoints.
+  await page.getByLabel("显示未分配 sigID 的点",{exact:true}).check();
+  await expect(overviewRows()).toHaveCount(3);
+  await expect(overviewCell("process:sig_id",2)).toHaveText("※（不上传 UPP）");
+  await page.getByLabel("显示未分配 sigID 的点",{exact:true}).uncheck();
+  await expect(overviewRows()).toHaveCount(2);
   await expect(overviewCell("forward:endpoint_name",0)).toHaveText("Modbus 对外表");
   await expect(overviewCell("forward:endpoint_name",1)).toHaveText("CSU-UPM UPP 对外表");
   await overviewCell("process:name").dblclick();

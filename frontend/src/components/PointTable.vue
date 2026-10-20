@@ -3,6 +3,7 @@ import { computed, ref, watch, nextTick, onBeforeUnmount } from "vue";
 import { api, revisionConflict, type Row } from "../api";
 import {
   choiceLabel,
+  hiddenProcessPoint,
   isDspSheet,
   isDspForward,
   communicationFields,
@@ -52,6 +53,7 @@ const data = ref<PointTableData | null>(null),
   query = ref(""),
   page = ref(1);
 const showHelp = ref(false);
+const showNonUploaded = ref(false);
 const permissions = usePermissionContext();
 function scopeEditable(row?: Row | null, values?: Row) {
   return !!data.value && allowsPoint(permissions.state.value, props.boardKey, props.kind, data.value,
@@ -193,6 +195,7 @@ const matched = computed(() =>
     .filter(
       ({ row, search }) =>
         inScope(row) &&
+        (props.kind !== "process" || showNonUploaded.value || !hiddenProcessPoint(def.value!, row)) &&
         search.includes(query.value.trim().toLowerCase()),
     )
     .map(({ row }) => row),
@@ -556,6 +559,7 @@ function text(row: Row, key: string) {
         />
       </div>
       <div class="inline">
+        <label v-if="props.kind === 'process' && def.hidden_source_sig_ids?.length" class="inline"><input v-model="showNonUploaded" type="checkbox" :disabled="dirty || busy || !!review" />显示未分配 sigID 的点</label>
         <button v-if="def.calculation && canEditTable" class="button small" :disabled="dirty || busy || !!review" title="按当前配置计算整张表的字节数和偏移，预览后保存" @click="previewCalculation">重算协议布局</button>
         <button v-if="canEditTable" class="button small" :disabled="!grid.activeRow.value || !grid.active.value || !grid.editable(grid.activeRow.value, grid.active.value.column)" @click="grid.activeRow.value && grid.active.value && grid.start(grid.activeRow.value, grid.active.value.column)"><Pencil :size="14" />编辑单元格</button>
         <button class="icon-btn" aria-label="表格操作说明" title="表格操作说明" @click="showHelp = true"><CircleHelp :size="17" /></button>
