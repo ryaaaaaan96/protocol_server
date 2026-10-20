@@ -31,6 +31,7 @@ pub async fn native_board(
             .fetch_optional(&mut *tx)
             .await?
             .flatten();
+    let definitions = crate::table_runtime::board_definitions(tx, pid, board_key).await?;
     Ok(config.and_then(|config| {
         config["board_types"]
             .as_array()?
@@ -40,6 +41,10 @@ pub async fn native_board(
                     && matches!(board["point_storage"].as_str(), Some("native" | "derived"))
             })
             .cloned()
+            .map(|mut board| {
+                board["table_definitions"] = definitions;
+                board
+            })
     }))
 }
 
@@ -159,11 +164,15 @@ pub async fn apply(
     }
     .split(',')
     .collect();
-    let dsp = crate::sheet_layout::enabled(&board);
-    let worksheet = kind == "process" && dsp;
-    if worksheet {
-        allowed.extend(crate::sheet_layout::EDIT_FIELDS.split(','));
-    }
+    let definitions = &board["table_definitions"];
+    let definition = &definitions[kind];
+    allowed.extend(
+        definition["behavior"]["editable_fields"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str),
+    );
     for key in fields.keys() {
         if !allowed.contains(key.as_str()) {
             return Err(AppError::bad(format!("{key} 是只读字段或不属于当前点表")));
@@ -208,12 +217,25 @@ pub async fn apply(
     if fields.is_empty() {
         return Err(AppError::bad("未提供修改字段"));
     }
-    let mut updates = if worksheet {
-        crate::sheet_layout::normalize_for(&board, fields, &old)?
+    let reference = if kind == "process" {
+        Value::Null
     } else {
-        fields.clone()
+        crate::table_runtime::source(
+            tx,
+            pid,
+            board_key,
+            fields
+                .get("process_point_id")
+                .unwrap_or(&old["process_point_id"])
+                .as_i64()
+                .unwrap_or(0),
+            definitions,
+        )
+        .await?
     };
-    let old_category = crate::sheet_layout::category(&old).to_owned();
+    let mut updates =
+        crate::table_behavior::normalize(definition, &old, fields, &reference, &c.operation)?;
+    crate::table_runtime::check_updates(kind, &updates)?;
     let mut merged = old;
     if kind == "process" {
         for key in ["unit", "default_value", "min_value", "max_value", "notes"] {
@@ -258,55 +280,7 @@ pub async fn apply(
             updates.insert("name".into(), point["name"].clone());
             merged["name"] = point["name"].clone();
         }
-        if dsp {
-            if fields
-                .get("enabled")
-                .is_some_and(|value| value != &json!(true))
-            {
-                return Err(AppError::bad(
-                    "此板卡的转发表记录全部参与转发，不再支持停用；不需要转发时请删除映射",
-                ));
-            }
-            // Retain compatible storage columns without independent DSP meaning.
-            // In particular, old clients cannot override the current source name.
-            for (key, value) in [("name", point["name"].clone()), ("enabled", json!(true))] {
-                updates.insert(key.into(), value.clone());
-                merged[key] = value;
-            }
-            let model = require_upp_model(&board, &point)?;
-            if fields
-                .get("upp_model")
-                .is_some_and(|value| value.as_i64() != Some(model))
-            {
-                return Err(AppError::bad(format!(
-                    "UPP 模型号由内部数据分类「{}」固定推导为 {model}，不能手动修改",
-                    crate::sheet_layout::category(&point)
-                )));
-            }
-            updates.insert("upp_model".into(), json!(model));
-            merged["upp_model"] = json!(model);
-            if c.operation == "create" {
-                let suggested = crate::sheet_layout::wire_defaults(
-                    &point,
-                    fields.get("wire_type").and_then(Value::as_str),
-                );
-                for key in ["wire_type", "wire_length", "scale", "conversion"] {
-                    if !fields.contains_key(key) {
-                        merged[key] = suggested[key].clone();
-                    }
-                }
-            }
-            // DSP representation determines conversion; byte order belongs to
-            // the receiving board. Retain normalized compatibility columns.
-            for (key, value) in [
-                ("conversion", crate::sheet_layout::wire_defaults(&point, merged["wire_type"].as_str())["conversion"].clone()),
-                ("byte_order", json!(0)),
-            ] {
-                updates.insert(key.into(), value.clone());
-                merged[key] = value;
-            }
-        }
-        if !c.calculation_rule.is_null() {
+        if kind == "forward" && !c.calculation_rule.is_null() {
             // CHECK constraints are immediate. Stage a valid scalar width and
             // address while applying the batch, then the frozen whole-table
             // script replaces both before validation/history/commit.
@@ -323,16 +297,8 @@ pub async fn apply(
     if c.operation == "create" {
         return insert(tx, pid, board_key, kind, &merged).await;
     }
-    if worksheet && old_category != crate::sheet_layout::category(&merged) {
-        let linked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM points.transmit_points WHERE project_id=$1 AND board_key=$2 AND process_point_id=$3)")
-            .bind(pid).bind(board_key).bind(c.id).fetch_one(&mut *tx).await?;
-        if linked {
-            let model = require_upp_model(&board, &merged)?;
-            // Keep offsets and all manually configured wire parameters unchanged.
-            // Normal preview, authorization, validation and history see this update.
-            sqlx::query("UPDATE points.transmit_points SET upp_model=$4 WHERE project_id=$1 AND board_key=$2 AND process_point_id=$3 AND upp_model<>$4")
-                .bind(pid).bind(board_key).bind(c.id).bind(model).execute(&mut *tx).await?;
-        }
+    if updates.is_empty() {
+        return Ok(merged);
     }
     let cols: Vec<_> = updates.keys().map(String::as_str).collect();
     let selected = cols
@@ -344,12 +310,6 @@ pub async fn apply(
     Ok(sqlx::query_scalar(&format!(
         "UPDATE {table} t SET ({assigned})=(SELECT {selected} FROM jsonb_populate_record(NULL::{table},$4) x) WHERE project_id=$1 AND board_key=$2 AND id=$3 RETURNING to_jsonb(t)"
     )).bind(pid).bind(board_key).bind(c.id).bind(Value::Object(updates)).fetch_one(&mut *tx).await?)
-}
-
-fn require_upp_model(board: &Value, point: &Value) -> Result<i64> {
-    crate::sheet_layout::upp_model_for(board, point).ok_or(AppError::bad(
-        "此板卡转发需要内部点具有有效的数据分类，请先设置数据分类",
-    ))
 }
 
 pub async fn table_rows(
@@ -388,15 +348,8 @@ pub async fn table_rows(
     };
     let groups = groups(&board);
     for row in &mut result {
-        if kind == "process" && crate::sheet_layout::enabled(&board) {
-            crate::sheet_layout::project_for(&board, row);
-        }
         if kind != "process" {
-            if let Some(point) = row.as_object_mut().unwrap().remove("source_point") {
-                if crate::sheet_layout::enabled(&board) {
-                    crate::sheet_layout::project_forward_for(&board, row, &point);
-                }
-            }
+            row.as_object_mut().unwrap().remove("source_point");
             if let Some(endpoint) = board["point_endpoints"].as_array().and_then(|endpoints| {
                 endpoints
                     .iter()
@@ -406,15 +359,19 @@ pub async fn table_rows(
                 row["protocol"] = endpoint["protocol"].clone();
             }
         }
-        if !crate::sheet_layout::enabled(&board) {
-            crate::native_protocol::project_row(row, &board, kind);
-        }
+        crate::native_protocol::project_row(row, &board, kind);
         row["group_name"] = groups
             .iter()
             .find(|g| g["code"] == row["group_key"])
             .map(|g| g["name"].clone())
             .unwrap_or_else(|| row["group_key"].clone());
     }
+    let sources = if kind == "process" {
+        Vec::new()
+    } else {
+        crate::table_runtime::all_sources(tx, pid, board_key, &board["table_definitions"]).await?
+    };
+    crate::table_behavior::project(&board["table_definitions"][kind], &mut result, &sources)?;
     Ok(result)
 }
 
@@ -479,11 +436,6 @@ fn numeric_range(out: &mut Vec<Value>, row: &Value) {
                     && n <= limits.1
                     && (typ == "F32" || n.fract() == 0.) => {}
             Err(_) if identifier(value) => {
-                let source_key = match key {
-                    "default_value" => "I",
-                    "min_value" => "K",
-                    _ => "J",
-                };
                 issue(
                     out,
                     entity,
@@ -492,7 +444,9 @@ fn numeric_range(out: &mut Vec<Value>, row: &Value) {
                     "符号值尚未解析，无法确认其数值范围；请确认固件定义或填写具体数值",
                     0,
                 );
-                if row["metadata"]["source_cells"]["values"][source_key]
+                if row["source_values"]
+                    .get(key)
+                    .unwrap_or(&row["metadata"]["original_ranges"][key])
                     .as_str()
                     .is_some_and(|s| s.trim() == value)
                 {
@@ -527,18 +481,16 @@ fn numeric_range(out: &mut Vec<Value>, row: &Value) {
             "默认值超出上下限，请核实源定义",
             0,
         );
-        let original = &row["metadata"]["source_cells"]["values"];
-        if [
-            ("default_value", "I"),
-            ("min_value", "K"),
-            ("max_value", "J"),
-        ]
-        .iter()
-        .all(|(key, column)| {
-            original[column]
-                .as_str()
-                .is_some_and(|v| v.trim() == strv(row, key).trim())
-        }) {
+        if ["default_value", "min_value", "max_value"]
+            .iter()
+            .all(|key| {
+                row["source_values"]
+                    .get(key)
+                    .unwrap_or(&row["metadata"]["original_ranges"][key])
+                    .as_str()
+                    .is_some_and(|v| v.trim() == strv(row, key).trim())
+            })
+        {
             out.last_mut().unwrap()["level"] = json!("warning");
         }
     }
@@ -617,8 +569,7 @@ pub fn validate(g: &Value) -> Vec<Value> {
                 0,
             );
         }
-        // The workbook has no confirmed DSP numeric sigIDs. Native definitions
-        // and protocol JSON remain useful without inventing a firmware ABI.
+        // Range validation depends on storage representation, not board identity.
         if !crate::board_rules::raw_row(g, point) {
             numeric_range(&mut out, point);
         }
@@ -632,8 +583,6 @@ pub fn validate(g: &Value) -> Vec<Value> {
             })
     }) {
         let entity = "transmit_points";
-        let dsp =
-            board_definition(g, strv(t, "board_key")).is_some_and(crate::sheet_layout::enabled);
         if !board_definition(g, strv(t, "board_key"))
             .and_then(|board| board["point_endpoints"].as_array())
             .is_some_and(|endpoints| {
@@ -668,42 +617,6 @@ pub fn validate(g: &Value) -> Vec<Value> {
             );
             continue;
         };
-        if dsp {
-            let model = crate::sheet_layout::upp_model_for(
-                board_definition(g, strv(t, "board_key")).unwrap(),
-                p,
-            );
-            if model.is_none() || model != t["upp_model"].as_i64() {
-                issue(
-                    &mut out,
-                    entity,
-                    t,
-                    "upp_model_category",
-                    "UPP 模型号必须由所关联内部点的有效数据分类固定推导",
-                    num(p, "id"),
-                );
-            }
-            let suggested = crate::sheet_layout::wire_defaults(p, None);
-            if t["wire_type"] != suggested["wire_type"] {
-                issue(
-                    &mut out,
-                    entity,
-                    t,
-                    "wire_type_suggestion",
-                    &format!(
-                        "通信类型 {} 与 DateType / ArrayCnt 建议的 {} 不同；当前采用手动配置，请确认通信双方一致",
-                        strv(t, "wire_type"),
-                        strv(&suggested, "wire_type")
-                    ),
-                    num(p, "id"),
-                );
-                let warning = out.last_mut().unwrap();
-                warning["level"] = json!("warning");
-                warning["field"] = json!("wire_type");
-                warning["recommended_wire_type"] = suggested["wire_type"].clone();
-                warning["actual_wire_type"] = t["wire_type"].clone();
-            }
-        }
         let wire = strv(t, "wire_type");
         let length = num(t, "wire_length");
         if length < 1 || length > 65535 || (wire != "STRING" && size(wire) != Some(length)) {
@@ -720,12 +633,7 @@ pub fn validate(g: &Value) -> Vec<Value> {
         if !scale.is_finite() || scale <= 0. {
             issue(&mut out, entity, t, "scale", "协议系数必须是有限正数", 0);
         }
-        let automatic = crate::sheet_layout::wire_defaults(p, Some(wire));
-        let conversion = if dsp {
-            strv(&automatic, "conversion")
-        } else {
-            strv(t, "conversion")
-        };
+        let conversion = strv(t, "conversion");
         let matching = match conversion {
             "identity" => {
                 p["internal_type"] == t["wire_type"]
@@ -769,10 +677,10 @@ pub fn validate(g: &Value) -> Vec<Value> {
                 0,
             );
         }
-        if dsp || t["enabled"] == true {
+        if t["enabled"] == true {
             for other in rows(g, "transmit_points").iter().filter(|o| {
                 num(o, "id") < num(t, "id")
-                    && (dsp || o["enabled"] == true)
+                    && o["enabled"] == true
                     && o["project_id"] == t["project_id"]
                     && o["board_key"] == t["board_key"]
                     && o["endpoint_key"] == t["endpoint_key"]
@@ -865,11 +773,10 @@ pub fn generate(g: &Value) -> BTreeMap<String, String> {
         return files;
     };
     for board in boards.iter().filter(|b| b["point_storage"] == "native") {
-        if !crate::sheet_layout::enabled(board)
-            && (crate::board_rules::raw(board)
-                || rows(board, "point_endpoints")
-                    .iter()
-                    .any(|e| e["direction"] == "collect" || e["protocol"] == "MODBUS"))
+        if crate::board_rules::raw(board)
+            || rows(board, "point_endpoints")
+                .iter()
+                .any(|e| e["direction"] == "collect" || e["protocol"] == "MODBUS")
         {
             files.extend(crate::native_protocol::generate(g, board));
             continue;
@@ -892,23 +799,6 @@ pub fn generate(g: &Value) -> BTreeMap<String, String> {
             .filter(|p| p["board_key"] == code)
             .cloned()
             .collect();
-        if crate::sheet_layout::enabled(board) {
-            for mapping in &mut transmit {
-                mapping["enabled"] = json!(true);
-                if let Some(point) = process.iter().find(|point| {
-                    point["id"] == mapping["process_point_id"]
-                        && point["project_id"] == mapping["project_id"]
-                }) {
-                    mapping["name"] = point["name"].clone();
-                    mapping["conversion"] = crate::sheet_layout::wire_defaults(
-                        point,
-                        mapping["wire_type"].as_str(),
-                    )["conversion"]
-                        .clone();
-                }
-                mapping["byte_order"] = json!(0);
-            }
-        }
         transmit.sort_by_key(|t| {
             (
                 strv(t, "endpoint_key").to_owned(),
@@ -980,6 +870,25 @@ pub fn generate(g: &Value) -> BTreeMap<String, String> {
 mod tests {
     use super::*;
 
+    fn definitions() -> Value {
+        crate::project_files::ProjectFiles::load_from(std::path::Path::new("config"))
+            .unwrap()
+            .definition(Some("dc-ups"))
+            .unwrap()["boards"]
+            .clone()
+    }
+
+    fn validate(graph: &Value) -> Vec<Value> {
+        let effective = crate::table_runtime::effective(graph).unwrap();
+        let mut issues = super::validate(&effective);
+        issues.extend(crate::table_runtime::issues(graph).unwrap());
+        issues
+    }
+
+    fn generate(graph: &Value) -> BTreeMap<String, String> {
+        super::generate(&crate::table_runtime::effective(graph).unwrap())
+    }
+
     fn graph() -> Value {
         let mut point = defaults("process");
         point.as_object_mut().unwrap().extend(
@@ -999,9 +908,10 @@ mod tests {
             .unwrap()
             .clone(),
         );
-        json!({"project_config":{"board_types":[{"code":"DSP","point_storage":"native","point_rules":crate::sheet_layout::test_board()["point_rules"],
+        json!({"project_config":{"board_types":[{"code":"DSP","point_storage":"native",
             "point_groups":[{"code":"LOCAL","name":"本地数据"}],
-            "point_endpoints":[{"code":"UPP_SERVICE","name":"DSP UPP服务","protocol":"UPP"}]}]},"process_points":[point],"transmit_points":[transmit]})
+            "point_endpoints":[{"code":"UPP_SERVICE","name":"DSP UPP服务","protocol":"UPP"}]}]},
+            "table_definitions":definitions(),"process_points":[point],"collect_points":[],"transmit_points":[transmit]})
     }
 
     #[test]
@@ -1110,7 +1020,9 @@ mod tests {
         );
         g["process_points"][0]["metadata"]["category"] = json!("");
         assert!(
-            require_upp_model(&crate::sheet_layout::test_board(), &g["process_points"][0]).is_err()
+            validate(&g)
+                .iter()
+                .any(|issue| issue["code"] == "upp_model_category")
         );
         g["transmit_points"] = json!([]);
         assert!(

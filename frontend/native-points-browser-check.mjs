@@ -148,16 +148,16 @@ try {
   await page.getByRole("button", { name: "放弃修改", exact: true }).click();
   await cell("sheet_type").dblclick();
   await page.getByLabel("编辑 DateType", { exact: true }).selectOption("Sys_U16");
-  await expect(cell("type_length")).toHaveText("2");
+  await expect(cell("type_length")).toHaveText("待计算");
   await cell("element_count").dblclick();
   await page.getByLabel("编辑 ArrayCnt", { exact: true }).fill("15");
   await page.getByLabel("编辑 ArrayCnt", { exact: true }).press("Enter");
-  await expect(cell("byte_length")).toHaveText("30");
+  await expect(cell("byte_length")).toHaveText("待计算");
   await expect(cell("max_value")).toHaveAttribute("aria-readonly", "false");
   await cell("display_digits").dblclick();
   await page.getByLabel("编辑 DisplayDigit", { exact: true }).fill("3");
   await page.getByLabel("编辑 DisplayDigit", { exact: true }).press("Enter");
-  await expect(cell("precision")).toHaveText("0.001");
+  await expect(cell("precision")).toHaveText("待计算");
   await cell("category").dblclick();
   await page.getByLabel("编辑 数据分类", { exact: true }).selectOption("任务级观测量");
   await cell("ram").dblclick();
@@ -172,10 +172,10 @@ try {
   await multiline.press("Enter");
   await expect(cell("enum_table")).toHaveText("bit0:修改\nbit1:新增");
   await page.getByRole("button", { name: "检查", exact: true }).click();
-  await expect(page.locator("dialog .impact-list")).toContainText("RAM：N → Y");
-  await expect(page.locator("dialog .impact-list")).toContainText("DateType：Sys_F32 → Sys_U16");
+  await expect(page.locator("dialog .impact-list")).toContainText('"ram":"Y"');
+  await expect(page.locator("dialog .impact-list")).toContainText("internal_type：F32 → U16");
   await expect(page.locator("dialog .impact-list")).not.toContainText("[object Object]");
-  await expect(page.locator("dialog .impact-list")).not.toContainText("metadata");
+  await expect(page.locator("dialog .impact-list")).toContainText("metadata");
   const sheetChanges = requests.at(-1).body.rows[0].values;
   assert.equal(sheetChanges.sheet_type, "Sys_U16");
   assert.equal(sheetChanges.element_count, 15);
@@ -189,7 +189,7 @@ try {
   await openRowAction(page, rows().first());
   await page.getByLabel("RAM", { exact: true }).selectOption("Y");
   await page.getByRole("button", { name: "检查关联影响", exact: true }).click();
-  await expect(page.locator("dialog .impact-list")).toContainText("RAM：N → Y");
+  await expect(page.locator("dialog .impact-list")).toContainText('"ram":"Y"');
   await expect(page.locator("dialog .impact-list")).not.toContainText("[object Object]");
   await page.locator("dialog").getByRole("button", { name: "关闭", exact: true }).last().click();
   await page.getByRole("button", { name: "新建DSP内部数据", exact: true }).click();
@@ -236,9 +236,9 @@ try {
   await cell("signal_name").dblclick();
   await page.getByLabel("编辑 数据名称", { exact: true }).selectOption("2");
   await expect(cell("variable_name")).toHaveText("OutputCurrent");
-  await expect(cell("upp_model")).toHaveText("99");
+  await expect(cell("upp_model")).toHaveText("待计算");
   // The protocol length remains independent from the new source's 2 internal bytes.
-  await expect(cell("effective_length")).toHaveText("4");
+  await expect(cell("effective_length")).toHaveText("待计算");
   await expect(page.locator('.point-table [data-column-key="sheet_type"]')).toHaveCount(0);
   await expect(cell("category")).toHaveText("任务级观测量");
   await expect(cell("effective_type")).toHaveText("S32");

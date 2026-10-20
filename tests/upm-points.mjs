@@ -85,6 +85,66 @@ export async function checkUpmPoints({client,engineer,engineerId,viewer,viewerId
   const subsetHistory=(await client.call(`${url}/sql`,"POST",{sql:`SELECT after_data FROM history.events WHERE kind='point' AND entity_type='collect' AND record_id=${linked.id} ORDER BY id DESC LIMIT 1`})).rows;
   equal(Number(subsetHistory[0].after_data.scale),Number(linkedSource.scale));
   console.log("PASS: JSON collection subset, atomic source synchronization, independent polling, permissions, deletion guard and concurrent merge");
+  // Only the receiving collection hook runs after subset synchronization. It
+  // sees the new source parameters within the same rollback-only preview and
+  // committed history batch, without rewriting the receiver's transmit rows.
+  const receiverDefinition=path.join(projectConfigs,fixtureKey("upm"),"UPM/collect.json");
+  const originalReceiverDefinition=fs.readFileSync(receiverDefinition,"utf8");
+  const receiverScript=path.join(path.dirname(receiverDefinition),"subset-receiver-test.js");
+  try {
+    const definition=JSON.parse(originalReceiverDefinition);
+    definition.editor=definition.editor.filter(field=>field!=="poll_interval");
+    delete definition.inline.poll_interval;
+    definition.behavior={
+      engine:"javascript",script_file:path.basename(receiverScript),
+      parameters:{target_id:linked.id,base_scale:Number(linkedSource.scale)},
+      editable_fields:[],metadata_fields:[],project_fields:[],owned_fields:["poll_interval"],
+    };
+    fs.writeFileSync(receiverScript,`export function behavior(context, parameters) {
+      if (context.action === "normalize") return {values:context.fields};
+      if (context.action === "validate") return [];
+      return context.rows.map(row => ({
+        id:row.id,
+        values:context.action === "reconcile" && row.id === parameters.target_id
+          ? {poll_interval:Math.round(row.scale / parameters.base_scale) + 18}
+          : {}
+      }));
+    }\n`);
+    fs.writeFileSync(receiverDefinition,JSON.stringify(definition));
+    const receiverBaseline=await graph();
+    const receiverTransmits=JSON.stringify(receiverBaseline.transmit_points.filter(row=>row.board_key==="UPM"));
+    const latestHistory=(await client.call(`${url}/sql`,"POST",{
+      sql:"SELECT COALESCE(MAX(id),0) AS id FROM history.events WHERE kind='point'",
+    })).rows[0].id;
+    const pending=await sourceChange({scale:updatedScale});
+    equal(pending.status,200);ok(pending.data.allowed,JSON.stringify(pending.data.errors));
+    equal(pending.data.impact.count,2);
+    const unchanged=await graph();
+    equal(unchanged.revision,receiverBaseline.revision);
+    equal(unchanged.collect_points.find(row=>row.id===linked.id).poll_interval,19);
+    equal(Number(unchanged.collect_points.find(row=>row.id===linked.id).scale),Number(linkedSource.scale));
+    await commit(pending.data);
+    const synchronized=await graph();
+    const receiver=synchronized.collect_points.find(row=>row.id===linked.id);
+    equal(Number(receiver.scale),updatedScale);equal(receiver.poll_interval,20);
+    equal(receiver.scan_priority,2);equal(receiver.byte_order,linked.byte_order);
+    equal(JSON.stringify(synchronized.transmit_points.filter(row=>row.board_key==="UPM")),receiverTransmits);
+    const events=(await client.call(`${url}/sql`,"POST",{
+      sql:`SELECT entity_type,record_id,batch_id,before_data,after_data FROM history.events WHERE kind='point' AND id>${Number(latestHistory)} ORDER BY id`,
+    })).rows;
+    equal(events.length,2);equal(new Set(events.map(event=>event.batch_id)).size,1);
+    const receiverEvent=events.find(event=>event.entity_type==="collect" && Number(event.record_id)===linked.id);
+    ok(receiverEvent);equal(receiverEvent.before_data.poll_interval,19);equal(receiverEvent.after_data.poll_interval,20);
+    equal(Number(receiverEvent.after_data.scale),updatedScale);
+    const restore=await sourceChange({scale:Number(linkedSource.scale)});
+    equal(restore.status,200);ok(restore.data.allowed,JSON.stringify(restore.data.errors));
+    await commit(restore.data);
+    equal((await client.call(`${table}/collect`)).rows.find(row=>row.id===linked.id).poll_interval,19);
+  } finally {
+    fs.writeFileSync(receiverDefinition,originalReceiverDefinition);
+    fs.rmSync(receiverScript,{force:true});
+  }
+  console.log("PASS: subset receiver collection rules run atomically after source synchronization");
   const stable=JSON.stringify(await graph());
   const invalid=await preview("collect",{process_point_id:alias.id,endpoint_key:"DSP_UPP",upp_model:1,address:100,wire_type:"U16",wire_length:2});
   equal(invalid.data.allowed,false);equal(JSON.stringify(await graph()),stable);

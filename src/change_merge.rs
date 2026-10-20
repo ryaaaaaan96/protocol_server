@@ -206,6 +206,7 @@ mod tests {
     fn change() -> Change {
         Change {
             calculation_rule: Value::Null,
+            table_definitions: Value::Null,
             revision: 1,
             entity: "process_points".into(),
             operation: "update".into(),
@@ -256,6 +257,7 @@ mod tests {
         });
         let c = Change {
             calculation_rule: Value::Null,
+            table_definitions: Value::Null,
             revision: 8,
             entity: "point_order".into(),
             operation: "reorder".into(),

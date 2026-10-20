@@ -1,6 +1,6 @@
 import type { Row } from "../api";
-import { displayCell } from "./pointGrid";
-import { dspModel, hiddenProcessPoint, type PointDefinition, type PointTableData } from "./pointTables";
+import { columnApplies, displayCell } from "./pointGrid";
+import { hiddenProcessPoint, type PointDefinition, type PointTableData } from "./pointTables";
 
 export type OverviewKind = "process" | "forward";
 type PointKind = OverviewKind;
@@ -28,16 +28,21 @@ export function overviewRows(data: OverviewData, groupKey?: string, showNonUploa
   });
 }
 export function overviewDefinition(data: OverviewData): PointDefinition {
-  const leading = new Set(["name", "variable_name", "sheet_type", "category"]);
-  const internal = data.process.definition.columns;
-  const forward = data.forward.definition.columns
-    .filter(key => !["signal_name", "variable_name", "category"].includes(key));
-  if (!forward.includes("endpoint_key") && !forward.includes("endpoint_name")) forward.push("endpoint_key");
+  const internal = data.process.definition.columns
+    .filter(key => !data.process.definition.presentation?.overview_hidden_fields?.includes(key));
+  const leading = data.process.definition.presentation?.overview_leading_fields?.filter(key => internal.includes(key)) ?? internal;
+  const hiddenForward = data.forward.definition.presentation?.overview_hidden_fields || [];
+  const forwardColumns = data.forward.definition.columns
+    .filter(key => !hiddenForward.includes(key));
+  const forwardLeading = data.forward.definition.presentation?.overview_leading_fields?.filter(key => forwardColumns.includes(key)) || [];
+  const forward = [...forwardLeading, ...forwardColumns.filter(key => !forwardLeading.includes(key))];
+  if (!forward.includes("endpoint_key") && !forward.includes("endpoint_name") &&
+    !hiddenForward.includes("endpoint_key") && !hiddenForward.includes("endpoint_name") &&
+    data.forward.definition.fields.endpoint_key) forward.push("endpoint_key");
   const columns = [
-    ...internal.filter(key => leading.has(key)).map(key => `process:${key}`),
-    // The shared name, variable and category are edited on their internal point.
+    ...leading.map(key => `process:${key}`),
     ...forward.map(key => `forward:${key}`),
-    ...internal.filter(key => !leading.has(key)).map(key => `process:${key}`),
+    ...internal.filter(key => !leading.includes(key)).map(key => `process:${key}`),
   ];
   return {
     label: `${data.process.board_key} 总体视图`, description: "", columns, editor: [], inline: {}, ordering: { mode: "disabled", group_by: [] },
@@ -67,10 +72,12 @@ export function overviewText(data: OverviewData, draft: OverviewDraft, row: Over
   const { kind, column } = columnSource(key), source = row[kind];
   if (!source) return "—";
   const values = overviewValues(data, draft, kind, source);
+  if (!columnApplies(data[kind], column, { ...source, ...values }))
+    return data[kind].definition.presentation?.empty_text ?? "—";
   if (kind === "forward") {
-    const internal = overviewValues(data, draft, "process", row.process);
-    if (column === "upp_model" && Object.hasOwn(draft[sourceKey("process", row.process.id)] || {}, "category"))
-      return String(dspModel(internal.category) ?? "待计算");
+    const internalDraft = draft[sourceKey("process", row.process.id)] || {};
+    if (Object.keys(internalDraft).length && data.forward.definition.presentation?.computed_dependencies?.[column]?.includes("process_point_id"))
+      return "待计算";
     // A full-table script may move other rows too; never display old offsets as current.
     if (data.forward.definition.calculation && Object.keys(draft).length &&
       ["effective_address", "effective_length"].includes(column)) return "待计算";

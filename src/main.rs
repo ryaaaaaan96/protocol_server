@@ -23,9 +23,14 @@ mod project_config;
 mod project_dump;
 mod project_files;
 mod project_folders;
+mod script_runtime;
+#[cfg(test)]
+#[path = "../tests/references/sheet_layout.rs"]
 mod sheet_layout;
 mod sql_workspace;
+mod table_behavior;
 mod table_calculation;
+mod table_runtime;
 mod topology;
 mod topology_codegen;
 mod topology_validation;

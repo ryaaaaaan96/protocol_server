@@ -11,8 +11,19 @@ export type PointField = {
   default?: unknown;
   hint?: string;
   multiline?: boolean;
+  protocols?: string[];
 };
 export type PointDefinition = {
+  behavior?: Record<string, unknown> & { owned_fields?: string[] };
+  presentation?: {
+    category_filter?: string;
+    search_placeholder?: string;
+    empty_text?: string;
+    overview_hidden_fields?: string[];
+    overview_leading_fields?: string[];
+    computed_dependencies?: Record<string, string[]>;
+    suggestion?: { reference: string; source_key: string; fields: Record<string, string>; description?: string };
+  };
   mapping?: Record<string, unknown>;
   hidden_source_sig_ids?: string[];
   calculation?: { engine: "javascript" | "builtin"; script_file?: string; script?: string; parameters: Record<string, unknown> };
@@ -61,51 +72,52 @@ export function isStringType(value: unknown): boolean {
   return normalizedDataType(value) === "STRING";
 }
 
-export function isDspSheet(data: PointTableData): boolean {
-  return data.kind === "process" && data.definition.columns.includes("sheet_type") &&
-    data.definition.columns.includes("variable_name");
+/** The server owns table formulas; the UI only consumes declared suggestion values. */
+export function hasRecommendation(data: PointTableData): boolean {
+  return !!data.definition.presentation?.suggestion;
 }
 
-export function isDspForward(data: PointTableData): boolean {
-  return data.kind === "forward" && !!data.definition.fields.recommended_wire_type &&
-    !!data.definition.fields.category;
+export function hasRecalculation(definition: PointDefinition): boolean {
+  return !!definition.calculation || !!definition.behavior?.owned_fields?.length;
 }
 
-export const communicationFields = ["wire_type", "wire_length", "scale"] as const;
-export type CommunicationRecommendation = { wire_type: string; wire_length: number; scale: number };
+export function recommendationFields(data: PointTableData): string[] {
+  return Object.keys(data.definition.presentation?.suggestion?.fields || {});
+}
 
-/** Recommendations belong to the selected internal point; existing mappings remain independent. */
-export function communicationRecommendation(data: PointTableData, values: Row, row?: Row): CommunicationRecommendation | undefined {
-  if (!isDspForward(data)) return undefined;
-  const selected = Object.hasOwn(values, "process_point_id") ? values.process_point_id : row?.process_point_id;
+export function communicationRecommendation(data: PointTableData, values: Row, row?: Row): Row | undefined {
+  const spec = data.definition.presentation?.suggestion;
+  if (!spec) return undefined;
+  const selected = Object.hasOwn(values, spec.source_key) ? values[spec.source_key] : row?.[spec.source_key];
   if (selected == null) return undefined;
-  const point = data.options.process_points?.find(item => item.id === selected);
-  const source = point || (selected === row?.process_point_id ? row : undefined);
+  const current = { ...row, ...row?.edit_values, ...values };
+  const source = pointChoices(data, spec.source_key, current).find(item => item.id === selected) ||
+    (selected === row?.[spec.source_key] ? row : undefined);
   if (!source) return undefined;
-  const internal = sheetType(source.sheet_type ?? source.internal_type ?? source.data_type);
-  const count = Number(source.element_count ?? 1);
-  const type = source.recommended_wire_type ?? source.sheet_data_type ??
-    (count > 1 ? "STRING" : internal === "F32" ? "S32" : internal);
-  const widths: Record<string, number> = { U8: 1, U16: 2, S16: 2, U32: 4, S32: 4, F32: 4 };
-  const length = Number(source.recommended_wire_length ?? (type === "STRING" ? source.byte_length : widths[type]));
-  const scale = Number(source.recommended_scale ?? (internal === "F32" && type === "S32" ? source.precision ?? 1 : 1));
-  if (!type || !Number.isSafeInteger(length) || length < 1 || !Number.isFinite(scale) || scale <= 0) return undefined;
-  return { wire_type: type, wire_length: length, scale };
+  const entries = Object.entries(spec.fields).filter(([target]) => fieldApplies(data, target, current))
+    .map(([target, key]) => [target, source[key]]);
+  // A missing server value must never trigger a browser-side approximation.
+  if (!entries.length || entries.some(([, value]) => value == null ||
+    !["string", "number", "boolean"].includes(typeof value) ||
+    (typeof value === "number" && !Number.isFinite(value)))) return undefined;
+  return Object.fromEntries(entries);
 }
 
 export function communicationHint(data: PointTableData, values: Row, row?: Row): string {
+  const description = data.definition.presentation?.suggestion?.description || "建议值由表格规则计算，可按实际通信配置调整。";
   const suggestion = communicationRecommendation(data, values, row);
-  if (!suggestion) return "选择 DSP 内部点后，根据 DateType 和 ArrayCnt 给出通信建议。";
-  const current = values.wire_type ?? row?.wire_type;
-  const prefix = `根据 DateType 和 ArrayCnt，建议 ${suggestion.wire_type}，${suggestion.wire_length} 字节，协议系数 ${suggestion.scale}。`;
-  return prefix + (current != null && current !== "" && current !== suggestion.wire_type
-    ? `当前 ${current} 偏离建议；请确认通信类型、长度和协议系数符合接收端协议，转换方式自动确定。`
-    : "可按接收端协议调整，修改不会改变内部 DateType。");
+  if (!suggestion) return `${description}选择来源记录后查看建议。`;
+  const label = (key: string) => data.definition.fields[key]?.label || key;
+  const recommended = Object.entries(suggestion).map(([key, value]) => `${label(key)} ${pointText(value)}`).join("，");
+  const changed = Object.entries(suggestion).find(([key, value]) => data.definition.editor.includes(key) &&
+    (values[key] ?? row?.[key]) != null && !Object.is(values[key] ?? row?.[key], value));
+  return `${description}建议：${recommended}。${changed ? `当前 ${pointText(values[changed[0]] ?? row?.[changed[0]])} 偏离建议；保存时会校验关联和转换。` : ""}`;
 }
 
 export function communicationDiffers(data: PointTableData, values: Row, row?: Row): boolean {
   const suggestion = communicationRecommendation(data, values, row);
-  return !!suggestion && communicationFields.filter(key => !data.definition.calculation || key !== "wire_length").some(key => !Object.is(Object.hasOwn(values, key) ? values[key] : row?.[key], suggestion[key]));
+  return !!suggestion && Object.keys(suggestion).filter(key => data.definition.editor.includes(key))
+    .some(key => !Object.is(Object.hasOwn(values, key) ? values[key] : row?.[key], suggestion[key]));
 }
 
 export function editableCommunicationRecommendation(data: PointTableData, values: Row, row?: Row): Row {
@@ -113,33 +125,30 @@ export function editableCommunicationRecommendation(data: PointTableData, values
     .filter(([key]) => data.definition.editor.includes(key)));
 }
 
-export function dspCategory(model: unknown): string {
-  const categories: Record<string, string> = {
-    "1": "系统参数1", "2": "系统参数2", "99": "任务级观测量",
-    "100": "中断级观测量", "102": "控制参数设置", "103": "任务级标定量",
-  };
-  return categories[String(model)] ?? (model == null ? "—" : "未匹配分类");
+/** Protocol-specific fields are declared by the project, not chosen by a fixed UI list. */
+export function definitionForProtocol(definition: PointDefinition, protocol?: string): PointDefinition {
+  if (!protocol) return definition;
+  const allowed = (key: string) => !definition.fields[key]?.protocols || definition.fields[key].protocols!.includes(protocol);
+  return { ...definition, columns: definition.columns.filter(allowed), editor: definition.editor.filter(allowed),
+    inline: Object.fromEntries(Object.entries(definition.inline).filter(([column, field]) => allowed(column) && allowed(field))) };
 }
 
-export function dspModel(category: unknown): number | undefined {
-  const models: Record<string, number> = {
-    "系统参数1": 1, "系统参数2": 2, "任务级观测量": 99,
-    "中断级观测量": 100, "控制参数设置": 102, "任务级标定量": 103,
-  };
-  return models[String(category)];
-}
-
-export function sheetType(value: unknown): string | undefined {
-  const type = normalizedDataType(value)?.replace(/^SYS_/, "");
-  return type === "FLOAT" ? "F32" : type;
+export function fieldApplies(data: PointTableData, key: string, values: Row): boolean {
+  const protocols = data.definition.fields[key]?.protocols;
+  if (!protocols) return true;
+  const endpoint = data.options.endpoints?.find(item => (item.endpoint_key ?? item.code) === values.endpoint_key);
+  return !endpoint || protocols.includes(endpoint.protocol);
 }
 
 /** Resolve the internal type directly or through the selected process point. */
 export function pointDataType(data: PointTableData, values: Row, fallbackRow?: Row): string | undefined {
   const original = { ...fallbackRow, ...fallbackRow?.edit_values };
   const current = { ...original, ...values };
-  if (isDspSheet(data)) return sheetType(current.sheet_type);
-  if (data.kind === "process") return normalizedDataType(current.internal_type ?? current.data_type);
+  if (data.kind === "process") {
+    // Custom type editors are interpreted by the server rule, including array semantics.
+    if (!data.definition.editor.includes("internal_type")) return undefined;
+    return normalizedDataType(current.internal_type ?? current.data_type);
+  }
   const signal = data.options.process_points?.find(item => item.id === current.process_point_id);
   if (signal) return normalizedDataType(signal.internal_type ?? signal.data_type);
   return current.process_point_id === original.process_point_id ? normalizedDataType(fallbackRow?.data_type) : undefined;
@@ -188,65 +197,9 @@ export function pointText(value: unknown): string {
 }
 
 
-const sheetMetadataColumns: Record<string, string> = {
-  enum_table: "D", display_digits: "E", access: "M", ram: "N", flash: "O", eeprom: "P",
-  calibration: "Q", structure: "R", cpu: "S", upload_level: "V", category: "W",
-};
-
-function sheetChangeValues(row: Row): Row {
-  const projected = { ...row }, metadata = row.metadata || {};
-  const source = (key: string, column: string) => Object.hasOwn(metadata, key)
-    ? metadata[key] : metadata.source_cells?.values?.[column];
-  if (Object.hasOwn(row, "enum_name")) {
-    const variable = source("source_variable", "B");
-    const normalized = typeof variable === "string" ? variable.trim()
-      .replace(/([a-z0-9])([A-Z])/g, "$1_$2").replace(/([A-Z])([A-Z][a-z])/g, "$1_$2")
-      .replace(/[^A-Za-z0-9]+/g, "_").replace(/^_|_$/g, "").toUpperCase() : "";
-    projected.variable_name = normalized === row.enum_name && variable ? variable : row.enum_name;
-    delete projected.enum_name;
-  }
-  if (Object.hasOwn(row, "internal_type")) {
-    projected.sheet_type = `Sys_${row.internal_type}`;
-    delete projected.internal_type;
-  }
-  for (const [key, column] of Object.entries(sheetMetadataColumns)) {
-    const value = source(key, column);
-    if (value !== undefined) projected[key] = key === "display_digits" ? Number(value) : value;
-  }
-  const remaining = Object.fromEntries(Object.entries(metadata).filter(([key]) =>
-    key !== "source_cells" && key !== "source_variable" && !(key in sheetMetadataColumns)));
-  if (Object.keys(remaining).length) projected.metadata = remaining;
-  else delete projected.metadata;
-  return projected;
-}
-
-/** Render raw impact records using the editable sheet names without mixing related transmit rows. */
+/** Impact snapshots come from the server; do not reconstruct workbook-specific fields here. */
 export function pointChangeSummary(change: Row, fields?: Record<string, PointField>): string {
-  let before = change.before || {}, after = change.after || {};
-  const entity = change.entity;
-  const process = entity === "process_points" || entity === "points.process_points" ||
-    (!entity && [before, after].some(row => Object.hasOwn(row, "internal_type") &&
-      Object.hasOwn(row, "enum_name") && !Object.hasOwn(row, "process_point_id") && !Object.hasOwn(row, "wire_type")));
-  if (fields?.variable_name && fields.sheet_type && process) {
-    before = sheetChangeValues(before);
-    after = sheetChangeValues(after);
-  }
-  if (fields?.variable_name && fields.sheet_type && !process) {
-    const classify = (record: Row) => {
-      if (!Object.hasOwn(record, "upp_model")) return record;
-      const { upp_model, ...rest } = record;
-      return { ...(fields.upp_model ? record : rest), category: record.category || dspCategory(upp_model) };
-    };
-    before = classify(before);
-    after = classify(after);
-  }
-  if (!process && fields?.recommended_wire_type && fields.category) {
-    // Shared storage compatibility fields are not separate DSP user settings.
-    const visible = (record: Row) => Object.fromEntries(Object.entries(record)
-      .filter(([key]) => !["name", "enabled", "conversion", "byte_order"].includes(key) || fields[key]));
-    before = visible(before);
-    after = visible(after);
-  }
+  const before = change.before || {}, after = change.after || {};
   const text = (value: unknown) => value !== null && typeof value === "object"
     ? JSON.stringify(value) : pointText(value);
   const labels: Record<string, string> = { display_order: "显示顺序", ordinal: "协议排列", effective_address: "协议地址", category: "数据分类" };

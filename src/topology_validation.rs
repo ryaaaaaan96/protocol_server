@@ -1,7 +1,18 @@
 use serde_json::{Value, json};
 
 pub fn validate(graph: &Value) -> Value {
-    let mut issues = crate::native_points::validate(graph);
+    let (effective, mut issues) = match crate::table_runtime::effective(graph)
+        .and_then(|effective| Ok((effective, crate::table_runtime::issues(graph)?)))
+    {
+        Ok(result) => result,
+        Err(error) => (
+            graph.clone(),
+            vec![
+                json!({"key":"table_behavior:invalid","level":"error","entity":"table_behavior","code":"script_runtime","message":error.1}),
+            ],
+        ),
+    };
+    issues.extend(crate::native_points::validate(&effective));
     issues.extend(crate::derived_collection::issues(graph));
     issues.extend(crate::point_subsets::validate(graph));
     if let Err(error) = crate::project_config::Config::parse(graph["project_config"].clone()) {

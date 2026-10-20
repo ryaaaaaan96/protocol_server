@@ -5,6 +5,7 @@ use crate::{
 };
 use serde_json::{Value, json};
 use sqlx::PgConnection;
+use std::collections::BTreeSet;
 
 // Receiver byte order, polling and scheduling belong to the collection endpoint.
 const FIELDS: &[&str] = &[
@@ -110,7 +111,11 @@ fn updates(before: &Value, after: &Value) -> Result<Vec<(i64, Value)>> {
     Ok(updates)
 }
 
-pub async fn synchronize(tx: &mut PgConnection, pid: i64, before: &Value) -> Result<()> {
+pub async fn synchronize(
+    tx: &mut PgConnection,
+    pid: i64,
+    before: &Value,
+) -> Result<BTreeSet<String>> {
     if !before["project_config"]["board_types"]
         .as_array()
         .into_iter()
@@ -123,14 +128,18 @@ pub async fn synchronize(tx: &mut PgConnection, pid: i64, before: &Value) -> Res
                 .any(|endpoint| endpoint["subset_of"].is_object())
         })
     {
-        return Ok(());
+        return Ok(BTreeSet::new());
     }
     let after = crate::topology::snapshot(tx, pid, false).await?;
+    let mut receivers = BTreeSet::new();
     for (id, fields) in updates(before, &after)? {
-        sqlx::query("UPDATE points.collect_points SET (upp_model,address,wire_type,wire_length,scale,access)=(SELECT x.upp_model,x.address,x.wire_type,x.wire_length,x.scale,x.access FROM jsonb_populate_record(NULL::points.collect_points,$3) x) WHERE project_id=$1 AND id=$2")
-            .bind(pid).bind(id).bind(fields).execute(&mut *tx).await?;
+        let board: Option<String> = sqlx::query_scalar("UPDATE points.collect_points SET (upp_model,address,wire_type,wire_length,scale,access)=(SELECT x.upp_model,x.address,x.wire_type,x.wire_length,x.scale,x.access FROM jsonb_populate_record(NULL::points.collect_points,$3) x) WHERE project_id=$1 AND id=$2 RETURNING board_key")
+            .bind(pid).bind(id).bind(fields).fetch_optional(&mut *tx).await?;
+        if let Some(board) = board {
+            receivers.insert(board);
+        }
     }
-    Ok(())
+    Ok(receivers)
 }
 
 #[cfg(test)]

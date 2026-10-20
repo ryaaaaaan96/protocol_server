@@ -1,11 +1,8 @@
 import type { Row } from "../api";
 import {
   choiceLabel,
-  dspModel,
-  isDspForward,
-  isDspSheet,
+  fieldApplies,
   hiddenProcessPoint,
-  sheetType,
   pointChoices,
   pointIsString,
   pointText,
@@ -96,6 +93,11 @@ export function fieldForColumn(
     : undefined;
 }
 
+export function columnApplies(data: PointTableData, column: string, values: Row): boolean {
+  const field = fieldForColumn(data, column);
+  return fieldApplies(data, column, values) && (!field || fieldApplies(data, field, values));
+}
+
 /** Parse user input without rewriting any dependent fields. */
 export function parseCell(
   data: PointTableData,
@@ -104,7 +106,7 @@ export function parseCell(
   values: Row,
 ): unknown {
   const field = data.definition.fields[key];
-  if (!field || !data.definition.editor.includes(key))
+  if (!field || !data.definition.editor.includes(key) || !fieldApplies(data, key, values))
     throw new Error("此字段不可直接编辑。");
   if (["min_value", "max_value"].includes(key) && pointIsString(data, values)) {
     if (text == null || text.trim() === "") return null;
@@ -185,41 +187,17 @@ export function displayCell(
     data.options[list]?.find((item) => item.id === values[key]);
   const projected = (record: Row | undefined, key: string) =>
     record && key in record ? pointText(record[key]) : PENDING;
-  const sheet = isDspSheet(data);
-  const format = (value: unknown) => sheet && value == null ? "" : pointText(value);
+  const format = (value: unknown) => value == null ? data.definition.presentation?.empty_text ?? "—" : pointText(value);
   const current = () => format(row[column]);
+
+  if (!columnApplies(data, column, { ...row, ...values })) return format(null);
 
   if (data.kind === "process" && ["sig_id", "resolved_sig_id"].includes(column) &&
     hiddenProcessPoint(data.definition, { ...row, ...values }))
     return `${String(row.source_sig_id ?? row.metadata?.source_sig_id).trim()}（不上传 UPP）`;
 
-  if (sheet) {
-    if (column === "type_length" && changed("sheet_type")) {
-      const widths: Record<string, number> = { U8: 1, U16: 2, S16: 2, U32: 4, S32: 4, F32: 4, STRING: 1 };
-      return String(widths[sheetType(values.sheet_type) || ""] || PENDING);
-    }
-    if (column === "byte_length" && changed("sheet_type", "element_count")) {
-      const widths: Record<string, number> = { U8: 1, U16: 2, S16: 2, U32: 4, S32: 4, F32: 4, STRING: 1 };
-      const width = widths[sheetType(values.sheet_type) || ""], count = Number(values.element_count);
-      return width && Number.isSafeInteger(count) && count > 0 && Number.isSafeInteger(width * count)
-        ? String(width * count) : PENDING;
-    }
-    if (column === "precision" && changed("display_digits")) {
-      const digits = Number(values.display_digits);
-      return Number.isInteger(digits) && digits >= 0 && digits <= 8
-        ? digits === 0 ? "1" : `0.${"0".repeat(digits - 1)}1` : PENDING;
-    }
-    if (column === "sheet_data_type" && changed("sheet_type", "element_count")) {
-      const type = sheetType(values.sheet_type), count = Number(values.element_count);
-      if (!type || !Number.isSafeInteger(count) || count < 1) return PENDING;
-      return count > 1 ? "STRING" : type === "F32" ? "S32" : type;
-    }
-    if (column === "sheet_upp_model" && changed("category")) {
-      return values.category == null || values.category === "" ? "" : String(dspModel(values.category) ?? PENDING);
-    }
-    const key = fieldForColumn(data, column);
-    return key && changed(key) ? format(values[key]) : current();
-  }
+  const dependencies = data.definition.presentation?.computed_dependencies?.[column];
+  if (dependencies?.some(key => changed(key))) return PENDING;
 
   if (["min_value", "max_value"].includes(column) && pointIsString(data, values, row)) return "—";
   if (data.kind === "process") {
@@ -234,19 +212,17 @@ export function displayCell(
       return width && Number.isSafeInteger(count) && count > 0 ? String(width * count) : PENDING;
     }
   } else {
-    if (isDspForward(data) && column === "upp_model" && changed("process_point_id"))
-      return String(dspModel(related("process_points", "process_point_id")?.category) ?? PENDING);
     const signalColumns: Record<string, string> = {
       signal_name: "name", resolved_sig_id: "sig_id", enum_name: "enum_name",
       data_type: "data_type", byte_length: "byte_length", unit: "unit",
-      category: "category", sheet_type: "sheet_type", variable_name: "variable_name",
+      category: "category",
       recommended_wire_type: "recommended_wire_type",
     };
     if (signalColumns[column] && changed("process_point_id"))
       return projected(related("process_points", "process_point_id"), signalColumns[column]);
   }
   const key = fieldForColumn(data, column);
-  if (key && changed(key)) return pointText(values[key]);
-  if (data.definition.editor.includes(column) && changed(column)) return pointText(values[column]);
+  if (key && changed(key)) return format(values[key]);
+  if (data.definition.editor.includes(column) && changed(column)) return format(values[column]);
   return current();
 }

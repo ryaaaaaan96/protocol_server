@@ -212,19 +212,32 @@ export async function checkDspPoints({ client, engineer, viewer, engineerId, vie
     });
     reject(hiddenLegacyGroup);
     equal(await historyCount(), baselineCount);
+    const renameMappings = (await graph()).transmit_points.filter(row => row.process_point_id === frequency.id);
     const rename = await preview("process", { name: "电网频率：DSP 原生点" }, frequency.id);
     ok(rename.allowed, JSON.stringify(rename.errors));
+    equal(rename.impact.count, 1 + renameMappings.length);
     equal(await historyCount(), baselineCount);
     equal((await read()).rows.find(row => row.id === frequency.id).name, frequency.name);
     await commit(rename);
-    equal(await historyCount(), baselineCount + 1);
-    const renameHistory = (await history()).at(-1);
+    // Inherited names are now explicit script-owned values. Each linked
+    // forwarding record is persisted and audited with the source rename.
+    equal(await historyCount(), baselineCount + 1 + renameMappings.length);
+    const renameEvents = (await history()).slice(baselineCount);
+    equal(new Set(renameEvents.map(row => row.batch_id)).size, 1);
+    const renameHistory = renameEvents.find(row => row.entity_type === "process");
     equal(renameHistory.entity_type, "process");
     equal(Number(renameHistory.record_id), frequency.id);
     equal(renameHistory.action, "update");
     equal(renameHistory.before_data.name, frequency.name);
     equal(renameHistory.after_data.name, "电网频率：DSP 原生点");
     ok(renameHistory.batch_id && renameHistory.actor_name && renameHistory.config_snapshot);
+    for (const mapping of renameMappings) {
+      const event = renameEvents.find(row => row.entity_type === "transmit" && Number(row.record_id) === mapping.id);
+      ok(event, `linked forwarding ${mapping.id} must share the rename history batch`);
+      equal(event.action, "update");
+      equal(event.before_data.name, mapping.name);
+      equal(event.after_data.name, "电网频率：DSP 原生点");
+    }
 
     // One source point may have multiple independent wire mappings. Renaming
     // its enum does not rewrite or invalidate their stable point IDs.

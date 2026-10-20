@@ -207,8 +207,12 @@ async fn target(
     Ok(Some((pid, revision)))
 }
 
-fn new_project_summary(manifest: &Value, payload: Option<&Value>) -> Result<Value> {
-    let graph = json!({"project_config":manifest["topology"],
+fn new_project_summary(
+    manifest: &Value,
+    payload: Option<&Value>,
+    definitions: &Value,
+) -> Result<Value> {
+    let graph = json!({"project_config":manifest["topology"],"table_definitions":definitions,
         "process_points":payload.map(|p|p["tables"]["process_points"].clone()).unwrap_or(json!([])),
         "collect_points":payload.map(|p|p["tables"]["collect_points"].clone()).unwrap_or(json!([])),
         "transmit_points":payload.map(|p|p["tables"]["transmit_points"].clone()).unwrap_or(json!([]))});
@@ -361,6 +365,7 @@ pub async fn preview(
         .manifest(&key)
         .map_err(bad)?
         .ok_or(AppError::bad("缺少项目清单"))?;
+    let definitions = uploaded.definition(Some(&key)).map_err(bad)?;
     let dump = uploaded.dump_path(&key).map_err(bad)?;
     let payload = if let Some(path) = &dump {
         Some(project_dump::decode(path, &key).await?)
@@ -374,12 +379,13 @@ pub async fn preview(
     let summary = if let Some((pid, _)) = existing {
         let mut business = db::unlocked_write_context(&s.pool, &user, pid).await?;
         db::lock_project(&mut business, pid).await?;
+        crate::table_runtime::set(&mut business, pid, &definitions["boards"]).await?;
         let (_, summary) =
             apply(&mut business, &user, &manifest, pid, true, payload.as_ref()).await?;
         business.rollback().await?;
         summary
     } else {
-        new_project_summary(&manifest, payload.as_ref())?
+        new_project_summary(&manifest, payload.as_ref(), &definitions["boards"])?
     };
     registry_tx.rollback().await?;
     sync_tree(&stage)?;
@@ -498,6 +504,8 @@ pub async fn commit(
             return Err(AppError::conflict("项目已被创建，请重新预览"));
         }
     }
+    let definitions = uploaded.definition(Some(&pending.key)).map_err(bad)?;
+    crate::table_runtime::set(&mut tx, pid, &definitions["boards"]).await?;
     let history_before = topology::snapshot(&mut tx, pid, true).await?;
     let (_, summary) = apply(
         &mut tx,
@@ -714,7 +722,7 @@ mod tests {
         let manifest: Value =
             serde_json::from_str(include_str!("../config/dc-ups/project.json")).unwrap();
         assert_eq!(
-            new_project_summary(&manifest, None).unwrap()["point_count"],
+            new_project_summary(&manifest, None, &Value::Null).unwrap()["point_count"],
             0
         );
         let payload = json!({"tables":{"process_points":[],"transmit_points":[{
@@ -722,7 +730,7 @@ mod tests {
             "name":"无关联转发","upp_model":1,"address":0,"wire_type":"U16","wire_length":2,
             "scale":1,"access":"RO","byte_order":0,"conversion":"identity","enabled":true
         }]}});
-        assert!(new_project_summary(&manifest, Some(&payload)).is_err());
+        assert!(new_project_summary(&manifest, Some(&payload), &Value::Null).is_err());
     }
 
     #[test]

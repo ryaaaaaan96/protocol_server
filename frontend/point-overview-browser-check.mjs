@@ -79,6 +79,11 @@ try {
   const rows = () => page.locator(".point-overview tbody tr");
   const cell = (key, index = 0) => rows().nth(index).locator(`[data-column-key="${key}"]`);
   await expect(rows()).toHaveCount(4); // two mappings, one mapping, one unmapped point
+  for (const key of definitions.forward.presentation.overview_hidden_fields)
+    await expect(cell(`forward:${key}`)).toHaveCount(0);
+  const leadingColumns = await page.locator(".point-overview th[data-column-key]").evaluateAll(cells => cells.map(cell => cell.dataset.columnKey));
+  assert.deepEqual(leadingColumns.slice(0, definitions.process.presentation.overview_leading_fields.length),
+    definitions.process.presentation.overview_leading_fields.map(key => `process:${key}`));
   await expect(cell("forward:effective_type", 3)).toHaveText("—");
   await expect(cell("process:name", 0)).toHaveText("内部数据1");
   await expect(cell("process:name", 1)).toHaveText("内部数据1");

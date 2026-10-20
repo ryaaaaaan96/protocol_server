@@ -33,9 +33,10 @@ config/dc-ups/
   project.json                 key、显示名称、板卡类型、挂载关系、目录和页签顺序
   DSP/
     process.json               DSP 内部数据的列、字段及编辑规则
+    process.js                 内部数据的规范化、投影、建议及校验
     collect.json               暂未启用
     transmit.json              DSP UPP 转发表的列、字段及编辑规则
-    transmit.js                UPP 协议字节数及偏移地址计算
+    transmit.js                转发联动规则及 UPP 协议字节数、偏移计算
   UPM/                         内部点、DSP UPP 采集、Modbus/UPP 对外表
   CSU/ IDU_T/ IDU_R/            其他板卡定义，点表暂未启用
   sources/                     可选的首次创建来源工作簿
@@ -116,7 +117,7 @@ DSP 新增「总体视图」：按内部点关联转发参数，无转发的内�
 
 ## 配置与迁移项目
 
-每个板卡目录包含 `process.json`、`collect.json`、`transmit.json`。字段包括 `version: 1`、`enabled`、`label`、`description`、`columns`、`editor`、`ordering`、`inline`、`fields`，转发表可增加 `calculation`。隐藏表格不会删除数据或改变权限；新增存储字段仍需后端实现。项目文件中转发表标识为 `transmit`，API 使用 `forward`。
+每个板卡目录包含 `process.json`、`collect.json`、`transmit.json`。字段包括 `version: 1`、`enabled`、`label`、`description`、`columns`、`editor`、`ordering`、`inline`、`fields`。`behavior` 引用本表 JS，处理自定义字段、显示、校验及联动；`presentation` 声明前端筛选、来源建议等交互；转发表可增加 `calculation`。隐藏表格不会删除数据或改变权限。自定义业务字段可通过白名单写入现有 `metadata`，无须增加数据库列。项目文件中转发表标识为 `transmit`，API 使用 `forward`。
 
 导出可移植项目文件夹：
 
@@ -152,6 +153,7 @@ node frontend/browser-check.mjs
 node --test scripts/excel-batch/workbook.test.mjs
 cargo build                        # 更新接口测试使用的后端可执行文件
 node tests/integration.mjs
+node tests/integration.mjs --behavior  # JSON/JS 新字段、关联规则及事务检查
 node tests/migration.mjs
 ```
 
@@ -161,8 +163,8 @@ node tests/migration.mjs
 
 ### DSP 协议计算规则
 
-`config/dc-ups/DSP/transmit.json` 使用 `calculation.engine: "builtin"`，Rust 根据 JSON 的类型字节数、分组、排序和固定偏移计算整表。默认规则复现 Excel 的 445 条转发：按模型、上传等级和稳定来源顺序排列，普通偏移从 6 累加，六个名称保留固定地址。界面拖动仅改显示顺序。
+`config/dc-ups/DSP/transmit.json` 使用 `calculation.engine: "javascript"`，引用 `transmit.js`。脚本根据通信类型、分组、排序和固定偏移计算整表，Rust 校验输出并管理事务。默认规则复现 Excel 的 445 条转发：按模型、上传等级和稳定来源顺序排列，普通偏移从 6 累加，六个名称保留固定地址。界面拖动仅改显示顺序。兼容的 JSON `builtin` 引擎继续保留。
 
-修改内部长度、分类、上传等级或转发引用后，保存预览会包含全部联动结果。修改 JSON 参数后，在转发表点击“重算协议布局”，预览并保存；读取配置不会改写数据库。布局与当前规则不一致时阻止生成和发布。日后调整计算参数无需数据库迁移；本次通用化重构需先执行项目迁移 0004。UPM 地址目前独立保留源表结果。脚本接口、TS 编写方式及执行限制见 [点表计算](docs/table-calculation.md)。
+修改内部长度、分类、上传等级或转发引用后，保存预览会包含全部联动结果。修改 JS 或 JSON 参数后，在转发表点击“重算协议布局”，预览并保存；读取配置不会改写数据库。布局与当前规则不一致时阻止生成和发布。当前表行为重构不新增数据库迁移，已有数据库应处于项目迁移 0004。UPM 地址目前独立保留源表结果。脚本接口、TS 编写方式及执行限制见 [点表计算](docs/table-calculation.md)。
 
-新增板卡、工作簿列映射和协议参数的配置方法见 [JSON 板卡配置](docs/board-configuration.md)。复用现有字段和协议时无需新增 Rust 模块或数据库表。
+新增板卡、工作簿列映射和协议参数的配置方法见 [JSON 与 JS 板卡配置](docs/board-configuration.md)。通过 [点表行为脚本](docs/table-behavior.md) 可新增自定义元数据字段、投影、校验和声明字段联动。复用现有数据模型、协议和控件时，新增项目只需配置文件；新协议编码、存储关系或控件类型仍需扩展通用引擎。

@@ -19,7 +19,7 @@ pub fn collect_defaults() -> Value {
 pub async fn collect_rows(tx: &mut PgConnection, pid: i64, board: &str) -> Result<Vec<Value>> {
     Ok(sqlx::query_scalar(
         r#"SELECT to_jsonb(c)||jsonb_build_object(
-        'edit_values',to_jsonb(c),'signal_name',p.name,'name',p.name,'enum_name',p.enum_name,
+        'edit_values',to_jsonb(c),'signal_name',p.name,'name',p.name,'enum_name',p.enum_name,'source_point',to_jsonb(p),
         'resolved_sig_id',p.sig_id,'data_type',p.internal_type,'byte_length',p.byte_length,
         'group_key',p.group_key,'unit',p.unit,'effective_address',c.address,
         'effective_type',c.wire_type,'effective_length',c.wire_length,'protocol','UPP')

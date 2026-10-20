@@ -1,8 +1,10 @@
 # 点表计算规则
 
-DSP 当前使用 Rust 内置 `builtin` 引擎，修改 `transmit.json` 的 JSON 参数即可调整计算，无需 JS 或重新编译后端。UPM 保留 Excel 导入地址，暂不自动计算。
+DSP 当前使用 `transmit.json` 引用的 `transmit.js` 计算布局。同一个文件的默认 `calculate` 导出负责地址和长度，命名 `behavior` 导出负责转发表的分类、名称及通信建议；两种入口各有独立的输出约束。修改 JS 或 JSON 参数不需要重新编译后端。UPM 保留 Excel 导入地址，暂不自动计算。
 
-## JSON 内置规则
+## JSON 内置规则（兼容）
+
+已有配置仍支持 Rust 通用 `builtin` 引擎。它适用于可由分组、排序、类型宽度和固定地址表达的布局：
 
 ```json
 {
@@ -22,11 +24,11 @@ DSP 当前使用 Rust 内置 `builtin` 引擎，修改 `transmit.json` 的 JSON 
 
 按 `sort_by` 排序，每个 `group_by` 分组独立累计字节数。普通地址为 `header_bytes + 前面各行字节数`，固定地址行仍参与累计。`STRING` 取内部总字节数，其他类型读取 `type_bytes`。分组、排序和固定地址键可选 `id`、`process_point_id`、`source_order`、`endpoint_key`、`upp_model`、`upload_level`、`category`、`name`、`variable_name`。地址规则当前按 UPP 字节计数；Modbus 保留手动配置。
 
-实际 DSP 配置还包含六个 Excel 固定偏移，见 `config/dc-ups/DSP/transmit.json`。参数和计算结果仍通过预览、地址冲突检查、权限与历史事务；读取配置不会自动改写数据库。修改规则后点击“重算协议布局”预览并保存。内置规则最多 10000 条输入，参数最多 32 KiB。
+DSP 的 JS 规则和兼容内置规则均可使用六个 Excel 固定偏移，见 `config/dc-ups/DSP/transmit.json`。参数和计算结果通过预览、地址冲突检查、权限与历史事务；读取配置不会自动改写数据库。修改规则后点击“重算协议布局”预览并保存。内置规则最多 10000 条输入，参数最多 32 KiB。
 
-## 兼容 JavaScript 规则
+## JavaScript 布局规则
 
-已有项目仍可使用 `javascript` 和板卡目录内的 `script_file`。新板卡复用内置能力时只需要 JSON。以下说明适用于可选脚本模式。
+当前 DSP 使用 `javascript` 和板卡目录内的 `script_file`。表格特有算法放在脚本中，Rust 负责安全执行、结果约束及事务。以下说明适用于此模式；通用表行为见 [点表行为脚本](table-behavior.md)。
 
 ## 配置与操作
 
@@ -65,6 +67,8 @@ export default function calculate(points, parameters) {
 
 配置加载、读表及导入本身保留现有/导入的点值，不自动重排数据库。当前布局与脚本不同会阻止生成和发布，需要预览保存后恢复。无需新增表或数据库迁移。
 
+同一套重算流程也支持 `behavior.owned_fields`：分类模型等持久联动值与新规则不一致时会报告 `behavior_stale`，可重算表规则后预览提交，即使本表没有 `calculation`。转发布局计算不会覆盖采集表的地址、周期或接收参数。
+
 ## 输入与输出契约
 
 输入变量 `points` 只包含当前项目、当前板卡的转发映射。每条包含：
@@ -78,8 +82,12 @@ export default function calculate(points, parameters) {
 | `internal_type`、`element_count`、`byte_length` | 内部类型、元素数、总字节数 |
 | `upload_level`、`category` | 当前上传等级与分类 |
 | `source_order` | 来源 Excel 行号；新点使用内部记录 ID |
+| `source` | 关联处理点及其 `behavior.project` 投影，包含项目自定义字段与元数据 |
+| `fields` | 当前转发的业务字段和 `metadata`，去除旧 `address`、`wire_length` 和显示顺序 |
 
 `parameters` 是本表配置的参数对象。脚本可以在内部定义函数、排序、循环和跨行累计。输入不含界面 `display_order` 或上次计算的偏移/长度，避免反复计算产生累积漂移；默认按模型升序、上传等级降序、来源顺序及固定 ID 排列，同端点同模型独立累计。
+
+原有顶层字段继续兼容。新规则可读取 `point.source.calibration_gain` 等处理表自定义投影，或读取 `point.fields.metadata` 中的转发扩展参数，无须为每个字段修改 Rust 输入结构。例如 `address: point.source.calibration_gain * 2` 可用校准分组计算演示地址；实际规则仍须保证完整覆盖、合法长度和地址无重叠。`source` 不包含界面显示顺序，`fields` 不提供上次布局结果。
 
 返回值必须是同步数组，恰好包含每条转发一次，每项仅允许：
 
@@ -87,7 +95,7 @@ export default function calculate(points, parameters) {
 { "id": 123, "address": 6, "wire_length": 4 }
 ```
 
-后端拒绝额外字段、重复/遗漏/外部 ID、非整数字节数、非法类型长度、越界和同端点同模型地址重叠。脚本不能增删记录、修改通信类型或系数、权限、型号与历史。修改脚本契约以外的数据范围仍需后端开发。
+后端拒绝额外字段、重复/遗漏/外部 ID、非整数字节数、非法类型长度、越界和同端点同模型地址重叠。`calculate` 不能增删记录、修改通信类型或系数、权限、型号与历史。模型分类等规则由 `behavior` 的白名单字段管理；超出两种脚本契约的新能力仍需扩展通用引擎。
 
 ## 默认 DSP 规则与历史
 

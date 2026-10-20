@@ -154,7 +154,7 @@ pub fn evaluate(graph: &Value, key: &str, mapping: &Value) -> Result<Vec<Value>>
     {
         return Err(fail("展开后最多 10000 行，源 ID 必须为安全整数"));
     }
-    let output=crate::table_calculation::engine()?.with(|ctx| -> Result<Vec<Value>> {
+    let output=crate::script_runtime::engine()?.with(|ctx| -> Result<Vec<Value>> {
         let points=ctx.json_parse(serde_json::to_vec(&input).map_err(fail)?).catch(&ctx).map_err(fail)?;
         let parameters=ctx.json_parse(rule.parameters.to_string()).catch(&ctx).map_err(fail)?;
         let (module,ready)=Module::declare(ctx.clone(),rule.script_file.clone(),rule.script.clone()).and_then(|m|m.eval()).catch(&ctx).map_err(fail)?;
@@ -213,7 +213,12 @@ pub async fn attach(
         .bind(pid)
         .fetch_one(&mut *tx)
         .await?;
-    let definitions = files.definition(Some(&key)).map_err(fail)?;
+    let captured = crate::table_runtime::definitions(tx, pid).await?;
+    let definitions = if captured.as_object().is_some_and(|v| !v.is_empty()) {
+        json!({"boards":captured})
+    } else {
+        files.definition(Some(&key)).map_err(fail)?
+    };
     for target in targets {
         let rule = &definitions["boards"][&target]["collect"]["mapping"];
         match evaluate(graph, &target, rule) {

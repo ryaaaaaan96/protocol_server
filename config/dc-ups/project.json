@@ -143,48 +143,7 @@
           }
         ],
         "point_rules": {
-          "sheet_layout": true,
-          "inherit_name": true,
-          "category_models": {
-            "系统参数1": 1,
-            "系统参数2": 2,
-            "任务级观测量": 99,
-            "中断级观测量": 100,
-            "控制参数设置": 102,
-            "任务级标定量": 103
-          },
-          "value_options": {
-            "access": [
-              "RO",
-              "RW"
-            ],
-            "ram": [
-              "Y",
-              "N"
-            ],
-            "flash": [
-              "Y",
-              "N"
-            ],
-            "eeprom": [
-              "Y",
-              "N"
-            ],
-            "calibration": [
-              "Y",
-              "N"
-            ],
-            "cpu": [
-              "CPU1",
-              "CPU2"
-            ],
-            "upload_level": [
-              "0：不上传",
-              "1：上传至UPM",
-              "2：UPM进行轮询",
-              "3：CSU进行轮询"
-            ]
-          }
+          "inherit_name": true
         },
         "workbook_import": "workbook.json"
       },

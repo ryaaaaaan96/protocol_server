@@ -85,6 +85,8 @@ try {
   await expect(overviewRows()).toHaveCount(2);
   await expect(overviewCell("forward:endpoint_name",0)).toHaveText("Modbus 对外表");
   await expect(overviewCell("forward:endpoint_name",1)).toHaveText("CSU-UPM UPP 对外表");
+  await expect(overviewCell("forward:upp_model",0)).toHaveAttribute("aria-readonly","true");
+  await expect(overviewCell("forward:register_type",1)).toHaveAttribute("aria-readonly","true");
   await overviewCell("process:name").dblclick();
   await page.getByLabel("数据定义",{exact:true}).fill("共享处理点");
   await page.getByLabel("数据定义",{exact:true}).press("Tab");

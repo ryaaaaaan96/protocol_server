@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { genericFixture, checkGenericBoards } from "./generic-boards.mjs";
+import { tableBehaviorFixture, checkTableBehavior } from "./table-behavior.mjs";
 import { checkUpmPoints } from "./upm-points.mjs";
 import { checkDspPoints } from "./dsp-points.mjs";
 import { checkTableCalculation } from "./table-calculation.mjs";
@@ -32,12 +33,12 @@ migration.pathname=`/${dbname}`;appUrl.pathname=`/${dbname}`;
 const password=crypto.randomBytes(20).toString("hex");
 const projectConfigs=fs.mkdtempSync(path.join(root,".runtime/test-project-configs-"));
 const fixtureSource=path.join(root,"config/dc-ups");
-for(const [baseKey,workbook] of [["generic",true],["upm",true],["dsp_native",true],["dsp_native_other",false],["dsp_rules",false],["dsp_calculation",false],["cli",false],["excel",false],["broken",true]]){
+for(const [baseKey,workbook] of [["table_behavior",false],["generic",true],["upm",true],["dsp_native",true],["dsp_native_other",false],["dsp_rules",false],["dsp_calculation",false],["cli",false],["excel",false],["broken",true]]){
   const key=fixtureKey(baseKey);
   const directory=path.join(projectConfigs,key);fs.cpSync(fixtureSource,directory,{recursive:true});
   const manifest=JSON.parse(fs.readFileSync(path.join(directory,"project.json"),"utf8"));
   manifest.key=key;manifest.name=key;
-  if(!["upm","generic"].includes(baseKey)) {
+  if(!["upm","generic","table_behavior"].includes(baseKey)) {
     const derived=manifest.topology.board_types.filter(b=>b.point_storage==="derived").map(b=>b.code);
     manifest.topology.board_types=manifest.topology.board_types.filter(b=>!derived.includes(b.code));
     manifest.topology.mounts=manifest.topology.mounts.filter(m=>!derived.includes(m.child));
@@ -49,6 +50,7 @@ for(const [baseKey,workbook] of [["generic",true],["upm",true],["dsp_native",tru
     manifest.workbook_boards=["DSP"];
   }
   if(baseKey==="generic")genericFixture(manifest,directory);
+  if(baseKey==="table_behavior")tableBehaviorFixture(manifest,directory);
   if(!workbook)manifest.workbook=null;
   if(baseKey==="broken") { manifest.workbook="sources/invalid.xlsx"; fs.writeFileSync(path.join(directory,manifest.workbook),"not an xlsx file"); }
   fs.writeFileSync(path.join(directory,"project.json"),JSON.stringify(manifest));
@@ -65,8 +67,8 @@ for(const [baseKey,workbook] of [["generic",true],["upm",true],["dsp_native",tru
 
 }
 const testEnv={...process.env,...env,MIGRATION_DATABASE_URL:migration.toString(),DATABASE_URL:appUrl.toString(),
-  ADMIN_PASSWORD:password,ADMIN_USERNAME:"test_admin",BIND_ADDR:"127.0.0.1:18081",RUST_LOG:"warn",PROJECT_CONFIG_DIR:projectConfigs};
-const base="http://127.0.0.1:18081/api";
+  ADMIN_PASSWORD:password,ADMIN_USERNAME:"test_admin",BIND_ADDR:process.env.TEST_BIND_ADDR || "127.0.0.1:18081",RUST_LOG:"warn",PROJECT_CONFIG_DIR:projectConfigs};
+const base=`http://${testEnv.BIND_ADDR}/api`;
 let server,assertions=0;
 const equal=(actual,expected)=>{assert.equal(actual,expected);assertions++;};
 const ok=(value,message)=>{assert.ok(value,message);assertions++;};
@@ -133,7 +135,7 @@ class Client {
 }
 async function runIntegration(){
   execFileSync("target/debug/protocol-server",["migrate"],{env:testEnv,stdio:"inherit"});
-  const log=fs.openSync(".runtime/integration-server.log","w");
+  const log=fs.openSync(path.join(root,`.runtime/integration-server-${process.pid}.log`),"w");
   server=spawn("target/debug/protocol-server",[],{env:testEnv,stdio:["ignore",log,log]});
   const client=new Client(); let ready=false;
   for(let attempt=0;attempt<100;attempt++){
@@ -169,10 +171,16 @@ async function runIntegration(){
   for(let attempt=0;attempt<10;attempt++) equal((await unknown.raw("/auth/login","POST",{username:"nonexistent",password})).status,401);
   equal((await unknown.raw("/auth/login","POST",{username:"nonexistent",password})).status,429);
   equal((await e.raw("/projects","POST",{config_key:fixtureKey("dsp_native")})).status,403);
+  if (process.argv.includes("--behavior")) { await checkTableBehavior({client,equal,ok,fixtureKey,projectConfigs}); console.log(`PASS: ${assertions} assertions`); return; }
   if (process.argv.includes("--generic")) { await checkGenericBoards({client,equal,ok,fixtureKey,projectConfigs,testEnv}); console.log(`PASS: ${assertions} assertions`); return; }
   if (process.argv.includes("--upm")) { await checkUpmPoints({client,engineer:e,engineerId:engineer.id,viewer:v,viewerId:viewer.id,equal,ok,fixtureKey,projectConfigs,testEnv}); console.log(`PASS: ${assertions} assertions`); return; }
   await checkGenericBoards({client,equal,ok,fixtureKey,projectConfigs,testEnv});
-  if (process.argv.includes("--calculation")) { await checkTableCalculation({client,engineer:e,engineerId:engineer.id,equal,ok,fixtureKey,projectConfigs}); console.log(`PASS: ${assertions} assertions`); return; }
+  if (!process.argv.some(arg=>["--folders","--excel","--databases","--calculation"].includes(arg))) await checkTableBehavior({client,equal,ok,fixtureKey,projectConfigs});
+  if (process.argv.includes("--calculation")) {
+    await checkTableCalculation({client,engineer:e,engineerId:engineer.id,equal,ok,fixtureKey,projectConfigs});
+    await checkDspTransmitRules({client,engineer:e,engineerId:engineer.id,equal,ok,fixtureKey});
+    console.log(`PASS: ${assertions} assertions`); return;
+  }
   if (!process.argv.some(arg=>["--folders","--excel","--databases"].includes(arg))) await checkDspPoints({client,engineer:e,viewer:v,engineerId:engineer.id,viewerId:viewer.id,equal,ok,
     migrationUrl:migration.toString(),appUrl:appUrl.toString(),testEnv,projectConfigs,fixtureKey});
   if (!process.argv.some(arg=>["--folders","--excel","--databases"].includes(arg))) await checkTableCalculation({client,engineer:e,engineerId:engineer.id,equal,ok,fixtureKey,projectConfigs});

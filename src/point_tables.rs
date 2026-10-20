@@ -45,9 +45,6 @@ fn keys(csv: &str) -> BTreeSet<&str> {
 fn schema_writable(kind: &str) -> BTreeSet<&str> {
     match kind {
         "process" => keys(PROCESS)
-            .union(&keys(crate::sheet_layout::EDIT_FIELDS))
-            .copied()
-            .collect::<BTreeSet<_>>()
             .union(&keys(RANGE))
             .copied()
             .collect::<BTreeSet<_>>()
@@ -70,9 +67,6 @@ fn schema_writable(kind: &str) -> BTreeSet<&str> {
 pub(crate) fn writable(kind: &str) -> BTreeSet<&str> {
     match kind {
         "process" => keys("name,enum_name,sig_id,internal_type,flags,callback,process_enabled")
-            .union(&keys(crate::sheet_layout::EDIT_FIELDS))
-            .copied()
-            .collect::<BTreeSet<_>>()
             .union(&keys(RANGE))
             .copied()
             .collect::<BTreeSet<_>>()
@@ -90,16 +84,10 @@ fn readable(kind: &str) -> BTreeSet<&str> {
     );
     let extra = if kind == "process" {
         keys("group_name,contexts,collection_count,forward_count,range_inherited")
-            .union(&keys(crate::sheet_layout::READ_FIELDS))
-            .copied()
-            .collect()
     } else {
         keys(
             "signal_name,field_name,context_name,dev_id,endpoint_name,protocol,transport,port,upp_model,effective_address,address_length,effective_type,effective_length,register_type,access,scale,byte_order,default_value,min_value,max_value",
         )
-        .union(&keys(crate::sheet_layout::FORWARD_READ_FIELDS))
-        .copied()
-        .collect()
     };
     schema_writable(kind)
         .union(&common)
@@ -198,7 +186,7 @@ pub(crate) fn validate_table_file(kind: &str, table: &Value) -> Result<()> {
         !required.contains(&key.as_str())
             && !matches!(
                 key.as_str(),
-                "calculation" | "hidden_source_sig_ids" | "mapping"
+                "calculation" | "hidden_source_sig_ids" | "mapping" | "behavior" | "presentation"
             )
     }) || required.iter().any(|key| !object.contains_key(*key))
     {
@@ -223,6 +211,11 @@ pub(crate) fn validate_table_file(kind: &str, table: &Value) -> Result<()> {
         }
     }
     if let Some(rule) = table.get("mapping") {
+        if table.get("behavior").is_some() {
+            return Err(AppError::bad(
+                "派生采集表使用 mapping 脚本，不支持同时配置 behavior",
+            ));
+        }
         if kind != "collect"
             || !table["editor"].as_array().is_some_and(|v| v.is_empty())
             || !table["inline"].as_object().is_some_and(|v| v.is_empty())
@@ -252,25 +245,214 @@ pub(crate) fn validate_table_file(kind: &str, table: &Value) -> Result<()> {
     let fields = table["fields"]
         .as_object()
         .ok_or(AppError::bad("单表配置缺少 fields"))?;
-    validate_fields(fields, Some(kind))?;
+    if let Some(rule) = table.get("behavior") {
+        crate::table_behavior::validate_rule(rule)?;
+        crate::table_runtime::validate_declarations(kind, table)?;
+    }
+    validate_fields(fields, kind, table)?;
+    validate_presentation(table, fields)?;
     validate_table(kind, table, fields)
 }
 
-fn validate_fields(fields: &serde_json::Map<String, Value>, kind: Option<&str>) -> Result<()> {
-    for (key, field) in fields {
-        let allowed = kind.map_or_else(
-            || {
-                ["process", "collect", "forward"]
-                    .iter()
-                    .any(|kind| readable(kind).contains(key.as_str()))
-            },
-            |kind| readable(kind).contains(key.as_str()),
+fn configured_fields<'a>(kind: &'a str, table: &'a Value, write: bool) -> BTreeSet<&'a str> {
+    let mut result = if write {
+        schema_writable(kind)
+    } else {
+        readable(kind)
+    };
+    for key in if write {
+        vec!["editable_fields"]
+    } else {
+        vec!["editable_fields", "project_fields"]
+    } {
+        result.extend(
+            table["behavior"][key]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str),
         );
-        if !allowed
+    }
+    result
+}
+fn validate_fields(
+    fields: &serde_json::Map<String, Value>,
+    kind: &str,
+    table: &Value,
+) -> Result<()> {
+    let allowed = configured_fields(kind, table, false);
+    for (key, field) in fields {
+        if !allowed.contains(key.as_str())
             || !field.is_object()
             || field["label"].as_str().is_none_or(|s| s.trim().is_empty())
         {
             return Err(AppError::bad(format!("未知字段或无标题字段：{key}")));
+        }
+        if let Some(protocols) = field.get("protocols") {
+            let mut seen = BTreeSet::new();
+            if protocols.as_array().is_none_or(|items| {
+                items.is_empty()
+                    || items.len() > 2
+                    || items.iter().any(|value| {
+                        value.as_str().is_none_or(|protocol| {
+                            !matches!(protocol, "UPP" | "MODBUS") || !seen.insert(protocol)
+                        })
+                    })
+            }) {
+                return Err(AppError::bad(format!(
+                    "{key}.protocols 必须为不重复的非空 UPP/MODBUS 数组"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn presentation_key(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 80
+        && !["__proto__", "constructor", "prototype"].contains(&value)
+        && value.bytes().enumerate().all(|(index, ch)| {
+            ch == b'_' || ch.is_ascii_alphabetic() || index > 0 && ch.is_ascii_digit()
+        })
+}
+
+fn validate_presentation(table: &Value, fields: &serde_json::Map<String, Value>) -> Result<()> {
+    let Some(value) = table.get("presentation") else {
+        return Ok(());
+    };
+    let presentation = value
+        .as_object()
+        .ok_or(AppError::bad("presentation 必须为对象"))?;
+    if presentation.keys().any(|key| {
+        ![
+            "category_filter",
+            "search_placeholder",
+            "empty_text",
+            "overview_hidden_fields",
+            "overview_leading_fields",
+            "computed_dependencies",
+            "suggestion",
+        ]
+        .contains(&key.as_str())
+    }) {
+        return Err(AppError::bad("presentation 包含不支持的属性"));
+    }
+    let known = |value: &Value| {
+        value
+            .as_str()
+            .is_some_and(|key| presentation_key(key) && fields.contains_key(key))
+    };
+    if presentation
+        .get("category_filter")
+        .is_some_and(|v| !known(v))
+    {
+        return Err(AppError::bad(
+            "presentation.category_filter 必须引用已声明字段",
+        ));
+    }
+    for key in ["search_placeholder", "empty_text"] {
+        if presentation
+            .get(key)
+            .is_some_and(|v| v.as_str().is_none_or(|text| text.len() > 4096))
+        {
+            return Err(AppError::bad(format!(
+                "presentation.{key} 必须为不超过 4096 字节的文本"
+            )));
+        }
+    }
+    for key in ["overview_hidden_fields", "overview_leading_fields"] {
+        let Some(selected) = presentation.get(key) else {
+            continue;
+        };
+        let mut seen = BTreeSet::new();
+        if selected.as_array().is_none_or(|items| {
+            items.len() > 128
+                || items.iter().any(|value| {
+                    !known(value)
+                        || !table["columns"]
+                            .as_array()
+                            .is_some_and(|cols| cols.contains(value))
+                        || !seen.insert(value.as_str().unwrap_or(""))
+                })
+        }) {
+            return Err(AppError::bad(format!(
+                "presentation.{key} 必须为已声明显示列的不重复数组，最多 128 项"
+            )));
+        }
+    }
+    if let Some(dependencies) = presentation.get("computed_dependencies") {
+        let dependencies = dependencies
+            .as_object()
+            .filter(|items| items.len() <= 128)
+            .ok_or(AppError::bad(
+                "presentation.computed_dependencies 必须为最多 128 项的字段映射",
+            ))?;
+        for (target, sources) in dependencies {
+            let mut seen = BTreeSet::new();
+            if !presentation_key(target)
+                || !fields.contains_key(target)
+                || sources.as_array().is_none_or(|sources| {
+                    sources.is_empty()
+                        || sources.len() > 128
+                        || sources.iter().any(|source| {
+                            !known(source) || !seen.insert(source.as_str().unwrap_or(""))
+                        })
+                })
+            {
+                return Err(AppError::bad(format!(
+                    "computed_dependencies.{target} 必须引用已声明字段及不重复的非空依赖字段数组"
+                )));
+            }
+        }
+    }
+    if let Some(suggestion) = presentation.get("suggestion") {
+        let suggestion = suggestion
+            .as_object()
+            .ok_or(AppError::bad("presentation.suggestion 必须为对象"))?;
+        if suggestion.keys().any(|key| {
+            !["reference", "source_key", "fields", "description"].contains(&key.as_str())
+        }) {
+            return Err(AppError::bad("presentation.suggestion 包含不支持的属性"));
+        }
+        let reference = suggestion
+            .get("reference")
+            .and_then(Value::as_str)
+            .filter(|key| presentation_key(key))
+            .ok_or(AppError::bad("suggestion.reference 必须为有效的选项引用"))?;
+        let source = suggestion
+            .get("source_key")
+            .filter(|value| known(value))
+            .and_then(Value::as_str)
+            .ok_or(AppError::bad("suggestion.source_key 必须引用已声明字段"))?;
+        if fields[source]["reference"] != reference {
+            return Err(AppError::bad(
+                "suggestion.reference 必须与 source_key 字段的 reference 一致",
+            ));
+        }
+        let mapping = suggestion
+            .get("fields")
+            .and_then(Value::as_object)
+            .filter(|mapping| !mapping.is_empty() && mapping.len() <= 128)
+            .ok_or(AppError::bad(
+                "suggestion.fields 必须为非空字段映射，最多 128 项",
+            ))?;
+        if mapping.iter().any(|(target, source)| {
+            !presentation_key(target)
+                || !fields.contains_key(target)
+                || source.as_str().is_none_or(|key| !presentation_key(key))
+        }) {
+            return Err(AppError::bad(
+                "suggestion.fields 必须将已声明字段映射到有效的来源字段标识",
+            ));
+        }
+        if suggestion
+            .get("description")
+            .is_some_and(|v| v.as_str().is_none_or(|text| text.len() > 4096))
+        {
+            return Err(AppError::bad(
+                "suggestion.description 必须为不超过 4096 字节的文本",
+            ));
         }
     }
     Ok(())
@@ -301,8 +483,8 @@ fn validate_table(
             let key = item.as_str().ok_or(AppError::bad("点表列必须为字段标识"))?;
             if !fields.contains_key(key)
                 || !seen.insert(key)
-                || !readable(kind).contains(key)
-                || (section == "editor" && !schema_writable(kind).contains(key))
+                || !configured_fields(kind, table, false).contains(key)
+                || (section == "editor" && !configured_fields(kind, table, true).contains(key))
             {
                 return Err(AppError::bad(format!(
                     "{kind}.{section} 的字段不存在、重复或不可编辑：{key}"
@@ -345,8 +527,8 @@ fn validate_interaction(kind: &str, table: &Value) -> Result<()> {
                     | ("effective_length", "wire_length")
             );
             if (alias != field && !native_alias)
-                || !readable(kind).contains(column.as_str())
-                || !schema_writable(kind).contains(field)
+                || !configured_fields(kind, table, false).contains(column.as_str())
+                || !configured_fields(kind, table, true).contains(field)
                 || !table["editor"]
                     .as_array()
                     .is_some_and(|a| a.contains(&json!(field)))
@@ -403,6 +585,10 @@ pub(crate) async fn board_definition(
             .bind(pid)
             .fetch_one(&mut *tx)
             .await?;
+    let captured = crate::table_runtime::definitions(tx, pid).await?;
+    if captured.get(board_key).is_some() {
+        return Ok(captured[board_key][kind].clone());
+    }
     let config = files
         .definition(key.as_deref())
         .map_err(|e| AppError::bad(e.to_string()))?;
@@ -445,6 +631,7 @@ pub async fn read(
         .fetch_one(&mut *tx)
         .await?;
     let board = board(&mut tx, pid, &board_key).await?;
+    crate::table_runtime::bind(&mut tx, pid, &s.project_files).await?;
     if board["point_storage"] == "derived" {
         if kind != "collect" {
             return Err(AppError::bad("此设备只有一张派生采集表"));
@@ -538,8 +725,9 @@ pub async fn preview(
 ) -> Result<Json<Value>> {
     let c = Change {
         calculation_rule: Value::Null,
+        table_definitions: Value::Null,
         revision: c.revision,
-        entity: if kind == "forward" && c.operation == "recalculate" {
+        entity: if c.operation == "recalculate" {
             "point_calculation".into()
         } else {
             entity(&kind)?.into()
@@ -590,6 +778,92 @@ mod tests {
             .definition(Some("dc-ups"))
             .unwrap()
             .clone()
+    }
+
+    #[test]
+    fn presentation_rejects_invalid_shapes_and_unknown_field_references() {
+        let base = configuration()["boards"]["DSP"]["forward"].clone();
+        validate_table_file("forward", &base).unwrap();
+        for presentation in [
+            json!(null),
+            json!([]),
+            json!({"unsupported":true}),
+            json!({"category_filter":"missing"}),
+            json!({"category_filter":[]}),
+            json!({"empty_text":false}),
+            json!({"search_placeholder":"x".repeat(4097)}),
+            json!({"overview_hidden_fields":null}),
+            json!({"overview_hidden_fields":"signal_name"}),
+            json!({"overview_hidden_fields":["missing"]}),
+            json!({"overview_hidden_fields":["process_point_id"]}),
+            json!({"overview_hidden_fields":["signal_name","signal_name"]}),
+            json!({"overview_leading_fields":null}),
+            json!({"overview_leading_fields":"signal_name"}),
+            json!({"overview_leading_fields":["missing"]}),
+            json!({"overview_leading_fields":["process_point_id"]}),
+            json!({"overview_leading_fields":["signal_name","signal_name"]}),
+            json!({"computed_dependencies":[]}),
+            json!({"computed_dependencies":{"upp_model":{}}}),
+            json!({"computed_dependencies":{"missing":["process_point_id"]}}),
+            json!({"computed_dependencies":{"upp_model":[]}}),
+            json!({"computed_dependencies":{"upp_model":["missing"]}}),
+            json!({"computed_dependencies":{"upp_model":["process_point_id","process_point_id"]}}),
+            json!({"suggestion":[]}),
+            json!({"suggestion":{"reference":"process_points","source_key":"process_point_id","fields":{}}}),
+            json!({"suggestion":{"reference":"__proto__","source_key":"process_point_id","fields":{"wire_type":"recommended_wire_type"}}}),
+            json!({"suggestion":{"reference":"endpoints","source_key":"process_point_id","fields":{"wire_type":"recommended_wire_type"}}}),
+            json!({"suggestion":{"reference":"process_points","source_key":"missing","fields":{"wire_type":"recommended_wire_type"}}}),
+            json!({"suggestion":{"reference":"process_points","source_key":"process_point_id","fields":{"missing":"recommended_wire_type"}}}),
+            json!({"suggestion":{"reference":"process_points","source_key":"process_point_id","fields":{"wire_type":{}}}}),
+            json!({"suggestion":{"reference":"process_points","source_key":"process_point_id","fields":{"wire_type":"constructor"}}}),
+            json!({"suggestion":{"reference":"process_points","source_key":"process_point_id","fields":{"wire_type":"recommended_wire_type"},"description":true}}),
+            json!({"suggestion":{"reference":"process_points","source_key":"process_point_id","fields":{"wire_type":"recommended_wire_type"},"unknown":"ignored?"}}),
+        ] {
+            let mut table = base.clone();
+            table["presentation"] = presentation;
+            assert!(
+                validate_table_file("forward", &table).is_err(),
+                "{}",
+                table["presentation"]
+            );
+        }
+        // A declared hidden/computed field can still be a dependency; it need
+        // not be editable or visible in the current table.
+        let mut table = base;
+        table["presentation"] = json!({
+            "empty_text":"",
+            "overview_hidden_fields":["signal_name"],
+            "overview_leading_fields":["category","upp_model"],
+            "computed_dependencies":{"effective_type":["recommended_wire_type"]}
+        });
+        validate_table_file("forward", &table).unwrap();
+    }
+
+    #[test]
+    fn protocol_field_visibility_is_typed_and_derived_mapping_has_one_hook() {
+        let base = configuration();
+        for protocols in [
+            json!(null),
+            json!({}),
+            json!("UPP"),
+            json!([]),
+            json!(["UPP", "UPP"]),
+            json!(["UNKNOWN"]),
+            json!([1]),
+        ] {
+            let mut table = base["boards"]["UPM"]["forward"].clone();
+            table["fields"]["upp_model"]["protocols"] = protocols;
+            assert!(validate_table_file("forward", &table).is_err());
+        }
+        let mut table = base["boards"]["UPM"]["forward"].clone();
+        table["fields"]["upp_model"]["protocols"] = json!(["UPP", "MODBUS"]);
+        validate_table_file("forward", &table).unwrap();
+
+        let mut derived = base["boards"]["UPM_DEMO"]["collect"].clone();
+        validate_table_file("collect", &derived).unwrap();
+        derived["behavior"] = base["boards"]["DSP"]["process"]["behavior"].clone();
+        let error = validate_table_file("collect", &derived).unwrap_err();
+        assert!(error.1.contains("不支持同时配置 behavior"));
     }
 
     #[test]

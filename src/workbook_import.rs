@@ -371,6 +371,19 @@ pub fn parse_workbook(bytes: Vec<u8>, board: &Value, definition: &Value) -> Resu
         ("collect", s.collect),
         ("forward", s.transmit),
     ] {
+        // Process rows are already canonical and complete before either mapping
+        // table is parsed. Project the full template once so cross-row aliases
+        // agree with ordinary table reads; IDs here are local to this import.
+        let defs = &board["table_definitions"];
+        let projected_sources = if kind != "process" && defs[kind].get("behavior").is_some() {
+            let mut source_rows = out.process.clone();
+            for (index, point) in source_rows.iter_mut().enumerate() {
+                point["id"] = json!(index + 1);
+            }
+            crate::table_runtime::sources(defs, &source_rows)?
+        } else {
+            vec![]
+        };
         for rule in rules {
             let mut count = 0;
             for row in rows.iter().filter(|r| {
@@ -479,16 +492,33 @@ pub fn parse_workbook(bytes: Vec<u8>, board: &Value, definition: &Value) -> Resu
                     {
                         return Err(fail(row, "通信类型或长度与内部点不一致"));
                     }
-                    if crate::sheet_layout::enabled(board) {
-                        let model = crate::sheet_layout::upp_model_for(board, point)
-                            .ok_or(fail(row, "内部点缺少有效数据分类"))?;
-                        if value["upp_model"] != model {
-                            return Err(fail(row, "UPP 模型号与内部数据分类不一致"));
-                        }
-                        value["conversion"] =
-                            crate::sheet_layout::wire_defaults(point, value["wire_type"].as_str())
-                                ["conversion"]
-                                .clone();
+                    let behavior_kind = if kind == "transmit" { "forward" } else { kind };
+                    if defs[behavior_kind].get("behavior").is_some() {
+                        let source_index = ids
+                            .get(&(
+                                strv(&value, "process_group").to_owned(),
+                                strv(&value, "process_enum").to_owned(),
+                            ))
+                            .ok_or(fail(row, "映射找不到已投影的处理点"))?;
+                        let projected = &projected_sources[*source_index];
+                        let fields = value
+                            .as_object()
+                            .unwrap()
+                            .iter()
+                            .filter(|(k, _)| {
+                                crate::point_tables::writable(behavior_kind).contains(k.as_str())
+                            })
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        let updates = crate::table_behavior::normalize(
+                            &defs[behavior_kind],
+                            &value,
+                            &fields,
+                            projected,
+                            "import",
+                        )?;
+                        crate::table_runtime::check_updates(behavior_kind, &updates)?;
+                        value.as_object_mut().unwrap().extend(updates);
                     }
                     if kind == "collect" {
                         out.collect.push(value);
@@ -595,7 +625,7 @@ mod tests {
     fn config(code: &str) -> (Value, Value) {
         let manifest: Value =
             serde_json::from_str(include_str!("../config/dc-ups/project.json")).unwrap();
-        let board = manifest["topology"]["board_types"]
+        let mut board = manifest["topology"]["board_types"]
             .as_array()
             .unwrap()
             .iter()
@@ -606,6 +636,12 @@ mod tests {
             &std::fs::read(format!("config/dc-ups/{code}/workbook.json")).unwrap(),
         )
         .unwrap();
+        board["table_definitions"] =
+            crate::project_files::ProjectFiles::load_from(std::path::Path::new("config"))
+                .unwrap()
+                .definition(Some("dc-ups"))
+                .unwrap()["boards"][code]
+                .clone();
         (board, definition)
     }
     #[test]
@@ -642,6 +678,10 @@ mod tests {
                         ]
                         .contains(f)
                     }) {
+                        if field == "scale" {
+                            assert_eq!(a[field].as_f64(), b[field].as_f64());
+                            continue;
+                        }
                         assert_eq!(
                             a[field], b[field],
                             "{code} {kind} {} {field}",
@@ -651,6 +691,46 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn import_mapping_sources_project_the_complete_process_template() {
+        let (mut board, definition) = config("UPM");
+        board["table_definitions"]["process"]["behavior"] = json!({
+            "engine":"javascript","script_file":"process.js","parameters":{},
+            "editable_fields":[],"metadata_fields":[],
+            "project_fields":["template_total","temporary_id"],"owned_fields":[],
+            "script":"export function behavior(context) { return context.rows.map(row => ({id:row.id,values:{template_total:context.rows.length,temporary_id:row.id}})); }"
+        });
+        board["table_definitions"]["collect"]["behavior"] = json!({
+            "engine":"javascript","script_file":"collect.js","parameters":{},
+            "editable_fields":[],"metadata_fields":["source_count","source_temporary_id"],
+            "project_fields":[],"owned_fields":[],
+            "script":"export function behavior(context) { return {values:{...context.fields,metadata:{...context.row.metadata,source_count:context.source.template_total,source_temporary_id:context.source.temporary_id}}}; }"
+        });
+        let data = parse_workbook(
+            include_bytes!("../config/dc-ups/sources/DC-UPS测点数据表.xlsx").to_vec(),
+            &board,
+            &definition,
+        )
+        .unwrap();
+        assert_eq!(data.process.len(), 606);
+        assert_eq!(data.collect.len(), 445);
+        for mapping in &data.collect {
+            let index = data
+                .process
+                .iter()
+                .position(|point| {
+                    point["group_key"] == mapping["process_group"]
+                        && point["enum_name"] == mapping["process_enum"]
+                })
+                .unwrap();
+            assert_eq!(
+                mapping["metadata"]["source_count"],
+                json!(data.process.len())
+            );
+            assert_eq!(mapping["metadata"]["source_temporary_id"], json!(index + 1));
+        }
+        assert!(data.process.iter().all(|point| point.get("id").is_none()));
     }
     #[test]
     fn renamed_board_groups_and_endpoints_need_only_json() {
@@ -701,7 +781,12 @@ mod tests {
                 );
             }
         }
-        let graph = json!({"project_config":{"version":2,"board_types":[board],"root":{"type":"NEW_BOARD","quantity":1},"mounts":[]},"process_points":data.process,"collect_points":data.collect,"transmit_points":data.transmit});
+        let table_definitions = board
+            .as_object_mut()
+            .unwrap()
+            .remove("table_definitions")
+            .unwrap();
+        let graph = json!({"table_definitions":{"NEW_BOARD":table_definitions},"project_config":{"version":2,"board_types":[board],"root":{"type":"NEW_BOARD","quantity":1},"mounts":[]},"process_points":data.process,"collect_points":data.collect,"transmit_points":data.transmit});
         let errors: Vec<_> = crate::topology_validation::validate(&graph)["issues"]
             .as_array()
             .unwrap()

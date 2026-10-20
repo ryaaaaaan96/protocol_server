@@ -130,6 +130,7 @@ pub async fn preview(
         Path(pid),
         Json(Change {
             calculation_rule: Value::Null,
+            table_definitions: Value::Null,
             revision: input.revision,
             expected: input.expected,
             entity: "point_order".into(),

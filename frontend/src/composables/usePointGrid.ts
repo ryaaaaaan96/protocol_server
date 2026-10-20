@@ -8,6 +8,7 @@ import {
   type PointTableData,
 } from "../domain/pointTables";
 import {
+  columnApplies,
   displayCell,
   fieldForColumn,
   parseCell,
@@ -91,6 +92,7 @@ export function usePointGrid(options: Options) {
     const key = field(column);
     return (
       !!key &&
+      columnApplies(options.data.value!, column, { ...row, ...values(row) }) &&
       options.writable() &&
       (options.rowWritable?.(row, values(row)) ?? true) &&
       !options.blocked() &&
@@ -735,7 +737,6 @@ export function usePointGrid(options: Options) {
             "group_key",
             "endpoint_key",
             "internal_type",
-            "sheet_type",
           ].includes(key)
             ? 0
             : 1;

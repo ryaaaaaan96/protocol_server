@@ -3,11 +3,12 @@ import { computed, ref, watch, onBeforeUnmount } from "vue";
 import { api, revisionConflict, type Row } from "../api";
 import {
   choiceLabel,
+  fieldApplies,
   pointChoices,
   pointChangeSummary,
   pointIsString,
-  isDspForward,
-  communicationFields,
+  hasRecommendation,
+  recommendationFields,
   communicationRecommendation,
   editableCommunicationRecommendation,
   communicationHint,
@@ -56,7 +57,7 @@ if (!props.row) {
       values.value.endpoint_key = endpoints[0]?.id ?? null;
   }
 }
-if (!props.row && isDspForward(props.data)) Object.assign(values.value, editableCommunicationRecommendation(props.data, values.value));
+if (!props.row && hasRecommendation(props.data)) Object.assign(values.value, editableCommunicationRecommendation(props.data, values.value));
 const initial: Row = JSON.parse(JSON.stringify(values.value));
 const scopeAllowed = computed(() => allowsPoint(permissions.state.value, props.boardKey, props.data.kind, props.data, props.row));
 const canSubmit = computed(() => props.canWrite && scopeAllowed.value && allowsPoint(permissions.state.value, props.boardKey, props.data.kind, props.data, { edit_values: values.value }));
@@ -77,7 +78,7 @@ function locked(key: string) {
     (key === "process_point_id" && props.processPointId != null);
 }
 const stringPoint = computed(() => pointIsString(props.data, values.value, props.row || undefined));
-const editorFields = computed(() => def.editor.filter(key => !stringPoint.value || !["min_value", "max_value"].includes(key)));
+const editorFields = computed(() => def.editor.filter(key => fieldApplies(props.data, key, values.value) && (!stringPoint.value || !["min_value", "max_value"].includes(key))));
 const recommendation = computed(() => communicationRecommendation(props.data, values.value, props.row || undefined));
 const recommendationHint = computed(() => communicationHint(props.data, values.value, props.row || undefined));
 const recommendationDiffers = computed(() => communicationDiffers(props.data, values.value, props.row || undefined));
@@ -107,8 +108,8 @@ function set(key: string, event: Event) {
           : input.value;
   preview.value = null;
   error.value = "";
-  if (communicationFields.some(field => field === key)) communicationEdited = true;
-  if (key === "process_point_id" && !props.row && !communicationEdited)
+  if (recommendationFields(props.data).includes(key)) communicationEdited = true;
+  if (key === props.data.definition.presentation?.suggestion?.source_key && !props.row && !communicationEdited)
     Object.assign(values.value, editableCommunicationRecommendation(props.data, values.value));
   if (f.reference) {
     for (let pass = 0; pass < 2; pass++)
@@ -135,7 +136,7 @@ async function review(op = props.row ? "update" : "create") {
     const changed = Object.fromEntries(
       Object.entries(values.value).filter(
         ([k, v]) =>
-          op === "create" || JSON.stringify(v) !== JSON.stringify(initial[k]),
+          fieldApplies(props.data, k, values.value) && (op === "create" || JSON.stringify(v) !== JSON.stringify(initial[k])),
       ),
     );
     if (op === "update" && !Object.keys(changed).length)
@@ -196,7 +197,7 @@ function delta(change: Row): string {
         <p class="muted">{{ def.description }}</p>
         <p v-if="!scopeAllowed" class="notice">此记录不在你的板卡或协议编辑范围内，可以查看和复制。请联系管理员授权。</p>
         <p v-else-if="permissions.state.value?.edit_scope === 'scoped'" class="notice">保存时会检查内部点与转发表的一致性，并校验本次修改的授权范围。</p>
-        <div v-if="isDspForward(data)" class="notice point-communication-notice" role="status">
+        <div v-if="hasRecommendation(data)" class="notice point-communication-notice" role="status">
           <span>{{ recommendationHint }}</span>
           <button v-if="recommendation && canWrite" type="button" class="button small" :disabled="busy || !canSubmit || !recommendationDiffers" @click="applyRecommendation">应用通信建议</button>
         </div>
@@ -205,7 +206,7 @@ function delta(change: Row): string {
             v-for="key in editorFields"
             :key="key"
             :label="def.fields[key].label"
-            :hint="key === 'wire_type' && isDspForward(data) ? recommendationHint : def.fields[key].hint"
+            :hint="recommendationFields(data).includes(key) ? recommendationHint : def.fields[key].hint"
           >
             <select
               v-if="def.fields[key].reference"
@@ -256,7 +257,7 @@ function delta(change: Row): string {
               :step="def.fields[key].type === 'number' ? 'any' : undefined"
               :aria-label="def.fields[key].label"
               :value="values[key] ?? ''"
-              :required="['name', 'enum_name', 'variable_name'].includes(key)"
+              :required="['name', 'enum_name'].includes(key)"
               :disabled="!canWrite || busy"
               @input="set(key, $event)"
             />

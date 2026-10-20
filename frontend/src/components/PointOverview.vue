@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { api, type Row } from "../api";
-import { fieldForColumn, parseCell } from "../domain/pointGrid";
-import { communicationHint, type PointTableData } from "../domain/pointTables";
+import { columnApplies, fieldForColumn, parseCell } from "../domain/pointGrid";
+import { communicationHint, hasRecommendation, recommendationFields, type PointTableData } from "../domain/pointTables";
 import { columnSource, initialValues, overviewDefinition, overviewEntries, overviewRows, overviewText, overviewValues, sourceKey,
   type OverviewKind as PointKind, type OverviewData, type OverviewDraft, type OverviewRow } from "../domain/pointOverview";
 import { orderedColumns, restoreColumns, type TableColumn } from "../domain/tableColumns";
@@ -72,20 +72,21 @@ function field(key: string) {
   return data.value && fieldForColumn(data.value[kind], column);
 }
 function editable(row: OverviewRow, key: string) {
-  const { kind } = columnSource(key), source = row[kind];
-  return !!source && !!field(key) && allowed(kind, source) && !busy.value && !review.value;
+  const { kind, column } = columnSource(key), source = row[kind];
+  return !!source && !!field(key) && columnApplies(data.value![kind], column, { ...source, ...values(kind, source) }) && allowed(kind, source) && !busy.value && !review.value;
 }
 function modified(row: OverviewRow, key: string) {
   const { kind } = columnSource(key), source = row[kind], name = field(key);
   return !!source && !!name && Object.hasOwn(draft.value[sourceKey(kind, source.id)] || {}, name);
 }
 function hint(row: OverviewRow, key: string) {
-  const { kind } = columnSource(key), source = row[kind];
+  const { kind, column } = columnSource(key), source = row[kind];
   if (!source) return "此内部点尚未配置转发，可通过末列“添加转发”配置。";
+  if (!columnApplies(data.value![kind], column, { ...source, ...values(kind, source) })) return "此字段不适用于当前端点协议。";
   if (!field(key)) return "关联或计算字段，随来源数据更新。";
   if (!allowed(kind, source)) return "当前为只读，或未获此记录的编辑权限。";
-  if (kind === "forward" && ["forward:effective_type", "forward:scale"].includes(key))
-    return communicationHint(data.value!.forward, values(kind, source), source);
+  if (hasRecommendation(data.value![kind]) && recommendationFields(data.value![kind]).includes(field(key)!))
+    return communicationHint(data.value![kind], values(kind, source), source);
   return kind === "process" ? "双击或按 Enter 编辑；同一内部点的所有关联行共享此值。" : "双击或按 Enter 编辑此转发映射。";
 }
 function saveDraft(next: OverviewDraft) {
@@ -103,7 +104,7 @@ function finish() {
   try {
     if (!Object.is(cell.value, cell.original)) {
       const parsed = parseCell(data.value![kind], key, cell.value == null ? null : String(cell.value), values(kind, source));
-      if (["name", "variable_name"].includes(key) && !String(parsed ?? "").trim()) throw new Error("名称不能为空。");
+      if (key === "name" && !String(parsed ?? "").trim()) throw new Error("名称不能为空。");
       const next = clone(draft.value), id = sourceKey(kind, source.id);
       next[id] = { ...next[id], [key]: parsed };
       if (Object.is(parsed, initialValues(data.value![kind], source)[key])) delete next[id][key];

@@ -64,6 +64,7 @@ pub async fn preview(
         Path(pid),
         Json(Change {
             calculation_rule: Value::Null,
+            table_definitions: Value::Null,
             revision: request.revision,
             entity: "point_batch".into(),
             operation: request.operation,
@@ -129,7 +130,7 @@ fn row_kind<'a>(batch: &'a Batch, row: &'a BatchRow) -> Result<&'a str> {
             .as_deref()
             .ok_or(AppError::bad("总体视图必须指定每条记录的点表类型"))?;
         if !["process", "forward"].contains(&kind) {
-            return Err(AppError::bad("DSP 总体视图仅支持内部点和转发"));
+            return Err(AppError::bad("总体视图仅支持处理点和转发"));
         }
         point_tables::entity(kind)?;
         Ok(kind)
@@ -146,14 +147,26 @@ fn failure(errors: Vec<Value>) -> AppError {
     error
 }
 
-fn check_fields(batch: &Batch, operation: &str, dsp: bool) -> Result<()> {
+fn check_fields_for(
+    batch: &Batch,
+    operation: &str,
+    inherited: bool,
+    definitions: &Value,
+) -> Result<()> {
     let mut errors = Vec::new();
     for row in &batch.rows {
         let kind = row_kind(batch, row)?;
-        let allowed = point_tables::writable(kind);
+        let mut allowed = point_tables::writable(kind);
+        allowed.extend(
+            definitions[kind]["behavior"]["editable_fields"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str),
+        );
         let required: &[&str] = match kind {
             "process" => &["name", "enum_name"],
-            "forward" if dsp => &["process_point_id"],
+            "forward" if inherited => &["process_point_id"],
             "collect" => &["process_point_id", "endpoint_key"],
             _ => &["process_point_id", "name"],
         };
@@ -161,12 +174,7 @@ fn check_fields(batch: &Batch, operation: &str, dsp: bool) -> Result<()> {
             errors.push(json!({"row":row.row,"field":key,"message":message}))
         };
         for key in required {
-            if *key == "enum_name"
-                && row.values.get("variable_name").is_some_and(|value| {
-                    value.as_str().is_some_and(|value| !value.trim().is_empty())
-                })
-                && !row.values.contains_key("enum_name")
-            {
+            if ["name", "enum_name"].contains(key) && definitions[kind].get("behavior").is_some() {
                 continue;
             }
             if operation == "update" && !row.values.contains_key(*key) {
@@ -196,20 +204,37 @@ fn check_fields(batch: &Batch, operation: &str, dsp: bool) -> Result<()> {
                 "set_priority",
                 "scan_priority",
             ];
-            if value.is_null() && nullable.contains(&key.as_str()) {
+            let extension = definitions[kind]["behavior"]["editable_fields"]
+                .as_array()
+                .is_some_and(|a| a.contains(&json!(key)));
+            if value.is_null()
+                && (nullable.contains(&key.as_str())
+                    || extension && definitions[kind]["fields"][key]["nullable"] == true)
+            {
                 continue;
             }
-            let valid = match key.as_str() {
-                "process_point_id" => value.as_i64().is_some_and(|v| v > 0),
-                "sig_id" | "element_count" | "byte_length" | "upp_model" | "address"
-                | "display_digits" | "wire_length" | "byte_order" | "poll_interval"
-                | "set_priority" | "scan_priority" => {
-                    value.as_i64().is_some_and(|v| i32::try_from(v).is_ok())
+            let valid = if extension {
+                match definitions[kind]["fields"][key]["type"]
+                    .as_str()
+                    .unwrap_or("text")
+                {
+                    "number" => value.as_f64().is_some_and(f64::is_finite),
+                    "boolean" => value.is_boolean(),
+                    _ => value.as_str().is_some_and(|s| s.len() <= 4096),
                 }
-                "scale" => value.as_f64().is_some_and(|v| v.is_finite() && v > 0.),
-                "enabled" => value.is_boolean(),
-                "process_enabled" | "boot_restore" | "manual_restore" => value.is_boolean(),
-                _ => value.as_str().is_some_and(|s| s.len() <= 4096),
+            } else {
+                match key.as_str() {
+                    "process_point_id" => value.as_i64().is_some_and(|v| v > 0),
+                    "sig_id" | "element_count" | "byte_length" | "upp_model" | "address"
+                    | "display_digits" | "wire_length" | "byte_order" | "poll_interval"
+                    | "set_priority" | "scan_priority" => {
+                        value.as_i64().is_some_and(|v| i32::try_from(v).is_ok())
+                    }
+                    "scale" => value.as_f64().is_some_and(|v| v.is_finite() && v > 0.),
+                    "enabled" => value.is_boolean(),
+                    "process_enabled" | "boot_restore" | "manual_restore" => value.is_boolean(),
+                    _ => value.as_str().is_some_and(|s| s.len() <= 4096),
+                }
             };
             if !valid {
                 add(key, "字段类型或长度不正确");
@@ -223,15 +248,43 @@ fn check_fields(batch: &Batch, operation: &str, dsp: bool) -> Result<()> {
     }
 }
 
+#[cfg(test)]
+fn check_fields(batch: &Batch, operation: &str, inherited: bool) -> Result<()> {
+    let definitions = if inherited {
+        crate::project_files::ProjectFiles::load_from(std::path::Path::new("config"))
+            .unwrap()
+            .definition(Some("dc-ups"))
+            .unwrap()["boards"]["DSP"]
+            .clone()
+    } else {
+        Value::Null
+    };
+    check_fields_for(batch, operation, inherited, &definitions)?;
+    if inherited {
+        for row in &batch.rows {
+            if row_kind(batch, row)? == "process" {
+                crate::table_behavior::normalize(
+                    &definitions["process"],
+                    &crate::native_points::defaults("process"),
+                    &row.values,
+                    &Value::Null,
+                    operation,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
 pub async fn apply(tx: &mut PgConnection, pid: i64, c: &Change) -> Result<Value> {
     let batch = decode(c)?;
     let board = crate::native_points::native_board(tx, pid, &batch.board_key)
         .await?
         .ok_or(AppError::bad("此板卡尚未启用点表存储"))?;
-    check_fields(
+    check_fields_for(
         &batch,
         &c.operation,
         crate::board_rules::inherited_name(&board),
+        &board["table_definitions"],
     )?;
     let mut records = Vec::new();
     let mut errors = Vec::new();
@@ -249,6 +302,7 @@ pub async fn apply(tx: &mut PgConnection, pid: i64, c: &Change) -> Result<Value>
             pid,
             &Change {
                 calculation_rule: c.calculation_rule.clone(),
+                table_definitions: c.table_definitions.clone(),
                 revision: c.revision,
                 entity: point_tables::entity(kind)?.into(),
                 operation: c.operation.clone(),
@@ -406,6 +460,7 @@ mod tests {
             id: None,
             expected: Value::Null,
             calculation_rule: Value::Null,
+            table_definitions: Value::Null,
             values: json!({"board_key":"DSP","kind":"overview","rows":[
                 {"row":1,"kind":"process","id":1,"values":{"name":"内部"}},
                 {"row":2,"kind":"forward","id":1,"values":{"scale":1}}
@@ -505,6 +560,30 @@ mod tests {
         }
     }
     #[test]
+    fn custom_nullable_fields_work_in_batches_and_joined_edits() {
+        for kind in ["process", "collect", "forward"] {
+            let definitions = json!({kind:{
+                "behavior":{"editable_fields":["optional_gain"]},
+                "fields":{"optional_gain":{"type":"number","nullable":true}}
+            }});
+            let edit = batch(kind, json!({"optional_gain":null}));
+            assert!(check_fields_for(&edit, "update", false, &definitions).is_ok());
+            let wrong_type = batch(kind, json!({"optional_gain":"invalid"}));
+            assert!(check_fields_for(&wrong_type, "update", false, &definitions).is_err());
+            let mut required = definitions.clone();
+            required[kind]["fields"]["optional_gain"]["nullable"] = json!(false);
+            assert!(check_fields_for(&edit, "update", false, &required).is_err());
+            if kind != "collect" {
+                let joined: Batch = serde_json::from_value(json!({
+                    "board_key":"CUSTOM","kind":"overview",
+                    "rows":[{"row":1,"kind":kind,"id":1,"values":{"optional_gain":null}}]
+                }))
+                .unwrap();
+                assert!(check_fields_for(&joined, "update", false, &definitions).is_ok());
+            }
+        }
+    }
+    #[test]
     fn worksheet_variables_can_create_rows_without_sig_ids_or_enum_aliases() {
         assert!(
             check_fields(
@@ -549,6 +628,7 @@ mod tests {
     fn dependencies_follow_json_board_and_referenced_process_point() {
         let change = Change {
             calculation_rule: Value::Null,
+            table_definitions: Value::Null,
             revision: 1,
             entity: "point_batch".into(),
             operation: "create".into(),

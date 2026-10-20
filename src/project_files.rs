@@ -397,10 +397,14 @@ fn load_table_directory(project_path: &Path, manifest: &Manifest) -> Result<Valu
                 object.keys().all(|key| REQUIRED.contains(&key.as_str())
                     || matches!(
                         key.as_str(),
-                        "calculation" | "hidden_source_sig_ids" | "mapping"
+                        "calculation"
+                            | "hidden_source_sig_ids"
+                            | "mapping"
+                            | "behavior"
+                            | "presentation"
                     ))
                     && REQUIRED.iter().all(|key| object.contains_key(*key)),
-                "{}: 表格须完整包含 version、enabled、label、description、columns、editor、ordering、inline、fields，可选 calculation、hidden_source_sig_ids、mapping，不支持其他属性",
+                "{}: 表格须完整包含 version、enabled、label、description、columns、editor、ordering、inline、fields，可选 calculation、hidden_source_sig_ids、mapping、behavior、presentation，不支持其他属性",
                 path.display()
             );
             ensure!(
@@ -432,6 +436,27 @@ fn load_table_directory(project_path: &Path, manifest: &Manifest) -> Result<Valu
                     .take(32_769)
                     .read_to_string(&mut script)?;
                 mapping["script"] = json!(script);
+            }
+            if let Some(behavior) = object.get_mut("behavior") {
+                ensure!(
+                    behavior.is_object() && behavior.get("script").is_none(),
+                    "behavior 请引用 script_file，不能内联 script"
+                );
+                let reference = behavior["script_file"]
+                    .as_str()
+                    .context("behavior.script_file 必须为字符串")?;
+                ensure!(
+                    !reference.contains('\\')
+                        && Path::new(reference).extension().and_then(|v| v.to_str()) == Some("js"),
+                    "behavior.script_file 必须指向板卡目录内 .js 文件"
+                );
+                let script_path =
+                    project_relative_path(board_path, reference, "script_file", false)?;
+                let mut script = String::new();
+                std::fs::File::open(script_path)?
+                    .take(32_769)
+                    .read_to_string(&mut script)?;
+                behavior["script"] = json!(script);
             }
             if let Some(calculation) = object
                 .get_mut("calculation")
@@ -653,6 +678,7 @@ impl ProjectFiles {
         let project = self
             .project(key)
             .map_err(|error| AppError::bad(format!("{error:#}")))?;
+        crate::table_runtime::set(tx, pid, &project.point_tables["boards"]).await?;
         if let Some(path) = project.dump {
             let payload = crate::project_dump::decode(&path, key).await?;
             let before = crate::topology::snapshot(tx, pid, true).await?;
@@ -691,13 +717,14 @@ impl ProjectFiles {
             let before = crate::topology::snapshot(tx, pid, true).await?;
             for code in &project.manifest.workbook_boards {
                 let bytes = bytes.clone();
-                let board = project.manifest.topology["board_types"]
+                let mut board = project.manifest.topology["board_types"]
                     .as_array()
                     .unwrap()
                     .iter()
                     .find(|b| b["code"] == *code)
                     .unwrap()
                     .clone();
+                board["table_definitions"] = project.point_tables["boards"][code].clone();
                 let definition = project.point_tables["imports"][code].clone();
                 let data = tokio::task::spawn_blocking(move || {
                     crate::workbook_import::parse_workbook(bytes, &board, &definition)
@@ -823,13 +850,14 @@ impl ProjectFiles {
         let bytes = std::fs::read(workbook_path(&project.directory, workbook)?)?;
         ensure!(bytes.len() <= 15 * 1024 * 1024, "工作簿不能超过 15 MiB");
         let hash = hex::encode(Sha256::digest(&bytes));
-        let board = project.manifest.topology["board_types"]
+        let mut board = project.manifest.topology["board_types"]
             .as_array()
             .unwrap()
             .iter()
             .find(|b| b["code"] == board_key && b["point_storage"] == "native")
             .context("板卡未配置 native 存储")?
             .clone();
+        board["table_definitions"] = project.point_tables["boards"][board_key].clone();
         let definition = project.point_tables["imports"][board_key].clone();
         let data = tokio::task::spawn_blocking(move || {
             crate::workbook_import::parse_workbook(bytes, &board, &definition)
@@ -838,6 +866,7 @@ impl ProjectFiles {
         .map_err(|e| anyhow!(e.1))?;
         let result:crate::error::Result<()> = async {
             let mut tx=db::unlocked_write_context(router,&user,pid).await?;
+            crate::table_runtime::set(&mut tx,pid,&project.point_tables["boards"]).await?;
             crate::permissions::require_all(&mut tx,pid).await?;
             crate::edit_lock::require_available(&mut tx,pid,user.id).await?;
             let exists:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM points.process_points WHERE project_id=$1 AND board_key=$2)")

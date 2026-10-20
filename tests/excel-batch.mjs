@@ -15,7 +15,7 @@ export async function checkExcelBatch({client, equal, ok, fixtureKey}) {
     const cli = async args => (await execute(process.execPath,["scripts/excel-batch/index.mjs",...args],{
       env:{...process.env,PROTOCOL_SESSION:client.cookie.split("=")[1]},timeout:60000,
     })).stdout;
-    const common = ["--url","http://127.0.0.1:18081","--project",String(project.id),"--board","DSP"];
+    const common = ["--url",`http://${process.env.TEST_BIND_ADDR || "127.0.0.1:18081"}`,"--project",String(project.id),"--board","DSP"];
     const populate = async (filename,kind,values) => {
       await cli(["--kind",kind,"--template",filename]);
       const book=new ExcelJS.Workbook();await book.xlsx.readFile(filename);

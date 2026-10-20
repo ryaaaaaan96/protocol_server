@@ -126,7 +126,7 @@ for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
         const tableFile = path.resolve(directory, board.directory, `${table}.json`);
         requireFile(tableFile, project);
         const definition = JSON.parse(fs.readFileSync(tableFile, 'utf8'));
-        for (const rule of [definition.calculation, definition.mapping]) if (rule?.engine === "javascript") {
+        for (const rule of [definition.calculation, definition.mapping, definition.behavior]) if (rule?.engine === "javascript") {
           const reference = rule.script_file;
           if (typeof reference !== 'string' || path.isAbsolute(reference) || reference.includes('\\')
               || reference.split('/').includes('..') || !reference.endsWith('.js')) {

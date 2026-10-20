@@ -90,6 +90,7 @@ pub async fn overview(
     Path(pid): Path<i64>,
 ) -> Result<Json<Value>> {
     let mut tx = db::read_snapshot_context(&s.pool, &u, pid).await?;
+    crate::table_runtime::bind(&mut tx, pid, &s.project_files).await?;
     let project: Value = sqlx::query_scalar("SELECT to_jsonb(p)-'edit_owner_id'-'edit_owner_name'-'edit_owner_username'-'edit_expires_at' FROM meta.project_state p WHERE id=$1")
         .bind(pid)
         .fetch_one(&mut *tx)
@@ -110,6 +111,7 @@ pub async fn validate(
     Path(pid): Path<i64>,
 ) -> Result<Json<Value>> {
     let mut tx = db::context(&s.pool, &u, Some(pid), false).await?;
+    crate::table_runtime::bind(&mut tx, pid, &s.project_files).await?;
     sqlx::query("SELECT id FROM meta.project_state WHERE id=$1 FOR SHARE")
         .bind(pid)
         .execute(&mut *tx)
@@ -135,6 +137,7 @@ pub async fn preview_import(
     mut multipart: Multipart,
 ) -> Result<Json<Value>> {
     let mut tx = db::context(&s.pool, &u, Some(pid), true).await?;
+    crate::table_runtime::bind(&mut tx, pid, &s.project_files).await?;
     crate::permissions::require_all(&mut tx, pid).await?;
     let key: String = sqlx::query_scalar("SELECT config_key FROM meta.project_state WHERE id=$1")
         .bind(pid)
@@ -190,6 +193,7 @@ pub async fn preview_import(
     .map_err(|_| AppError::bad("Excel 解析失败"))??;
     let data = serde_json::to_value(data)?;
     let mut tx = db::context(&s.pool, &u, Some(pid), true).await?;
+    crate::table_runtime::bind(&mut tx, pid, &s.project_files).await?;
     crate::permissions::require_all(&mut tx, pid).await?;
     let revision = db::lock_project(&mut tx, pid).await?;
     sqlx::query(
@@ -228,6 +232,7 @@ pub async fn commit_import(
     Json(input): Json<CommitImport>,
 ) -> Result<Json<Value>> {
     let mut tx = db::context(&s.pool, &u, Some(pid), true).await?;
+    crate::table_runtime::bind(&mut tx, pid, &s.project_files).await?;
     crate::permissions::require_all(&mut tx, pid).await?;
     let rev = db::lock_project(&mut tx, pid).await?;
     let row:Value=sqlx::query_scalar("SELECT to_jsonb(i) FROM meta.previews i WHERE kind='import' AND project_id=$1 AND id=$2 AND created_by=$3 AND expires_at>now() FOR UPDATE").bind(pid).bind(id).bind(u.id).fetch_optional(&mut *tx).await?.ok_or(AppError::bad("预览已过期或已使用，请重新上传"))?;
@@ -315,6 +320,7 @@ pub async fn generate(
 ) -> Result<Json<Value>> {
     // PostgreSQL provides a consistent snapshot across all generation queries.
     let mut tx = db::read_snapshot_context(&s.pool, &u, pid).await?;
+    crate::table_runtime::bind(&mut tx, pid, &s.project_files).await?;
     Ok(Json(
         codegen::generate(&mut tx, pid, &s.project_files).await?,
     ))
@@ -342,6 +348,7 @@ pub async fn release(
         return Err(AppError::bad("版本名称应为 1～80 字符"));
     }
     let mut tx = db::context(&s.pool, &u, Some(pid), true).await?;
+    crate::table_runtime::bind(&mut tx, pid, &s.project_files).await?;
     crate::permissions::require_all(&mut tx, pid).await?;
     let rev = db::lock_project(&mut tx, pid).await?;
     if input.revision != rev {
@@ -405,6 +412,7 @@ pub async fn export_json(
     Path(pid): Path<i64>,
 ) -> Result<impl IntoResponse> {
     let mut tx = db::context(&s.pool, &u, Some(pid), false).await?;
+    crate::table_runtime::bind(&mut tx, pid, &s.project_files).await?;
     sqlx::query("SELECT id FROM meta.project_state WHERE id=$1 FOR SHARE")
         .bind(pid)
         .execute(&mut *tx)

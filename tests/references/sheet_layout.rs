@@ -1,4 +1,4 @@
-//! DSP worksheet columns projected over native points without changing record identity.
+//! Frozen DSP worksheet regression reference; never compiled into the server.
 use crate::{
     error::{AppError, Result},
     model::{identifier, snake},
@@ -7,7 +7,6 @@ use serde_json::{Map, Value, json};
 
 pub const EDIT_FIELDS: &str = "variable_name,sheet_type,enum_table,display_digits,access,ram,flash,eeprom,calibration,structure,cpu,upload_level,category";
 pub const READ_FIELDS: &str = "type_length,precision,sheet_data_type,sheet_upp_model,recommended_wire_type,recommended_wire_length,recommended_scale,recommended_conversion";
-pub const FORWARD_READ_FIELDS: &str = "category,variable_name,sheet_type,recommended_wire_type,recommended_wire_length,recommended_scale,recommended_conversion";
 const METADATA: [(&str, &str); 11] = [
     ("enum_table", "D"),
     ("display_digits", "E"),
@@ -49,7 +48,21 @@ pub fn upp_model(point: &Value) -> Option<i64> {
 }
 #[cfg(test)]
 pub fn test_board() -> Value {
-    serde_json::from_str::<Value>(include_str!("../config/dc-ups/project.json")).unwrap()["topology"]["board_types"].as_array().unwrap().iter().find(|b|b["code"]=="DSP").unwrap().clone()
+    let mut board = serde_json::from_str::<Value>(include_str!("../../config/dc-ups/project.json"))
+        .unwrap()["topology"]["board_types"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|board| board["code"] == "DSP")
+        .unwrap()
+        .clone();
+    let table: Value =
+        serde_json::from_str(include_str!("../../config/dc-ups/DSP/process.json")).unwrap();
+    board["point_rules"]["sheet_layout"] = json!(true);
+    for field in ["category_models", "value_options"] {
+        board["point_rules"][field] = table["behavior"]["parameters"][field].clone();
+    }
+    board
 }
 
 fn display_digits(point: &Value) -> i64 {
@@ -296,7 +309,7 @@ mod tests {
 
     fn imported() -> Vec<Value> {
         crate::dsp_workbook::parse_workbook(
-            include_bytes!("../config/dc-ups/sources/DC-UPS测点数据表.xlsx").to_vec(),
+            include_bytes!("../../config/dc-ups/sources/DC-UPS测点数据表.xlsx").to_vec(),
         )
         .unwrap()
         .process
@@ -472,7 +485,7 @@ mod tests {
     #[test]
     fn every_transmit_source_supplies_matching_suggestions() {
         let data = crate::dsp_workbook::parse_workbook(
-            include_bytes!("../config/dc-ups/sources/DC-UPS测点数据表.xlsx").to_vec(),
+            include_bytes!("../../config/dc-ups/sources/DC-UPS测点数据表.xlsx").to_vec(),
         )
         .unwrap();
         for mapping in data.transmit {
@@ -526,6 +539,7 @@ mod tests {
         let fields = json!({"ram":"Y"});
         let change = crate::topology::Change {
             calculation_rule: Value::Null,
+            table_definitions: Value::Null,
             revision: 1,
             entity: "process_points".into(),
             operation: "update".into(),

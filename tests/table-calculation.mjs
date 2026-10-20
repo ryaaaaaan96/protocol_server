@@ -15,8 +15,12 @@ export async function checkTableCalculation({client, engineer, engineerId, equal
   definition.calculation.engine = "javascript";
   definition.calculation.script_file = "transmit.js";
   write();
-  const writeScript = body => fs.writeFileSync(scriptFile,`export default function calculate(points, parameters) { ${body} }\n`);
+  // The same table file also exports behavior(). Replace only its layout
+  // entry point so these tests continue to exercise the real business rules.
+  const writeScript = body => fs.writeFileSync(scriptFile,
+    `${originalScript.replace("export default function calculate", "function originalCalculate")}\nexport default function calculate(points, parameters) { ${body} }\n`);
   const graph = () => client.call(`${url}/topology`);
+  const stateWithoutDefinitions = ({table_definitions, ...state}) => JSON.stringify(state);
   const history = async () => (await client.call(`${url}/sql`,"POST",{sql:"SELECT record_id,entity_type,action,batch_id,before_data,after_data FROM history.events WHERE kind='point' ORDER BY id"})).rows;
   const proposal = async (kind, values, id = null, who = client, operation = id ? "update" : "create") => who.call(`${table}/${kind}/preview`,"POST",{
     revision:(await graph()).revision,operation,id,values,
@@ -42,6 +46,11 @@ export async function checkTableCalculation({client, engineer, engineerId, equal
     const a = await edit("forward",{process_point_id:first.id});
     const b = await edit("forward",{process_point_id:second.id});
     equal(a.address,6);equal(a.wire_length,6);equal(b.address,12);equal(b.wire_length,2);
+    // Existing JSON-only builtin layouts remain compatible with the new JS default.
+    const scripted = structuredClone(definition.calculation);
+    definition.calculation = {engine:"builtin",parameters:structuredClone(scripted.parameters)};write();
+    const builtin = await recalculate();ok(builtin.allowed,JSON.stringify(builtin.errors));equal(builtin.impact.count,0);
+    definition.calculation = scripted;write();
     const data = await client.call(`${table}/forward`);
     equal(data.definition.calculation.engine,"javascript");
     equal(data.definition.calculation.script_file,"transmit.js");
@@ -92,12 +101,15 @@ export async function checkTableCalculation({client, engineer, engineerId, equal
     // JSON changes are live but are not hidden database writes.
     const stale = await proposal("process",{notes:"旧脚本预览"},first.id);
     ok(stale.allowed);
-    const prior = JSON.stringify(await graph());
+    const prior = stateWithoutDefinitions(await graph()), priorEvents = JSON.stringify(await history());
     definition.calculation.parameters.header_bytes = 20;write();
-    equal(JSON.stringify(await graph()),prior);
+    const reloaded = await graph();
+    equal(reloaded.table_definitions.DSP.forward.calculation.parameters.header_bytes,20);
+    equal(stateWithoutDefinitions(reloaded),prior);
     const denied = await client.raw(`${url}/changes/${stale.id}/commit`,"POST",{});
     equal(denied.status,409);ok(denied.data.error.includes("脚本"));
-    equal(JSON.stringify(await graph()),prior);
+    equal(stateWithoutDefinitions(await graph()),prior);
+    equal(JSON.stringify(await history()),priorEvents);
     equal((await client.call(`${url}/generate`)).blocked,true);
     const refresh = await recalculate();ok(refresh.allowed);equal(refresh.impact.count,4);
     await commit(refresh);

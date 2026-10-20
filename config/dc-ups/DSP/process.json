@@ -234,6 +234,150 @@
       "nullable": true,
       "default": "",
       "multiline": true
+    },
+    "recommended_wire_type": {
+      "label": "建议数据类型",
+      "hint": "由表脚本提供，仅用于显示或建议，不作为独立编辑参数。"
+    },
+    "recommended_wire_length": {
+      "label": "建议通信字节数",
+      "hint": "由表脚本提供，仅用于显示或建议，不作为独立编辑参数。"
+    },
+    "recommended_scale": {
+      "label": "建议协议系数",
+      "hint": "由表脚本提供，仅用于显示或建议，不作为独立编辑参数。"
+    },
+    "recommended_conversion": {
+      "label": "建议数据转换",
+      "hint": "由表脚本提供，仅用于显示或建议，不作为独立编辑参数。"
+    },
+    "source_values": {
+      "label": "原始范围来源",
+      "hint": "由脚本从不可编辑的导入来源读取，仅用于识别原有符号或范围警告。"
+    }
+  },
+  "behavior": {
+    "engine": "javascript",
+    "script_file": "process.js",
+    "parameters": {
+      "category_models": {
+        "系统参数1": 1,
+        "系统参数2": 2,
+        "任务级观测量": 99,
+        "中断级观测量": 100,
+        "控制参数设置": 102,
+        "任务级标定量": 103
+      },
+      "value_options": {
+        "access": [
+          "RO",
+          "RW"
+        ],
+        "ram": [
+          "Y",
+          "N"
+        ],
+        "flash": [
+          "Y",
+          "N"
+        ],
+        "eeprom": [
+          "Y",
+          "N"
+        ],
+        "calibration": [
+          "Y",
+          "N"
+        ],
+        "cpu": [
+          "CPU1",
+          "CPU2"
+        ],
+        "upload_level": [
+          "0：不上传",
+          "1：上传至UPM",
+          "2：UPM进行轮询",
+          "3：CSU进行轮询"
+        ]
+      }
+    },
+    "editable_fields": [
+      "variable_name",
+      "sheet_type",
+      "enum_table",
+      "display_digits",
+      "access",
+      "ram",
+      "flash",
+      "eeprom",
+      "calibration",
+      "structure",
+      "cpu",
+      "upload_level",
+      "category"
+    ],
+    "metadata_fields": [
+      "source_variable",
+      "enum_table",
+      "display_digits",
+      "access",
+      "ram",
+      "flash",
+      "eeprom",
+      "calibration",
+      "structure",
+      "cpu",
+      "upload_level",
+      "category"
+    ],
+    "project_fields": [
+      "variable_name",
+      "sheet_type",
+      "enum_table",
+      "display_digits",
+      "access",
+      "ram",
+      "flash",
+      "eeprom",
+      "calibration",
+      "structure",
+      "cpu",
+      "upload_level",
+      "category",
+      "type_length",
+      "precision",
+      "sheet_data_type",
+      "sheet_upp_model",
+      "recommended_wire_type",
+      "recommended_wire_length",
+      "recommended_scale",
+      "recommended_conversion",
+      "source_values"
+    ],
+    "owned_fields": []
+  },
+  "presentation": {
+    "overview_leading_fields": ["name", "variable_name", "sheet_type", "category"],
+    "empty_text": "",
+    "search_placeholder": "搜索名称、变量、类型或分类…",
+    "computed_dependencies": {
+      "type_length": [
+        "sheet_type"
+      ],
+      "byte_length": [
+        "sheet_type",
+        "element_count"
+      ],
+      "precision": [
+        "display_digits"
+      ],
+      "sheet_data_type": [
+        "sheet_type",
+        "element_count"
+      ],
+      "sheet_upp_model": [
+        "category"
+      ]
     }
   }
 }

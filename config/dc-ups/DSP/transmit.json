@@ -120,10 +120,30 @@
     "upp_model": {
       "label": "UPP模型号",
       "hint": "由关联内部点的数据分类固定推导，不可单独编辑。"
+    },
+    "name": {
+      "label": "数据名称",
+      "hint": "由表脚本提供，仅用于显示或建议，不作为独立编辑参数。"
+    },
+    "field_name": {
+      "label": "数据名称",
+      "hint": "由表脚本提供，仅用于显示或建议，不作为独立编辑参数。"
+    },
+    "enabled": {
+      "label": "参与转发",
+      "hint": "由表脚本提供，仅用于显示或建议，不作为独立编辑参数。"
+    },
+    "conversion": {
+      "label": "派生数据转换",
+      "hint": "由表脚本提供，仅用于显示或建议，不作为独立编辑参数。"
+    },
+    "byte_order": {
+      "label": "兼容字节序",
+      "hint": "由表脚本提供，仅用于显示或建议，不作为独立编辑参数。"
     }
   },
   "calculation": {
-    "engine": "builtin",
+    "engine": "javascript",
     "parameters": {
       "header_bytes": 6,
       "type_bytes": {
@@ -165,6 +185,65 @@
           "field": "id"
         }
       ]
+    },
+    "script_file": "transmit.js"
+  },
+  "behavior": {
+    "engine": "javascript",
+    "script_file": "transmit.js",
+    "parameters": {},
+    "editable_fields": [],
+    "metadata_fields": [],
+    "project_fields": [
+      "name",
+      "field_name",
+      "enabled",
+      "conversion",
+      "byte_order",
+      "category",
+      "variable_name",
+      "sheet_type",
+      "recommended_wire_type",
+      "recommended_wire_length",
+      "recommended_scale",
+      "recommended_conversion"
+    ],
+    "owned_fields": [
+      "name",
+      "enabled",
+      "upp_model",
+      "conversion",
+      "byte_order"
+    ]
+  },
+  "presentation": {
+    "overview_hidden_fields": ["signal_name", "variable_name", "category"],
+    "category_filter": "category",
+    "search_placeholder": "搜索名称、变量、类型或分类…",
+    "computed_dependencies": {
+      "variable_name": ["process_point_id"],
+      "upp_model": [
+        "process_point_id"
+      ],
+      "effective_length": [
+        "process_point_id",
+        "wire_type",
+        "wire_length"
+      ],
+      "effective_address": [
+        "process_point_id",
+        "wire_type"
+      ]
+    },
+    "suggestion": {
+      "reference": "process_points",
+      "source_key": "process_point_id",
+      "fields": {
+        "wire_type": "recommended_wire_type",
+        "wire_length": "recommended_wire_length",
+        "scale": "recommended_scale"
+      },
+      "description": "由内部数据的 DateType 和 ArrayCnt 建议；可按接收端协议调整。"
     }
   }
 }

@@ -2,18 +2,14 @@
 use crate::{
     error::{AppError, Result},
     project_files::ProjectFiles,
+    script_runtime::engine,
     topology::{self, num, rows, strv},
 };
-use rquickjs::{
-    Array, CatchResultExt, Context, Function, Module, Object, Runtime, context::intrinsic,
-};
+use rquickjs::{Array, CatchResultExt, Function, Module, Object};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::PgConnection;
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    time::{Duration, Instant},
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -36,32 +32,6 @@ pub struct Layout {
 
 fn fail(message: impl std::fmt::Display) -> AppError {
     AppError::bad(format!("点表计算失败：{message}；全部修改未保存"))
-}
-
-pub(crate) fn engine() -> Result<Context> {
-    let runtime = Runtime::new().map_err(fail)?;
-    runtime.set_memory_limit(64 * 1024 * 1024);
-    runtime.set_max_stack_size(512 * 1024);
-    let started = Instant::now();
-    let mut interrupts = 0;
-    runtime.set_interrupt_handler(Some(Box::new(move || {
-        interrupts += 1;
-        interrupts > 2_000 || started.elapsed() > Duration::from_secs(2)
-    })));
-    // No module loader, host I/O, Date, performance or timers.
-    let context = Context::custom::<(
-        intrinsic::Eval,
-        intrinsic::Json,
-        intrinsic::MapSet,
-        intrinsic::Promise,
-    )>(&runtime)
-    .map_err(fail)?;
-    context.with(|ctx| {
-        ctx.eval::<(), _>("delete Math.random;")
-            .catch(&ctx)
-            .map_err(fail)
-    })?;
-    Ok(context)
 }
 
 fn parse(value: &Value) -> Result<Rule> {
@@ -118,22 +88,52 @@ pub async fn configuration(
 /// Stable source order deliberately excludes the UI's display_order.
 pub fn inputs(graph: &Value, board: &str) -> Result<Vec<Value>> {
     let mut result = Vec::new();
+    let source: Vec<_> = rows(graph, "process_points")
+        .iter()
+        .filter(|p| p["board_key"] == board)
+        .cloned()
+        .collect();
+    let source = crate::table_runtime::sources(&graph["table_definitions"][board], &source)?;
     for mapping in rows(graph, "transmit_points")
         .iter()
         .filter(|row| row["board_key"] == board)
     {
-        let point = topology::find(graph, "process_points", num(mapping, "process_point_id"))
+        let point = source
+            .iter()
+            .find(|p| p["id"] == mapping["process_point_id"])
             .filter(|point| point["board_key"] == board)
             .ok_or_else(|| fail("转发引用的内部点不存在"))?;
         let mut point = point.clone();
-        if let Some(definition) = crate::board_rules::board(graph, board) {
-            if crate::sheet_layout::enabled(definition) {
-                crate::sheet_layout::project_for(definition, &mut point);
-            }
-        } else {
+        if point.get("upload_level").is_none() {
             point["upload_level"] = point["metadata"]["upload_level"].clone();
         }
+        // All declared source aliases and ordinary mapping inputs are available
+        // to new projects; computed layout and display order stay outside inputs.
+        let mut source_fields = point.clone();
+        let mut mapping_fields = mapping.clone();
+        for value in [&mut source_fields, &mut mapping_fields] {
+            for key in [
+                "display_order",
+                "address",
+                "wire_length",
+                "effective_address",
+                "effective_length",
+                "edit_values",
+                "created_at",
+                "updated_at",
+            ] {
+                value.as_object_mut().unwrap().remove(key);
+            }
+            // Source workbook cells may contain historic layout formulas. Expose
+            // only explicitly editable metadata to computations.
+            if let Some(metadata) = value["metadata"].as_object_mut() {
+                for key in ["source_cells", "source_rows", "original_ranges"] {
+                    metadata.remove(key);
+                }
+            }
+        }
         result.push(json!({
+            "source":source_fields,"fields":mapping_fields,
             "id":mapping["id"],"process_point_id":point["id"],
             "endpoint_key":mapping["endpoint_key"],"upp_model":mapping["upp_model"],
             "wire_type":mapping["wire_type"],"scale":mapping["scale"],
@@ -469,6 +469,11 @@ mod tests {
         )
         .unwrap();
         let mut graph = json!({"process_points":data.process,"transmit_points":data.transmit});
+        let files = ProjectFiles::load_from(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config"),
+        )
+        .unwrap();
+        graph["table_definitions"] = files.definition(Some("dc-ups")).unwrap()["boards"].clone();
         for (index, point) in graph["process_points"]
             .as_array_mut()
             .unwrap()
@@ -497,10 +502,13 @@ mod tests {
         let input = inputs(&graph, "DSP").unwrap();
         let output = evaluate(&rule(), &input).unwrap();
         assert_eq!(output.len(), 445);
-        let builtin_rule: Value =
+        let mut builtin_rule: Value =
             serde_json::from_str::<Value>(include_str!("../config/dc-ups/DSP/transmit.json"))
                 .unwrap()["calculation"]
                 .clone();
+        builtin_rule["engine"] = json!("builtin");
+        builtin_rule.as_object_mut().unwrap().remove("script_file");
+        builtin_rule.as_object_mut().unwrap().remove("script");
         assert_eq!(evaluate(&builtin_rule, &input).unwrap(), output);
         for row in &output {
             let original = graph["transmit_points"]

@@ -42,10 +42,12 @@ pub async fn snapshot(tx: &mut PgConnection, pid: i64, _computed: bool) -> Resul
             .await?
         );
     }
+    graph["table_definitions"] = crate::table_runtime::definitions(tx, pid).await?;
     Ok(graph)
 }
 pub async fn read(State(s): State<AppState>, u: User, Path(pid): Path<i64>) -> Result<Json<Value>> {
     let mut tx = db::read_snapshot_context(&s.pool, &u, pid).await?;
+    crate::table_runtime::bind(&mut tx, pid, &s.project_files).await?;
     let mut graph = snapshot(&mut tx, pid, true).await?;
     crate::derived_collection::attach(&mut tx, pid, &s.project_files, &mut graph).await?;
     graph["validation"] = crate::topology_validation::validate(&graph);
@@ -56,6 +58,8 @@ pub async fn read(State(s): State<AppState>, u: User, Path(pid): Path<i64>) -> R
 pub struct Change {
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub calculation_rule: Value,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub table_definitions: Value,
     pub revision: i32,
     pub entity: String,
     pub operation: String,
@@ -90,7 +94,10 @@ pub(crate) fn new_errors(before: &Value, after: &Value) -> Vec<Value> {
     let keys = issue_keys(before);
     rows(after, "issues")
         .iter()
-        .filter(|v| v["level"] == "error" && !keys.contains(&v["key"].to_string()))
+        .filter(|v| {
+            v["level"] == "error"
+                && (v["code"] == "script_runtime" || !keys.contains(&v["key"].to_string()))
+        })
         .cloned()
         .collect()
 }
@@ -172,6 +179,7 @@ pub async fn preview(
 ) -> Result<Json<Value>> {
     let mut tx = db::context(&s.pool, &u, Some(pid), true).await?;
     let revision = db::lock_project(&mut tx, pid).await?;
+    let definitions = crate::table_runtime::bind(&mut tx, pid, &s.project_files).await?;
     let mut before = snapshot(&mut tx, pid, true).await?;
     crate::derived_collection::attach(&mut tx, pid, &s.project_files, &mut before).await?;
     let merged = revision != c.revision;
@@ -192,6 +200,7 @@ pub async fn preview(
         access.require_all()?;
     }
     let before_report = crate::topology_validation::validate(&before);
+    c.table_definitions = definitions;
     c.calculation_rule = calculation_rule(&s, &mut tx, pid, &c).await?;
     // SQLx manages the savepoint and rolls it back on early return/drop.
     let mut proposed = tx.begin().await?;
@@ -246,8 +255,14 @@ pub async fn commit(
 ) -> Result<Json<Value>> {
     let mut tx = db::context(&s.pool, &u, Some(pid), true).await?;
     let revision = db::lock_project(&mut tx, pid).await?;
+    let definitions = crate::table_runtime::bind(&mut tx, pid, &s.project_files).await?;
     let pending:Value=sqlx::query_scalar("SELECT to_jsonb(p) FROM meta.previews p WHERE kind='change' AND project_id=$1 AND id=$2 AND created_by=$3 AND expires_at>now() FOR UPDATE").bind(pid).bind(id).bind(u.id).fetch_optional(&mut *tx).await?.ok_or(AppError::bad("变更预览已过期、已提交或不属于当前用户"))?;
     let c: Change = serde_json::from_value(pending["payload"].clone())?;
+    if c.table_definitions != definitions {
+        return Err(AppError::conflict(
+            "点表定义、参数或脚本已变化，请重新预览后提交",
+        ));
+    }
     let access = crate::permissions::load(&mut tx, pid).await?;
     if c.entity == "project_config" {
         access.require_all()?;
@@ -346,7 +361,7 @@ pub async fn commit(
         &mut tx, u.id, Some(pid), &format!("topology.{}", c.operation),
         &format!("{}:{}", c.entity, row["id"]),
         Some(json!({"record":before_record,"revision":revision})),
-        Some(json!({"record":if c.operation == "delete" {Value::Null} else {row.clone()},"impact":effects,"merged":merged,"base_revision":c.revision,"calculation_rule":c.calculation_rule})),
+        Some(json!({"record":if c.operation == "delete" {Value::Null} else {row.clone()},"impact":effects,"merged":merged,"base_revision":c.revision,"calculation_rule":c.calculation_rule,"table_definitions":c.table_definitions})),
     ).await?;
     crate::native_points::history(
         &mut tx,
@@ -385,10 +400,13 @@ async fn apply_change(
                 .as_array()
                 .into_iter()
                 .flatten()
+                .filter(|row| row["kind"].as_str().unwrap_or(strv(&c.values, "kind")) == "forward")
                 .map(|row| &row["values"])
                 .collect::<Vec<_>>()
-        } else {
+        } else if c.entity == "transmit_points" {
             vec![&c.values["fields"]]
+        } else {
+            vec![]
         };
         if supplied
             .iter()
@@ -421,8 +439,15 @@ async fn apply_change(
         }
     }
     let mut record = if c.entity == "point_calculation" {
-        if c.operation != "recalculate" || rule.is_null() {
-            return Err(AppError::bad("此表没有配置计算脚本"));
+        let defs =
+            crate::table_runtime::board_definitions(tx, pid, strv(&c.values, "board_key")).await?;
+        let behavior = ["process", "collect", "forward"].iter().any(|kind| {
+            defs[kind]["behavior"]["owned_fields"]
+                .as_array()
+                .is_some_and(|fields| !fields.is_empty())
+        });
+        if c.operation != "recalculate" || rule.is_null() && !behavior {
+            return Err(AppError::bad("此表没有配置布局或联动计算规则"));
         }
         json!({"board_key":c.values["board_key"],"kind":"forward"})
     } else if c.entity == "point_batch" {
@@ -432,9 +457,26 @@ async fn apply_change(
     } else {
         apply(tx, pid, c).await?
     };
+    if crate::point_tables::is_point_entity(&c.entity)
+        || c.entity == "point_batch"
+        || c.entity == "point_calculation"
+    {
+        crate::table_runtime::reconcile(tx, pid, strv(&c.values, "board_key")).await?;
+    }
     if !rule.is_null() {
         let board = strv(&c.values, "board_key");
         crate::table_calculation::apply(tx, pid, board, &rule).await?;
+    }
+    // Runs after the complete batch/layout calculation, before permissions,
+    // validation, preview diffs, concurrent merge checks and history snapshots.
+    if c.entity != "project_config" {
+        for receiver in crate::point_subsets::synchronize(tx, pid, before).await? {
+            crate::table_runtime::reconcile_collect(tx, pid, &receiver).await?;
+        }
+    }
+    // Return the final persistent rows for behavior-only changes as well as
+    // layout changes. Client state and audit records must agree with history.
+    if crate::point_tables::is_point_entity(&c.entity) || c.entity == "point_batch" {
         let graph = snapshot(tx, pid, true).await?;
         if c.entity == "point_batch" {
             for row in record["rows"].as_array_mut().into_iter().flatten() {
@@ -450,11 +492,6 @@ async fn apply_change(
                 record = current.clone();
             }
         }
-    }
-    // Runs after the complete batch/layout calculation, before permissions,
-    // validation, preview diffs, concurrent merge checks and history snapshots.
-    if c.entity != "project_config" {
-        crate::point_subsets::synchronize(tx, pid, before).await?;
     }
     Ok(record)
 }

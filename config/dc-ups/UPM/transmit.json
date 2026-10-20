@@ -3,6 +3,9 @@
   "enabled": true,
   "label": "转发点表",
   "description": "LOCAL 和 DSP 内部点分别映射到 Modbus 或 UPP；Modbus 按设备基址展开，同一点可对应多个对外地址。",
+  "presentation": {
+    "overview_hidden_fields": ["signal_name"]
+  },
   "columns": [
     "signal_name",
     "enum_name",
@@ -75,7 +78,10 @@
     "upp_model": {
       "label": "UPP 模型号",
       "type": "number",
-      "default": 0
+      "default": 0,
+      "protocols": [
+        "UPP"
+      ]
     },
     "address": {
       "label": "协议地址 / 偏移",
@@ -126,11 +132,17 @@
         "HOLDING",
         "INPUT"
       ],
-      "default": "HOLDING"
+      "default": "HOLDING",
+      "protocols": [
+        "MODBUS"
+      ]
     },
     "register_count": {
       "label": "Modbus 寄存器数量",
-      "type": "number"
+      "type": "number",
+      "protocols": [
+        "MODBUS"
+      ]
     },
     "resolved_sig_id": {
       "label": "sigID",

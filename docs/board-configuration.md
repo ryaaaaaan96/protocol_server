@@ -1,6 +1,6 @@
-# JSON 板卡配置
+# JSON 与 JS 板卡配置
 
-板卡名称只作为标识和显示文字。Rust 负责通用存储、导入、校验和事务；板卡差异由 JSON 声明。复用现有内部字段、UPP 采集/转发、Modbus 转发和布局规则时，新增板卡无需修改 Rust、Vue 或数据库表。全新协议编码或新的业务字段类型仍需扩展引擎。
+板卡名称只作为标识和显示文字。Rust 负责通用存储、导入、校验和事务；JSON 声明组织和表格，板卡业务差异由每张表的 JS 处理。复用处理、采集、转发模型及现有 UPP / Modbus 能力时，新增项目、板卡、自定义元数据字段和规则无需修改 Rust、Vue 或数据库表。全新协议编码、存储关系或控件类型仍需扩展通用引擎。
 
 处理表可选 `hidden_source_sig_ids: ["※"]`：当原始 `source_sig_id`（或 `metadata.source_sig_id`）匹配标记且 `sig_id` 为空时，在处理表和总体视图默认隐藏该点；查看开关可显示并编辑。分配编号后自动恢复显示。此配置不影响存储、关联或协议生成，最多 16 个标记、每个最多 64 字节。
 
@@ -11,18 +11,23 @@
 1. 在 `config/<项目>/` 创建板卡目录，准备完整的 `process.json`、`collect.json`、`transmit.json`。不使用的表设置 `enabled: false`。
 2. 在 `project.json` 的 `topology.board_types` 增加唯一 `code`、`model_code`、`name`、`directory`，设置 `point_storage: "native"`。
 3. 配置 `point_groups` 和 `point_endpoints`，并在 `workspace.boards` 指定显示表格，在 `root` / `mounts` 定义拓扑。已有点或权限引用的键保持稳定。
-4. 需要 Excel 导入时，设置板卡的 `workbook_import: "workbook.json"`。项目首次创建导入还需配置 `workbook` 和 `workbook_boards`。
-5. 网页导入项目文件夹，或在服务器修改后通过“项目配置”预览应用。无 Dump 不替换现有点表；随后可网页导入 Excel，或执行 `cargo run -- import-board <项目> <板卡>` 做首次初始化。
+4. 表格有自定义字段或规则时，在表 JSON 增加 `behavior` 并引用同目录的 JS 文件。脚本处理输入规范化、显示、校验及白名单字段联动；新增数据写入已有 `metadata`。见 [点表行为脚本](table-behavior.md)。
+5. 需要 Excel 导入时，设置板卡的 `workbook_import: "workbook.json"`。项目首次创建导入还需配置 `workbook` 和 `workbook_boards`。
+6. 网页导入项目文件夹，或在服务器修改后通过“项目配置”预览应用。无 Dump 不替换现有点表；随后可网页导入 Excel，或执行 `cargo run -- import-board <项目> <板卡>` 做首次初始化。
 
 ## 点表行为
 
-`point_rules` 可配置：
+每张 native 表的 `behavior` 引用同步 `export function behavior(context, parameters)`。`normalize` 接收用户提交并转换为存储字段；`project` 提供列值；`reconcile` 在完整修改后联动本表声明字段；`validate` 返回业务错误和警告。脚本不能绕过身份、权限、历史、引用和协议安全检查。DSP 的 25 列别名、DateType 推导、分类模型、转发名称和转换规则位于板卡目录内的 `process.js`、`transmit.js`。
+
+前端通用展示参数通过 `presentation` 声明分类筛选、搜索提示、计算依赖和来源建议；不要根据板卡名或某个特有字段名增加组件分支。每张表的 `fields` 定义标签与已有控件类型。
+
+`point_rules` 保留通用协议约束与旧配置兼容项：
 
 | 属性 | 作用 |
 | --- | --- |
-| `sheet_layout` | 使用来源工作表的字段别名和隐藏元数据，如 DSP 的 25 列；不由板卡名选择 |
-| `category_models` | 分类到 UPP 模型号的固定映射，用于 `sheet_layout` |
-| `value_options` | 工作表元数据字段允许的字符串选项 |
+| `sheet_layout` | 旧来源工作表能力标记；新展示与推导放在表级 `behavior` |
+| `category_models` | 旧分类映射兼容项；当前 DSP 的实际映射在 `behavior.parameters` |
+| `value_options` | 旧来源字段选项兼容项；当前表单选项在 `fields`，规则在表级脚本 |
 | `raw_representation` | 通信类型和长度必须与内部存储一致，支持数组 |
 | `inherit_name` | 转发表名称继承内部点 |
 | `source_range_warnings` | 未更改的来源范围问题保留警告；后续非法修改拒绝 |
@@ -55,6 +60,8 @@
 字段支持 `column`、固定 `value`、空值 `default`、`kind`（text/integer/number/boolean）、`strip_prefix`、`transform`（enum/upper）、`null_values`、`lookup` 和 `cases`。`conditions` 按列的 equals/contains/starts_with/not_empty 筛选行，多个条件取交集。命名 lookup 通过另一张 Sheet 的键和值列建立映射；重复键只有值相同才允许。
 
 完整示例见 DSP、UPM 的 `workbook.json`。重复内部枚举默认拒绝；`merge_equal: true` 仅合并类型、sigID、范围等定义相同的记录，并保留多条转发和来源行。Excel 只读取缓存值，不运行公式；布局计算另见 [点表计算规则](table-calculation.md)。
+
+工作簿映射产生规范存储行：处理表不调用表单 `normalize`，自定义字段映射到 `metadata` 子键。采集与转发可通过 `normalize` 的 `"import"` 操作补齐所需派生值，处理点投影来自完整导入列表。导入不自动执行 `reconcile` 或布局重算，规则持有字段不一致会被校验拒绝；详见 [导入与表行为的边界](table-behavior.md#excel-与文件夹导入)。
 
 导入预览冻结映射和已应用板卡配置；任一内容变化都要求重新预览。应用新规则、导入、编辑依然受权限、编辑租约、版本冲突检查和历史记录约束。
 

@@ -4,9 +4,10 @@ import { api, revisionConflict, type Row } from "../api";
 import {
   choiceLabel,
   hiddenProcessPoint,
-  isDspSheet,
-  isDspForward,
-  communicationFields,
+  hasRecommendation,
+  hasRecalculation,
+  recommendationFields,
+  definitionForProtocol,
   communicationHint,
   communicationDiffers,
   pointIsString,
@@ -14,7 +15,7 @@ import {
   type PointTableData,
 } from "../domain/pointTables";
 import { Search, Plus, ChevronLeft, ChevronRight, GripVertical, Ellipsis, ChevronDown, Undo2, Redo2, Pencil, Check, Copy, CircleHelp } from "@lucide/vue";
-import { displayCell } from "../domain/pointGrid";
+import { columnApplies, displayCell } from "../domain/pointGrid";
 import { usePointGrid } from "../composables/usePointGrid";
 import { pageSizeOptions, usePageSize } from "../composables/usePageSize";
 import { usePermissionContext } from "../composables/useProjectPermissions";
@@ -96,10 +97,7 @@ watch(
         result.definition.label = props.label;
         if (props.endpointKey) {
           const protocol = result.options.endpoints.find((endpoint: Row) => endpoint.code === props.endpointKey)?.protocol;
-          const excluded = protocol === "MODBUS" ? ["upp_model"] : ["register_type", "register_count"];
-          result.definition.columns = result.definition.columns.filter((key: string) => !excluded.includes(key));
-          result.definition.editor = result.definition.editor.filter((key: string) => !excluded.includes(key));
-          result.definition.inline = Object.fromEntries(Object.entries(result.definition.inline).filter(([key]) => !excluded.includes(key)));
+          result.definition = definitionForProtocol(result.definition, protocol);
         }
         data.value = result;
       }
@@ -118,13 +116,12 @@ watch(
 );
 const def = computed(() => data.value?.definition);
 const categoryFilter = ref<string | null>(null);
-const classified = computed(() => !!data.value && isDspForward(data.value));
+const classified = computed(() => !!data.value?.definition.presentation?.category_filter);
 watch(data, () => { categoryFilter.value = null; });
 const columnSettings = ref(false), columns = ref<TableColumn[]>([]);
 const columnKey = computed(() => {
   const base = `point-columns:${props.pid}:${encodeURIComponent(props.boardKey)}:${props.kind}${props.endpointKey ? `:${encodeURIComponent(props.endpointKey)}` : ""}`;
-  return data.value && (isDspSheet(data.value) || isDspForward(data.value))
-    ? `${base}:layout:${encodeURIComponent(JSON.stringify(data.value.definition.columns))}` : base;
+  return data.value ? `${base}:layout:${encodeURIComponent(JSON.stringify(data.value.definition.columns))}` : base;
 });
 const { pageSize, setPageSize } = usePageSize(computed(() => `point-page-size:${props.pid}:${encodeURIComponent(props.boardKey)}:${props.kind}`));
 const displayColumns = computed(() => orderedColumns(columns.value).filter(c => c.visible));
@@ -201,7 +198,8 @@ const matched = computed(() =>
     .map(({ row }) => row),
 );
 function categoryOf(row: Row): string {
-  return String(row.category ?? data.value?.options.process_points?.find(point => point.id === row.process_point_id)?.category ?? "");
+  const key = data.value?.definition.presentation?.category_filter;
+  return key ? String(row[key] ?? "") : "";
 }
 const categories = computed(() => {
   const counts = new Map<string, number>();
@@ -362,7 +360,8 @@ function menuAction(action: string) {
 watch([data, page, pageSize, query, displayColumns, busy, review], () => { tableMenu.value = null; });
 function cellHint(row: Row, column: string) {
   const key = grid.field(column);
-  if (data.value && isDspForward(data.value) && key && communicationFields.some(field => field === key))
+  if (data.value && !columnApplies(data.value, column, { ...row, ...grid.values(row) })) return "此字段不适用于当前端点协议。";
+  if (data.value && hasRecommendation(data.value) && key && recommendationFields(data.value).includes(key))
     return communicationHint(data.value, grid.values(row), row);
   if (["min_value", "max_value"].includes(column) && pointIsString(data.value!, grid.values(row), row)) return "字符串没有数值上下限，长度由字节数管理。";
   if (!props.canWrite) return "当前项目为只读权限，可选中和复制单元格。";
@@ -383,7 +382,7 @@ async function previewGrid(mode: "check" | "save") {
   for (const row of rows) {
     for (const [key, value] of Object.entries(row.values)) {
       const field = def.value!.fields[key];
-      if ((field.reference && !field.nullable && value == null) || (["name", "enum_name", "variable_name"].includes(key) && !String(value ?? "").trim())) {
+      if ((field.reference && !field.nullable && value == null) || (["name", "enum_name"].includes(key) && !String(value ?? "").trim())) {
         actionError.value = `第 ${row.row} 行「${field.label}」不能为空，请补全后重新检查。`;
         return;
       }
@@ -515,7 +514,7 @@ async function previewCalculation() {
   reviewMode.value = "save";
   actionError.value = "";
   try {
-    review.value = await api(`/projects/${props.pid}/boards/${encodeURIComponent(props.boardKey)}/point-tables/forward/preview`, "POST", {
+    review.value = await api(`/projects/${props.pid}/boards/${encodeURIComponent(props.boardKey)}/point-tables/${props.kind}/preview`, "POST", {
       revision: data.value.revision, operation: "recalculate", values: {},
     });
     if (!review.value?.allowed) emit("error", review.value?.errors.map((e: Row) => e.message).join("；") || "计算检查未通过");
@@ -555,12 +554,12 @@ function text(row: Row, key: string) {
           v-model="query"
           :disabled="busy || !!review || !!orderDraft || !!grid.editor.value"
           aria-label="搜索当前表格"
-          :placeholder="data && (isDspSheet(data) || isDspForward(data)) ? '搜索名称、变量、类型或分类…' : '搜索名称、sigID、地址或枚举…'"
+          :placeholder="data?.definition.presentation?.search_placeholder || '搜索名称、sigID、地址或枚举…'"
         />
       </div>
       <div class="inline">
         <label v-if="props.kind === 'process' && def.hidden_source_sig_ids?.length" class="inline"><input v-model="showNonUploaded" type="checkbox" :disabled="dirty || busy || !!review" />显示未分配 sigID 的点</label>
-        <button v-if="def.calculation && canEditTable" class="button small" :disabled="dirty || busy || !!review" title="按当前配置计算整张表的字节数和偏移，预览后保存" @click="previewCalculation">重算协议布局</button>
+        <button v-if="hasRecalculation(def) && canEditTable" class="button small" :disabled="dirty || busy || !!review" :title="def.calculation ? '按当前配置计算整张表的字节数和偏移，预览后保存' : '重新计算脚本声明的联动字段，预览后保存'" @click="previewCalculation">{{ def.calculation ? '重算协议布局' : '重算表规则' }}</button>
         <button v-if="canEditTable" class="button small" :disabled="!grid.activeRow.value || !grid.active.value || !grid.editable(grid.activeRow.value, grid.active.value.column)" @click="grid.activeRow.value && grid.active.value && grid.start(grid.activeRow.value, grid.active.value.column)"><Pencil :size="14" />编辑单元格</button>
         <button class="icon-btn" aria-label="表格操作说明" title="表格操作说明" @click="showHelp = true"><CircleHelp :size="17" /></button>
         <button
@@ -669,7 +668,7 @@ function text(row: Row, key: string) {
       <span v-if="copyFeedback" class="point-copy-feedback">{{ copyFeedback }}</span>
       <template v-else-if="grid.active.value && grid.activeRow.value"><strong>{{ def.fields[grid.active.value.column].column_label || def.fields[grid.active.value.column].label }}</strong><span>{{ cellHint(grid.activeRow.value, grid.active.value.column) }}</span></template>
       <span v-else-if="!selectionLabel">{{ scopeEditable() ? `选择一个单元格开始${canEditTable ? '编辑' : '查看'}。计算列随来源数据更新。` : '本表未获编辑授权，可以查看和复制。请联系管理员分配板卡和协议权限。' }}</span>
-      <button v-if="classified && grid.activeRow.value && canEditTable && communicationDiffers(data, grid.values(grid.activeRow.value), grid.activeRow.value)" class="button small" :disabled="busy || !!review || !!orderDraft || !scopeEditable(grid.activeRow.value)" @click="grid.applyRecommendation(grid.activeRow.value)">应用通信建议</button>
+      <button v-if="data && hasRecommendation(data) && grid.activeRow.value && canEditTable && communicationDiffers(data, grid.values(grid.activeRow.value), grid.activeRow.value)" class="button small" :disabled="busy || !!review || !!orderDraft || !scopeEditable(grid.activeRow.value)" @click="grid.applyRecommendation(grid.activeRow.value)">应用通信建议</button>
     </div>
     <Empty
       v-if="!visible.length"
