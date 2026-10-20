@@ -228,7 +228,7 @@ try {
   await cell("signal_name").dblclick();
   await page.getByLabel("编辑 DSP 内部点", { exact: true }).selectOption("2");
   await expect(cell("variable_name")).toHaveText("OutputCurrent");
-  await expect(cell("sheet_type")).toHaveText("Sys_U16");
+  await expect(page.locator('.point-table [data-column-key="sheet_type"]')).toHaveCount(0);
   await expect(cell("category")).toHaveText("任务级观测量");
   await expect(cell("effective_type")).toHaveText("S32");
   await cell("scale").dblclick();
