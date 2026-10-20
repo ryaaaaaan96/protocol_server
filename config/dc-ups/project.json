@@ -5,7 +5,7 @@
   "description": "AIDC · 本地控制器与 DSP 点表的统一数据空间",
   "workbook": "sources/DC-UPS测点数据表.xlsx",
   "topology": {
-    "version": 2,
+    "version": 3,
     "board_types": [
       {
         "code": "CSU",
@@ -182,11 +182,32 @@
         ]
       }
     ],
-    "root": {
-      "type": "CSU",
-      "quantity": 1
-    },
+    "roots": [
+      {
+        "type": "CSU",
+        "quantity": 1
+      },
+      {
+        "type": "UPM_DEMO",
+        "quantity": 1
+      }
+    ],
     "mounts": [
+      {
+        "parent": "CSU",
+        "child": "UPM",
+        "quantity": 24,
+        "connections": [
+          {
+            "protocol": "MODBUS",
+            "transport": "CANFD"
+          },
+          {
+            "protocol": "UPP",
+            "transport": "CANFD"
+          }
+        ]
+      },
       {
         "parent": "UPM_DEMO",
         "child": "UPM",
@@ -230,12 +251,6 @@
             "transport": "RS485"
           }
         ]
-      },
-      {
-        "parent": "CSU",
-        "child": "UPM_DEMO",
-        "quantity": 1,
-        "connections": []
       }
     ]
   },

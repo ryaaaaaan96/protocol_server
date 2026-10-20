@@ -235,7 +235,8 @@ try {
   await expect(page.locator(".point-draft-bar")).toHaveCount(0);
   await cell("signal_name").dblclick();
   await page.getByLabel("编辑 数据名称", { exact: true }).selectOption("2");
-  await expect(cell("variable_name")).toHaveText("OutputCurrent");
+  // Script-owned projections wait for the server after changing their source.
+  await expect(cell("variable_name")).toHaveText("待计算");
   await expect(cell("upp_model")).toHaveText("待计算");
   // The protocol length remains independent from the new source's 2 internal bytes.
   await expect(cell("effective_length")).toHaveText("待计算");

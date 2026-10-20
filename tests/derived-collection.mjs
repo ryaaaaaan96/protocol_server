@@ -4,6 +4,15 @@ import path from "node:path";
 export async function checkDerivedCollection({client,url,graph,equal,ok,projectConfigs,key}) {
   const base=`${url}/boards/UPM_DEMO/point-tables`;
   const initial=await graph();
+  equal(initial.project_config.version,3);
+  equal(initial.project_config.roots.map(root=>root.type).sort().join(","),"CSU,UPM_DEMO");
+  equal(initial.project_config.mounts.filter(link=>link.child==="UPM").map(link=>link.parent).sort().join(","),"CSU,UPM_DEMO");
+  ok(initial.project_config.mounts.every(link=>link.child!=="UPM_DEMO"));
+  const invalid=structuredClone(initial.project_config);
+  invalid.mounts.find(link=>link.parent==="UPM_DEMO").quantity++;
+  const rejected=await client.call(`${url}/changes/preview`,"POST",{revision:initial.revision,entity:"project_config",operation:"update",values:invalid});
+  equal(rejected.allowed,false);ok(rejected.errors.some(issue=>issue.message.includes("数量不一致")));
+  equal(JSON.stringify(await graph()),JSON.stringify(initial));
   const stored=()=>JSON.stringify([initial.process_points,initial.collect_points,initial.transmit_points]);
   const baseline=stored();
   const schema=await client.call(`${url}/point-tables/schema`);

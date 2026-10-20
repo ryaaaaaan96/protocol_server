@@ -10,10 +10,16 @@
 
 1. 在 `config/<项目>/` 创建板卡目录，准备完整的 `process.json`、`collect.json`、`transmit.json`。不使用的表设置 `enabled: false`。
 2. 在 `project.json` 的 `topology.board_types` 增加唯一 `code`、`model_code`、`name`、`directory`，设置 `point_storage: "native"`。
-3. 配置 `point_groups` 和 `point_endpoints`，并在 `workspace.boards` 指定显示表格，在 `root` / `mounts` 定义拓扑。已有点或权限引用的键保持稳定。
+3. 配置 `point_groups` 和 `point_endpoints`，并在 `workspace.boards` 指定显示表格，在 `roots` / `mounts` 定义拓扑。已有点或权限引用的键保持稳定。
 4. 表格有自定义字段或规则时，在表 JSON 增加 `behavior` 并引用同目录的 JS 文件。脚本处理输入规范化、显示、校验及白名单字段联动；新增数据写入已有 `metadata`。见 [点表行为脚本](table-behavior.md)。
 5. 需要 Excel 导入时，设置板卡的 `workbook_import: "workbook.json"`。项目首次创建导入还需配置 `workbook` 和 `workbook_boards`。
 6. 网页导入项目文件夹，或在服务器修改后通过“项目配置”预览应用。无 Dump 不替换现有点表；随后可网页导入 Excel，或执行 `cargo run -- import-board <项目> <板卡>` 做首次初始化。
+
+## 多个根板卡与共享下级
+
+`topology.version: 3` 使用 `roots: [{"type":"CONTROLLER_A","quantity":1},{"type":"CONTROLLER_B","quantity":1}]`，列出所有没有上级的板卡；不再填写 `root`。`mounts` 可由不同 `parent` 指向同一个 `child`，每条连接独立配置协议和传输方式。同一对父子只声明一次，多种协议放在该关系的 `connections` 内。
+
+共享节点表示同一组实际设备。例如两个数量均为 1 的主站，各以 `quantity: 24` 连接同一块板卡类型时，项目中该类型总数为 24，其下级也只计算一次。所有上级推导的总数必须一致；数量不一致、环路、重复连接或未声明的根板卡都会拒绝导入。界面只绘制一个共享节点，并展示所有上级及连接。版本 1、2 的单根树配置继续兼容；需要多个根或多个上级时显式改用版本 3。无需新增数据库表或迁移。
 
 ## 点表行为
 

@@ -5,21 +5,33 @@ export function boardTypes(graph: Row | null): Row[] {
   if (!graph) return [];
   const config = graph.project_config;
   if (!config) return [];
-  const counts: Record<string, number> = {
-    [config.root.type]: config.root.quantity,
-  };
-  for (let i = 0; i < config.board_types.length; i++)
-    for (const edge of config.mounts)
-      if (counts[edge.parent] != null)
-        counts[edge.child] = counts[edge.parent] * edge.quantity;
+  const roots: Row[] = config.roots || (config.root ? [config.root] : []);
+  const counts: Record<string, number> = Object.create(null);
+  for (const root of roots) counts[root.type] = root.quantity;
+  // Multiple incoming connections reference the same devices. Resolve only
+  // after every parent, without adding or multiplying paths through a shared node.
+  for (let i = 0; i < config.board_types.length; i++) {
+    let progressed = false;
+    for (const board of config.board_types) {
+      if (counts[board.code] != null) continue;
+      const parents = config.mounts.filter((edge: Row) => edge.child === board.code);
+      if (!parents.length || parents.some((edge: Row) => counts[edge.parent] == null)) continue;
+      const totals = parents.map((edge: Row) => counts[edge.parent] * edge.quantity);
+      if (!totals.every((total: number) => total === totals[0])) continue;
+      counts[board.code] = totals[0];
+      progressed = true;
+    }
+    if (!progressed) break;
+  }
   return config.board_types.map((t: Row) => {
-    const edge = config.mounts.find((e: Row) => e.child === t.code);
+    const parents = config.mounts.filter((e: Row) => e.child === t.code);
     return {
       ...t,
       kind: "type",
       quantity: counts[t.code] || 0,
-      per_parent: edge?.quantity || config.root.quantity,
-      parent: edge?.parent || null,
+      parents,
+      per_parent: parents[0]?.quantity || counts[t.code] || 0,
+      parent: parents.length === 1 ? parents[0].parent : null,
     };
   });
 }

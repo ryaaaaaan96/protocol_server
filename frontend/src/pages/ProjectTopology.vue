@@ -12,57 +12,62 @@ const nodeWidth = 230,
   columnStep = 420;
 const layout = computed(() => {
   const positions = new Map<string, { x: number; y: number }>();
-  const visited = new Set<string>();
-  let leaf = 0,
-    maxDepth = 0;
-  function place(code: string, depth: number): number {
-    visited.add(code);
-    maxDepth = Math.max(maxDepth, depth);
-    const childCenters = links.value
-      .filter((link) => link.parent === code && !visited.has(link.child))
-      .map((link) => place(link.child, depth + 1));
-    const center = childCenters.length
-      ? (childCenters[0] + childCenters[childCenters.length - 1]) / 2
-      : 90 + leaf++ * 160;
-    positions.set(code, {
-      x: 30 + depth * columnStep,
-      y: center - nodeHeight / 2,
-    });
-    return center;
+  const depths = new Map<string, number>();
+  for (const type of types.value.filter(t => !t.parents.length)) depths.set(type.code, 0);
+  // Longest-path layers place a shared child after all its parents, independent
+  // of board/connection array order. Each board is drawn exactly once.
+  for (let i = 0; i < types.value.length; i++) {
+    let progressed = false;
+    for (const type of types.value) {
+      if (depths.has(type.code) || type.parents.some((link: Row) => !depths.has(link.parent))) continue;
+      depths.set(type.code, 1 + Math.max(...type.parents.map((link: Row) => depths.get(link.parent)!)));
+      progressed = true;
+    }
+    if (!progressed) break;
   }
-  // Derive branches from the project relationships, independently of JSON array order.
-  for (const type of types.value.filter((t) => !t.parent)) place(type.code, 0);
-  for (const type of types.value)
-    if (!visited.has(type.code)) place(type.code, 0);
+  const layers = new Map<number, Row[]>();
+  for (const type of types.value) {
+    const depth = depths.get(type.code) || 0;
+    if (!layers.has(depth)) layers.set(depth, []);
+    layers.get(depth)!.push(type);
+  }
+  const maxRows = Math.max(1, ...[...layers.values()].map(layer => layer.length));
+  const maxDepth = Math.max(0, ...layers.keys());
+  for (const [depth, layer] of layers) {
+    layer.forEach((type, index) => positions.set(type.code, {
+      x: 30 + depth * columnStep,
+      y: 30 + ((maxRows - layer.length) / 2 + index) * 160,
+    }));
+  }
+  const labelAreas: { x: number; top: number; bottom: number }[] = [];
+  const edges = links.value.map<Row & { path: string; labels: string[]; labelX: number; labelY: number }>((link: Row) => {
+    const parent = positions.get(link.parent)!, child = positions.get(link.child)!;
+    const startX = parent.x + nodeWidth, startY = parent.y + nodeHeight / 2;
+    const endX = child.x, endY = child.y + nodeHeight / 2;
+    const labels = link.connections.length
+      ? link.connections.map((c: Row) => `${c.protocol} / ${c.transport === "CANFD" ? "CAN FD" : c.transport}`)
+      : ["协议待配置"];
+    const labelX = (startX + endX) / 2;
+    let labelY = endY;
+    const bottom = () => labelY + 28 + (labels.length - 1) * 18;
+    // Shared children otherwise put incoming protocol labels at the same point.
+    while (labelAreas.some(area => Math.abs(area.x - labelX) < 180 &&
+      labelY - 40 < area.bottom && bottom() + 4 > area.top)) labelY += 90;
+    labelAreas.push({ x: labelX, top: labelY - 36, bottom: bottom() });
+    return {
+      ...link, labels, labelX, labelY,
+      path: `M ${startX} ${startY} C ${startX + 35} ${startY}, ${startX + 35} ${labelY}, ${startX + 60} ${labelY} L ${endX - 60} ${labelY} C ${endX - 35} ${labelY}, ${endX - 35} ${endY}, ${endX} ${endY}`,
+    };
+  });
   return {
     nodes: types.value.map<Row & { x: number; y: number }>((type) => ({
       ...type,
       ...positions.get(type.code)!,
     })),
-    edges: links.value.map<
-      Row & { path: string; labelX: number; labelY: number }
-    >((link) => {
-      const parent = positions.get(link.parent)!,
-        child = positions.get(link.child)!;
-      const startX = parent.x + nodeWidth,
-        startY = parent.y + nodeHeight / 2;
-      const endX = child.x,
-        endY = child.y + nodeHeight / 2;
-      return {
-        ...link,
-        labels: link.connections.length
-          ? link.connections.map(
-              (c: Row) =>
-                `${c.protocol} / ${c.transport === "CANFD" ? "CAN FD" : c.transport}`,
-            )
-          : ["协议待配置"],
-        path: `M ${startX} ${startY} C ${startX + 35} ${startY}, ${startX + 35} ${endY}, ${startX + 60} ${endY} L ${endX} ${endY}`,
-        labelX: (startX + 60 + endX) / 2,
-        labelY: endY,
-      };
-    }),
+    edges,
     width: Math.max(1130, 60 + maxDepth * columnStep + nodeWidth),
-    height: Math.max(225, 60 + nodeHeight + (leaf - 1) * 160),
+    height: Math.max(225, 60 + nodeHeight + (maxRows - 1) * 160,
+      ...labelAreas.map(area => area.bottom + 30)),
   };
 });
 </script>
@@ -178,9 +183,11 @@ const layout = computed(() => {
             </text>
             <text :x="type.x + 18" :y="type.y + 99" class="type-node-detail">
               {{
-                type.parent
-                  ? `每个 ${type.parent} 挂载 ${type.per_parent} 个`
-                  : `根板卡 × ${type.quantity}`
+                type.parents.length > 1
+                  ? `上级：${type.parents.map((link: Row) => link.parent).join("、")}`
+                  : type.parents.length
+                    ? `每个 ${type.parent} 挂载 ${type.per_parent} 个`
+                    : `根板卡 × ${type.quantity}`
               }}
             </text>
           </g>

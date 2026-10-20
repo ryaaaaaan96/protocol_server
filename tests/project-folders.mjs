@@ -138,7 +138,7 @@ export async function checkProjectFolders({ client, engineer, viewer, engineerId
     manifest.name = "Replaced folder fixture";
     manifest.description = "Folder config changed without data replacement";
     manifest.topology.board_types.push({ code: "EXTRA", model_code: "EXTRA", name: "Added board", directory: "ExtraBoard" });
-    manifest.topology.mounts.push({ parent: manifest.topology.root.type, child: "EXTRA", quantity: 1, connections: [] });
+    manifest.topology.mounts.push({ parent: (manifest.topology.roots?.[0] || manifest.topology.root).type, child: "EXTRA", quantity: 1, connections: [] });
     manifest.workspace.boards.EXTRA = { tables: [] };
   });
   for (const kind of ["process", "collect", "transmit"]) files.set(`ExtraBoard/${kind}.json`, files.get(`UPM/${kind}.json`));

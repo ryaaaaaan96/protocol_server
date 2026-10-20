@@ -100,7 +100,10 @@ pub struct Mount {
 pub struct Config {
     pub version: u32,
     pub board_types: Vec<BoardType>,
-    pub root: Root,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<Root>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roots: Vec<Root>,
     pub mounts: Vec<Mount>,
 }
 impl Config {
@@ -142,9 +145,12 @@ impl Config {
         Ok(c)
     }
     pub fn counts(&self) -> Result<BTreeMap<String, u32>> {
-        if self.version != 2 || self.board_types.is_empty() || self.board_types.len() > 32 {
+        if ![2, 3].contains(&self.version)
+            || self.board_types.is_empty()
+            || self.board_types.len() > 32
+        {
             return Err(AppError::bad(
-                "项目配置须为 version 2（兼容导入 version 1），板卡类型数量须为 1～32",
+                "项目拓扑须为 version 2 或 3（兼容导入 version 1），板卡类型数量须为 1～32",
             ));
         }
         let mut codes = BTreeSet::new();
@@ -271,26 +277,47 @@ impl Config {
                 }
             }
         }
-        if !codes.contains(&self.root.kind) || self.root.quantity == 0 || self.root.quantity > 1024
-        {
-            return Err(AppError::bad("根板卡必须存在，数量须为 1～1024"));
+        let roots: Vec<&Root> = match self.version {
+            2 if self.roots.is_empty() && self.root.is_some() => {
+                vec![self.root.as_ref().unwrap()]
+            }
+            3 if self.root.is_none() && !self.roots.is_empty() => self.roots.iter().collect(),
+            _ => {
+                return Err(AppError::bad(
+                    "version 2 使用单个 root；version 3 使用非空 roots 数组，不能同时配置",
+                ));
+            }
+        };
+        let mut root_codes = BTreeSet::new();
+        for root in &roots {
+            if !codes.contains(&root.kind)
+                || !root_codes.insert(root.kind.clone())
+                || root.quantity == 0
+                || root.quantity > 1024
+            {
+                return Err(AppError::bad("根板卡必须存在且不重复，数量须为 1～1024"));
+            }
         }
-        if self.mounts.len() + 1 != codes.len() {
-            return Err(AppError::bad("每种非根板卡必须有一个上级挂载关系"));
+        if self.mounts.len() > codes.len() * codes.len().saturating_sub(1) {
+            return Err(AppError::bad("板卡连接数量超过上限"));
         }
         let mut children = BTreeSet::new();
+        let mut pairs = BTreeSet::new();
         for m in &self.mounts {
             if !codes.contains(&m.parent)
                 || !codes.contains(&m.child)
                 || m.parent == m.child
-                || m.child == self.root.kind
-                || !children.insert(m.child.clone())
+                || root_codes.contains(&m.child)
+                || !pairs.insert((&m.parent, &m.child))
                 || m.quantity == 0
                 || m.quantity > 1024
             {
                 return Err(AppError::bad(
-                    "挂载关系包含未知板卡、重复上级或无效数量（须为 1～1024）",
+                    "连接包含未知板卡、自连接、重复连接、根板卡的上级或无效数量（须为 1～1024）",
                 ));
+            }
+            if !children.insert(m.child.clone()) && self.version == 2 {
+                return Err(AppError::bad("多个上级须使用 version 3 和 roots"));
             }
             let mut connections = BTreeSet::new();
             for connection in &m.connections {
@@ -311,16 +338,46 @@ impl Config {
                 }
             }
         }
-        let mut counts = BTreeMap::from([(self.root.kind.clone(), self.root.quantity)]);
+        if codes
+            .iter()
+            .any(|code| !root_codes.contains(code) && !children.contains(code))
+        {
+            return Err(AppError::bad("每个无上级板卡都须在 roots 中声明"));
+        }
+        let mut counts: BTreeMap<_, _> = roots
+            .iter()
+            .map(|root| (root.kind.clone(), root.quantity))
+            .collect();
         for _ in 0..codes.len() {
-            for m in &self.mounts {
-                if let Some(&parent) = counts.get(&m.parent) {
-                    let total = parent
+            let mut progressed = false;
+            for code in &codes {
+                if counts.contains_key(code) {
+                    continue;
+                }
+                let parents: Vec<_> = self.mounts.iter().filter(|m| &m.child == code).collect();
+                if parents.iter().any(|m| !counts.contains_key(&m.parent)) {
+                    continue;
+                }
+                let mut resolved = None;
+                for m in parents {
+                    let total = counts[&m.parent]
                         .checked_mul(m.quantity)
                         .filter(|n| *n <= 1_000_000)
                         .ok_or(AppError::bad("项目挂载数量超过上限"))?;
-                    counts.insert(m.child.clone(), total);
+                    if resolved.is_some_and(|previous| previous != total) {
+                        return Err(AppError::bad(format!(
+                            "板卡 {code} 从不同上级推导的数量不一致；多个连接须引用同一组设备，不能重复累计"
+                        )));
+                    }
+                    resolved = Some(total);
                 }
+                if let Some(total) = resolved {
+                    counts.insert(code.clone(), total);
+                    progressed = true;
+                }
+            }
+            if !progressed {
+                break;
             }
         }
         if counts.len() != codes.len() {
@@ -460,6 +517,16 @@ mod tests {
         }
         value
     }
+    fn legacy_tree() -> Value {
+        let mut value = example();
+        value["version"] = json!(2);
+        value["root"] = json!({"type":"CSU","quantity":1});
+        value.as_object_mut().unwrap().remove("roots");
+        let mounts = value["mounts"].as_array_mut().unwrap();
+        mounts.retain(|mount| mount["parent"] != "UPM_DEMO");
+        mounts.push(json!({"parent":"CSU","child":"UPM_DEMO","quantity":1,"connections":[]}));
+        value
+    }
     #[test]
     fn collection_subset_references_a_compatible_foreign_transmit_endpoint() {
         let source = serde_json::from_str::<Value>(include_str!("../config/dc-ups/project.json"))
@@ -490,7 +557,11 @@ mod tests {
         assert_eq!(n["DSP"], 192);
         assert_eq!(n["IDU_T"], 1);
         assert_eq!(n["IDU_R"], 4);
-        let upm = c.mounts.iter_mut().find(|m| m.child == "UPM").unwrap();
+        let upm = c
+            .mounts
+            .iter_mut()
+            .find(|m| m.parent == "UPM_DEMO" && m.child == "UPM")
+            .unwrap();
         assert_eq!(upm.parent, "UPM_DEMO");
         assert_eq!(upm.connections.len(), 1);
         assert_eq!(upm.connections[0].protocol, "MODBUS");
@@ -520,7 +591,7 @@ mod tests {
         v["mounts"][0]["connections"][0]["transport"] = json!("UNKNOWN");
         assert!(Config::parse(v).is_err());
         let mut v = example();
-        v["version"] = json!(3);
+        v["version"] = json!(4);
         assert!(Config::parse(v).is_err());
         let mut v = example();
         let duplicate = v["mounts"][0]["connections"][0].clone();
@@ -535,7 +606,7 @@ mod tests {
     }
     #[test]
     fn reads_legacy_single_protocol_without_multiplying_counts() {
-        let mut legacy = example();
+        let mut legacy = legacy_tree();
         legacy["version"] = json!(1);
         for m in legacy["mounts"].as_array_mut().unwrap() {
             let obj = m.as_object_mut().unwrap();
@@ -556,6 +627,86 @@ mod tests {
         legacy["mounts"][0]["protocol"] = Value::Null;
         legacy["mounts"][0]["connections"] = json!([]);
         assert!(Config::parse(legacy).is_err());
+    }
+    fn shared_graph() -> Value {
+        json!({"version":3,
+        "board_types":[
+            {"code":"A","name":"主站 A","model_code":"A"},
+            {"code":"B","name":"主站 B","model_code":"B"},
+            {"code":"C","name":"共享设备","model_code":"C"},
+            {"code":"D","name":"下级设备","model_code":"D"}
+        ],
+        "roots":[{"type":"A","quantity":2},{"type":"B","quantity":1}],
+        "mounts":[
+            {"parent":"A","child":"C","quantity":3,"connections":[]},
+            {"parent":"B","child":"C","quantity":6,"connections":[]},
+            {"parent":"C","child":"D","quantity":4,"connections":[]}
+        ]})
+    }
+    #[test]
+    fn shared_devices_are_counted_once_after_all_parents() {
+        let mut graph = shared_graph();
+        graph["board_types"].as_array_mut().unwrap().reverse();
+        graph["mounts"].as_array_mut().unwrap().reverse();
+        graph["roots"].as_array_mut().unwrap().reverse();
+        let config = Config::parse(graph.clone()).unwrap();
+        assert_eq!(
+            config.counts().unwrap(),
+            BTreeMap::from([
+                ("A".into(), 2),
+                ("B".into(), 1),
+                ("C".into(), 6),
+                ("D".into(), 24)
+            ])
+        );
+        assert_eq!(serde_json::to_value(config).unwrap(), graph);
+        assert_eq!(
+            Config::parse(legacy_tree()).unwrap().counts().unwrap()["DSP"],
+            192
+        );
+    }
+    #[test]
+    fn rejects_ambiguous_shared_counts_and_reachable_cycles() {
+        let mut graph = shared_graph();
+        graph["mounts"][1]["quantity"] = json!(3);
+        assert!(Config::parse(graph).err().unwrap().1.contains("数量不一致"));
+        let mut graph = shared_graph();
+        graph["mounts"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"parent":"D","child":"C","quantity":1,"connections":[]}));
+        assert!(Config::parse(graph).err().unwrap().1.contains("循环"));
+    }
+    #[test]
+    fn roots_and_connections_must_be_explicit_unique_and_compatible() {
+        let graph = shared_graph();
+        let mut value = graph.clone();
+        value["roots"]
+            .as_array_mut()
+            .unwrap()
+            .push(graph["roots"][0].clone());
+        assert!(Config::parse(value).is_err());
+        let mut value = graph.clone();
+        value["roots"].as_array_mut().unwrap().pop();
+        assert!(Config::parse(value).is_err());
+        let mut value = graph.clone();
+        value["roots"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"type":"C","quantity":6}));
+        assert!(Config::parse(value).is_err());
+        let mut value = graph.clone();
+        value["mounts"]
+            .as_array_mut()
+            .unwrap()
+            .push(graph["mounts"][0].clone());
+        assert!(Config::parse(value).is_err());
+        let mut value = graph;
+        value["root"] = json!({"type":"A","quantity":2});
+        assert!(Config::parse(value.clone()).is_err());
+        value["version"] = json!(2);
+        value.as_object_mut().unwrap().remove("roots");
+        assert!(Config::parse(value).is_err());
     }
     #[test]
     fn endpoint_keys_are_unique_and_protocol_driven() {

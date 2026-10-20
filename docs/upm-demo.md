@@ -2,7 +2,7 @@
 
 `config/dc-ups/upm-demo/` 定义一个只显示采集表的设备，拓扑代码为 `UPM_DEMO`，界面名称为 `upm-demo`。它是 UPM 的父板卡，通过 Modbus 采集 UPM；采集来源通过 `collect.json` 指向 UPM 的 `MODBUS_SERVICE`，不按拓扑父子关系推断来源。
 
-拓扑为 `CSU → upm-demo → UPM → DSP`。CSU 挂载 1 个 upm-demo，upm-demo 挂载 24 个 UPM，每个 UPM 挂载 8 个 DSP；UPM 总数仍为 24，DSP 总数仍为 192。`upm-demo → UPM` 使用 **Modbus / RS485**，在 `project.json` 的对应 `connections` 中配置。CSU 与 upm-demo 的连接暂未配置。
+CSU 与 upm-demo 都没有父板卡，分别在 `topology.roots` 中声明。UPM 同时有两个上级：`CSU → UPM` 保留原 Modbus / CANFD、UPP / CANFD 连接；`upm-demo → UPM` 使用 **Modbus / RS485**。两条连接引用同一组 24 个 UPM，不累加成 48 个；每个 UPM 下挂 8 个 DSP，DSP 总数仍为 192。CSU 与 upm-demo 之间没有连接。
 
 ## 配置与规则
 
@@ -37,7 +37,7 @@ LOCAL 基址为 0；DSP1～DSP8 的基址为 50000～57000，间隔 1000，地�
 
 重启升级后的服务，在“项目拓扑配置”中重新读取项目文件、检查并导入拓扑，即可选择 `upm-demo`。之后修改 JS/JSON 并刷新即可更新派生表；源 UPM 点表修改保存后也会实时反映。派生表支持搜索、复制和本地列设置，数据在 UPM 源表编辑，接收参数在 JSON 编辑。
 
-页面入口为 **DC-UPS → 板卡内部信息 → UPM_DEMO / upm-demo → 采集点表**；项目拓扑中位于 CSU 与 UPM 之间。
+页面入口为 **DC-UPS → 板卡内部信息 → UPM_DEMO / upm-demo → 采集点表**；项目拓扑中与 CSU 并列，连接到同一个 UPM 节点。
 
 如果文件中已有 `UPM_DEMO`，页面却没有该设备，检查是否尚未导入新拓扑。板卡列表读取项目库 `meta.project_state.topology_config` 中已应用的拓扑；修改磁盘 `project.json`、重启服务或刷新页面都不会自动应用拓扑变更。在“项目设置”页面点击“开始编辑”，再依次选择“项目拓扑配置 → 重新读取项目文件 → 检查项目配置 → 导入已检查的拓扑”。导入成功后刷新页面；此操作保留已有点记录，并记录项目版本和审计历史。
 

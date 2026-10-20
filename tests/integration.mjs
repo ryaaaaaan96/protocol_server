@@ -42,18 +42,19 @@ for(const [baseKey,workbook] of [["table_behavior",false],["generic",true],["upm
     const derived=manifest.topology.board_types.filter(b=>b.point_storage==="derived").map(b=>b.code);
     manifest.topology.board_types=manifest.topology.board_types.filter(b=>!derived.includes(b.code));
     const mounts=manifest.topology.mounts;
-    manifest.topology.mounts=mounts.filter(m=>!derived.includes(m.child)).map(m=>{
+    manifest.topology.mounts=mounts.filter(m=>!derived.includes(m.child)).flatMap(m=>{
       // Removing a derived collector must retain its native descendants and
       // their total quantities, even when it is an intermediate parent.
       const retained={...m};
       while(derived.includes(retained.parent)){
         const ancestor=mounts.find(candidate=>candidate.child===retained.parent);
-        if(!ancestor)throw new Error("Cannot remove a derived fixture root");
+        if(!ancestor)return []; // A removed root contributes no retained relationship.
         retained.parent=ancestor.parent;
         retained.quantity*=ancestor.quantity;
       }
-      return retained;
+      return [retained];
     });
+    if(manifest.topology.roots)manifest.topology.roots=manifest.topology.roots.filter(root=>!derived.includes(root.type));
     for(const key of derived)delete manifest.workspace.boards[key];
     const upm=manifest.topology.board_types.find(board=>board.code==="UPM");
     for(const key of ["point_storage","point_groups","point_endpoints","point_rules","workbook_import"]) delete upm[key];
