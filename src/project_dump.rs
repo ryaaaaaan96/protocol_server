@@ -17,26 +17,28 @@ const MAX_DECODED: u64 = 64 * 1024 * 1024;
 const MAX_ROWS: usize = 100_000;
 
 // Restore processing rows before their forwarding references.
-const INSERT_ORDER: &[&str] = &["process_points", "transmit_points"];
+const INSERT_ORDER: &[&str] = &["process_points", "collect_points", "transmit_points"];
 
-// Grouping tables and consolidating operational records leaves the portable
-// point columns unchanged. Accept only the two explicitly compatible formats.
+// Legacy archives have two point tables; v6 adds collection mappings. Only
+// these explicit version pairs are compatible with the portable restore path.
 fn supported_archive(payload: &Value) -> bool {
     (payload["schema_version"] == 4 && payload["migration_version"] == 1)
         || (payload["schema_version"] == 5 && payload["migration_version"] == 2)
+        || (payload["schema_version"] == 6 && payload["migration_version"] == 3)
 }
 
 fn columns(table: &str) -> String {
     let fields = match table {
         "process_points" => crate::dsp_points::PROCESS_COLUMNS,
         "transmit_points" => crate::dsp_points::TRANSMIT_COLUMNS,
+        "collect_points" => crate::upm_points::COLLECT_COLUMNS,
         _ => unreachable!("dump table allowlist"),
     };
     format!("id,project_id,board_key,{fields}")
 }
 fn references(table: &str) -> &'static [(&'static str, &'static str)] {
     match table {
-        "transmit_points" => &[("process_point_id", "process_points")],
+        "transmit_points" | "collect_points" => &[("process_point_id", "process_points")],
         _ => &[],
     }
 }
@@ -58,13 +60,17 @@ pub fn validate(payload: &Value, expected_key: &str) -> Result<()> {
     }
     if !supported_archive(payload) {
         return Err(AppError::bad(
-            "Dump 结构或迁移版本不兼容；仅接受 schema_version/migration_version 为 4/1 或 5/2 的项目归档",
+            "Dump 结构或迁移版本不兼容；仅接受 4/1、5/2、6/3 的项目归档",
         ));
     }
     let tables = payload["tables"]
         .as_object()
         .ok_or_else(|| AppError::bad("Dump 缺少业务表数据"))?;
-    let expected: BTreeSet<_> = topology::TABLES.iter().copied().collect();
+    let expected: BTreeSet<_> = topology::TABLES
+        .iter()
+        .copied()
+        .filter(|t| *t != "collect_points" || payload["schema_version"] == 6)
+        .collect();
     if tables.keys().map(String::as_str).collect::<BTreeSet<_>>() != expected {
         return Err(AppError::bad("Dump 业务表清单不完整或包含不支持的表"));
     }
@@ -72,6 +78,9 @@ pub fn validate(payload: &Value, expected_key: &str) -> Result<()> {
     let mut source_project = None;
     let mut count = 0;
     for &table in INSERT_ORDER {
+        if table == "collect_points" && payload["schema_version"] != 6 {
+            continue;
+        }
         let rows = tables[table]
             .as_array()
             .ok_or_else(|| AppError::bad(format!("Dump {table} 必须为数组")))?;
@@ -252,8 +261,8 @@ pub async fn replace(tx: &mut PgConnection, pid: i64, payload: &Value) -> Result
             .fetch_one(&mut *tx)
             .await?;
     validate(payload, key.as_deref().unwrap_or_default())?;
-    if schema_version != 5 {
-        return Err(AppError::bad("请先将目标项目迁移到 v5，再导入 Dump"));
+    if schema_version != 6 {
+        return Err(AppError::bad("请先将目标项目迁移到 v6，再导入 Dump"));
     }
     for table in INSERT_ORDER.iter().rev() {
         sqlx::query(&format!("DELETE FROM points.{table} WHERE project_id=$1"))
@@ -280,6 +289,10 @@ pub async fn replace(tx: &mut PgConnection, pid: i64, payload: &Value) -> Result
         let mut remapped = Vec::with_capacity(rows.len());
         for row in rows {
             let mut next = row.clone();
+            if table == "transmit_points" && payload["schema_version"] != 6 {
+                next["register_type"] = json!("HOLDING");
+                next["metadata"] = json!({});
+            }
             let id = mapping[&row["id"].as_i64().unwrap()];
             next["id"] = json!(id);
             next["project_id"] = json!(pid);
@@ -305,7 +318,7 @@ pub async fn replace(tx: &mut PgConnection, pid: i64, payload: &Value) -> Result
 mod tests {
     use super::*;
     fn empty() -> Value {
-        let tables: serde_json::Map<_, _> = topology::TABLES
+        let tables: serde_json::Map<_, _> = ["process_points", "transmit_points"]
             .iter()
             .map(|table| ((*table).into(), json!([])))
             .collect();
@@ -325,6 +338,26 @@ mod tests {
         assert!(validate(&data, "example").is_err());
         data["schema_version"] = json!(5);
         data["migration_version"] = json!(999999);
+        assert!(validate(&data, "example").is_err());
+    }
+    #[test]
+    fn collection_archives_require_v6_and_valid_process_references() {
+        let mut data = empty();
+        data["tables"]["collect_points"] = json!([]);
+        assert!(validate(&data, "example").is_err());
+        data["schema_version"] = json!(6);
+        data["migration_version"] = json!(3);
+        assert!(validate(&data, "example").is_ok());
+        data["tables"]["process_points"] = json!([{"id":1,"project_id":5,"board_key":"UPM"}]);
+        data["tables"]["collect_points"] =
+            json!([{"id":2,"project_id":5,"board_key":"UPM","process_point_id":1}]);
+        assert!(validate(&data, "example").is_ok());
+        data["tables"]["collect_points"][0]["process_point_id"] = json!(3);
+        assert!(validate(&data, "example").is_err());
+        data["tables"]
+            .as_object_mut()
+            .unwrap()
+            .remove("collect_points");
         assert!(validate(&data, "example").is_err());
     }
     #[test]

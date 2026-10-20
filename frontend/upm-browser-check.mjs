@@ -1,0 +1,101 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+import { createServer } from "vite";
+import { chromium, expect } from "@playwright/test";
+
+const root=fileURLToPath(new URL(".",import.meta.url));
+const manifest=JSON.parse(await readFile(new URL("../config/dc-ups/project.json",import.meta.url),"utf8"));
+const board=manifest.topology.board_types.find(b=>b.code==="UPM");
+const definitions={};
+for(const [kind,file] of [["process","process"],["collect","collect"],["forward","transmit"]])
+  definitions[kind]=JSON.parse(await readFile(new URL(`../config/dc-ups/UPM/${file}.json`,import.meta.url),"utf8"));
+const points=[
+  {id:1,board_key:"UPM",group_key:"LOCAL",name:"本地电压",enum_name:"LOCAL_VOLTAGE",sig_id:101,internal_type:"U16",element_count:1,byte_length:2},
+  {id:2,board_key:"UPM",group_key:"DSP",name:"DSP 电压",enum_name:"DSP_VOLTAGE",sig_id:201,internal_type:"U16",element_count:1,byte_length:2},
+];
+const collect=[{id:1,board_key:"UPM",process_point_id:2,endpoint_key:"DSP_UPP",upp_model:99,address:6,
+  wire_type:"U16",wire_length:2,scale:0.1,access:"RO",byte_order:0,acquisition_mode:"poll",poll_interval:3,set_priority:0,scan_priority:0}];
+const forward=[
+  {id:1,board_key:"UPM",process_point_id:1,endpoint_key:"MODBUS_SERVICE",address:31000,wire_type:"U16",wire_length:2,register_type:"INPUT",register_count:1,scale:0.1,access:"RO"},
+  {id:2,board_key:"UPM",process_point_id:1,endpoint_key:"UPP_SERVICE",upp_model:131,address:6,wire_type:"U16",wire_length:2,scale:0.1,access:"RO"},
+  {id:3,board_key:"UPM",process_point_id:2,endpoint_key:"MODBUS_SERVICE",address:0,wire_type:"U16",wire_length:2,register_type:"HOLDING",register_count:1,device_addresses:"DSP1: 50000；DSP8: 57000",scale:0.1,access:"RO"},
+];
+const data=kind=>({
+  revision:1,board_key:"UPM",kind,storage:"native",definition:definitions[kind],
+  options:{native_groups:board.point_groups,process_points:points,
+    endpoints:board.point_endpoints.filter(e=>kind==="collect"?e.direction==="collect":e.direction!=="collect")},
+  rows:(kind==="process"?points:kind==="collect"?collect:forward).map(row=>{
+    const p=kind==="process"?row:points.find(p=>p.id===row.process_point_id);
+    return {...row,group_key:p.group_key,signal_name:p.name,enum_name:p.enum_name,edit_values:{...row}};
+  }),
+});
+const errors=[],requests=[];
+const server=await createServer({root,logLevel:"error",server:{host:"127.0.0.1",port:0}});
+let browser;
+try {
+  await server.listen();browser=await chromium.launch({headless:true});
+  const page=await browser.newPage({baseURL:`http://127.0.0.1:${server.httpServer.address().port}`,viewport:{width:1600,height:1000}});
+  page.on("pageerror",e=>errors.push(e.message));
+  page.on("dialog",d=>d.accept());
+  await page.route("**/__upm_test",route=>route.fulfill({contentType:"text/html; charset=utf-8",body:`<!doctype html><html><head><meta charset="utf-8"></head><body><div id="test"></div><script type="module">
+    import { createApp,h,ref } from '/node_modules/.vite/deps/vue.js';
+    import Workspace from '/src/pages/TopologyWorkspace.vue';
+    import { permissionKey } from '/src/composables/useProjectPermissions.ts';
+    import '/src/style.css';
+    const app=createApp({render:()=>h(Workspace,{pid:1,boardKey:'UPM',canWrite:true,
+      graph:${JSON.stringify({revision:1,project_config:manifest.topology,process_points:points,collect_points:collect,transmit_points:forward})}})});
+    app.provide(permissionKey,{state:ref({can_edit:true,can_manage_project:true,grants:[],catalog:[]}),error:ref(''),refresh:async()=>{}});
+    app.mount('#test');
+  </script></body></html>`}));
+  await page.route("**/api/**",route=>{
+    const req=route.request(),url=new URL(req.url());
+    if(req.method()==="GET") return route.fulfill({json:url.pathname.endsWith("/schema")
+      ?{boards:{UPM:definitions},workspace:{boards:{UPM:{tables:["process","collect","transmit"]}}}}
+      :data(url.pathname.split("/").at(-1))});
+    requests.push({path:url.pathname,body:req.postDataJSON()});
+    return route.fulfill({json:{id:1,allowed:true,errors:[],impact:{count:1,changes:[]}}});
+  });
+  await page.goto("/__upm_test");
+  await expect(page.getByRole("tab",{name:/UPM 内部点/})).toHaveAttribute("aria-selected","true");
+  await expect(page.getByRole("tab",{name:/DSP UPP 采集表/})).toHaveCount(0);
+  await page.getByRole("tab",{name:/Modbus 对外表/}).click();
+  await expect(page.locator("tbody tr")).toHaveCount(1);
+  await expect(page.getByRole("columnheader",{name:/Modbus 寄存器区/})).toBeVisible();
+  await expect(page.getByRole("columnheader",{name:/UPP 模型号/})).toHaveCount(0);
+  await page.getByRole("tab",{name:/CSU-UPM UPP 对外表/}).click();
+  await expect(page.locator("tbody tr")).toHaveCount(1);
+  await expect(page.getByRole("columnheader",{name:/UPP 模型号/})).toBeVisible();
+  await expect(page.getByRole("columnheader",{name:/Modbus 寄存器区/})).toHaveCount(0);
+  await page.getByRole("button",{name:"DSP · DSP 设备共享模板",exact:true}).click();
+  await page.getByRole("tab",{name:/DSP UPP 采集表/}).click();
+  await expect(page.locator("tbody tr")).toHaveCount(1);
+  await page.locator('tbody [data-column-key="poll_interval"]').dblclick();
+  await page.getByLabel("编辑 UPP 轮询间隔",{exact:true}).fill("8");
+  await page.getByLabel("编辑 UPP 轮询间隔",{exact:true}).press("Enter");
+  await page.getByRole("button",{name:"检查",exact:true}).click();
+  assert.ok(requests.at(-1).path.endsWith("/collect/batch/preview"));
+  assert.equal(requests.at(-1).body.rows[0].values.poll_interval,8);
+  await page.getByRole("button",{name:"继续编辑",exact:true}).click();
+  await page.getByRole("tab",{name:/Modbus 对外表/}).click();
+  await expect(page.locator("tbody tr")).toHaveCount(1);
+  await expect(page.locator("tbody")).toContainText("DSP1: 50000；DSP8: 57000");
+  await page.route("**/__upm_import",route=>route.fulfill({contentType:"text/html; charset=utf-8",body:`<!doctype html><html><head><meta charset="utf-8"></head><body><div id="test"></div><script type="module">
+    import {createApp,h} from '/node_modules/.vite/deps/vue.js';
+    import ImportModal from '/src/components/ImportModal.vue';
+    createApp({render:()=>h(ImportModal,{pid:1,canWrite:true})}).mount('#test');
+  </script></body></html>`}));
+  await page.route("**/api/projects/1/imports/**",route=>{
+    assert.equal(new URL(route.request().url()).searchParams.get("board"),"UPM");
+    return route.fulfill({json:{id:2,import_scope:"upm",filename:"upm.xlsx",sha256:"a".repeat(64),
+      point_count:606,local_count:161,dsp_count:445,collect_count:445,transmit_count:560,warnings:[],sample:points}});
+  });
+  await page.goto("/__upm_import");
+  await page.getByLabel("导入板卡",{exact:true}).selectOption("UPM");
+  await page.getByLabel("选择 Excel 文件",{exact:true}).setInputFiles({name:"upm.xlsx",mimeType:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",buffer:Buffer.from("mock")});
+  await expect(page.locator(".import-counts")).toContainText("161");
+  await expect(page.locator(".confirm-checkbox")).toContainText("确认替换 UPM 内部点、UPP 采集表及两种对外转发表");
+  await expect(page.locator(".confirm-checkbox")).toContainText("保留项目拓扑、DSP 及其他板卡数据");
+  assert.deepEqual(errors,[]);
+  console.log("PASS: UPM local/DSP templates, collection cell editing and separate Modbus/UPP views");
+} finally { await browser?.close();await server.close(); }

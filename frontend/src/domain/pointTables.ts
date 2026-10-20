@@ -1,6 +1,6 @@
 import type { Row } from "../api";
 
-export type PointKind = "process" | "forward";
+export type PointKind = "process" | "collect" | "forward";
 export type PointField = {
   label: string;
   column_label?: string;

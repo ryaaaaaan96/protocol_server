@@ -10,14 +10,14 @@
 | 平台库 | `meta.projects` | 项目 ID、不可变 UUID、config_key、名称、数据库名和创建状态 |
 | 平台库 | `meta.project_members` / `meta.project_member_grants` | 项目成员及板卡、端点编辑范围 |
 | 平台库 | `history.audit_logs` | 账号、成员与权限操作审计 |
-| 每项目业务库 | `points.process_points` / `points.transmit_points` | 当前 DSP 内部数据及 UPP 转发映射 |
+| 每项目业务库 | `points.process_points` / `points.collect_points` / `points.transmit_points` | DSP/UPM 内部点、采集与对外映射 |
 | 项目库 | `history.events` | 追加式点修改、项目审计和导入事件 |
 | 项目库 | `history.releases` | 不可变发布快照及生成文件 |
 | 项目库 | `meta.project_state` | 单行项目身份、UUID、版本、生效配置和编辑权 |
 | 项目库 | `meta.previews` | 待确认的修改或工作簿导入 |
 | 每个库 | `public._sqlx_migrations` | 各自的迁移版本和校验和 |
 
-平台库共 8 张表，每个项目库共 7 张表（包含迁移记录表）。平台按 `auth`、`meta`、`history` 分组，项目按 `points`、`history`、`meta` 分组，各自保留 `public._sqlx_migrations`。Schema 是库内分组，在 DBeaver 刷新数据库后展开即可查看；同一库的表仍共用事务并可建立外键，板卡不单独建库。业务库不保存账号密码或权限副本；历史保存操作者 ID 和名称快照，不跨数据库建用户外键。
+平台库共 8 张表，每个项目库共 8 张表（包含迁移记录表）。平台按 `auth`、`meta`、`history` 分组，项目按 `points`、`history`、`meta` 分组，各自保留 `public._sqlx_migrations`。Schema 是库内分组，在 DBeaver 刷新数据库后展开即可查看；同一库的表仍共用事务并可建立外键，板卡不单独建库。业务库不保存账号密码或权限副本；历史保存操作者 ID 和名称快照，不跨数据库建用户外键。
 
 平台保留独立成员授权表，继续用复合外键、范围检查和唯一约束防止无效或重复授权。会话支持多设备和独立过期；登录尝试也要记录不存在的用户名，因此这两类记录不合入账号表。平台审计只追加，与可更新的账号、权限和项目状态分别保存。
 
@@ -48,13 +48,15 @@
 | `points.process_points` | `group_key`、`name`、`enum_name`、可空 `sig_id`、`internal_type`、`element_count`、`byte_length`、`unit` |
 | 内部点参数 | `default_value`、`min_value`、`max_value`、`boot_restore`、`manual_restore`、`process_enabled`、`flags`、`callback`、`notes` |
 | `points.transmit_points` | `process_point_id`、`endpoint_key`、`name`、`upp_model`、`address`、`wire_type`、`wire_length`、`scale`、`access`、`byte_order`、`conversion`、`enabled` |
-| 两表追溯信息 | `display_order`、`source_sheet`、`source_row`；内部点另有 `metadata` |
+| `points.collect_points` | `process_point_id`、`endpoint_key`、`upp_model`、`address`、`wire_type`、`wire_length`、`scale`、`access`、`byte_order`、`acquisition_mode`、`poll_interval`、`set_priority`、`scan_priority` |
+| 三表追溯信息 | `display_order`、`source_sheet`、`source_row`、`metadata`；转发另有 `register_type` |
 
 ```mermaid
 erDiagram
   project_state ||--o{ process_points : owns
   project_state ||--o{ transmit_points : owns
   process_points ||--o{ transmit_points : maps
+  process_points ||--o{ collect_points : receives
   project_state ||--o{ events : records
   project_state ||--o{ previews : stages
   project_state ||--o{ releases : freezes
@@ -62,7 +64,7 @@ erDiagram
 
 转发以 `process_point_id` 关联内部点，修改变量名不会断开关系。数据库外键防止跨项目引用，应用校验确保相同板卡且端点、分组在生效 JSON 中存在。移除被数据或授权引用的配置会被拒绝。
 
-`address` 是明确的 UPP 字节偏移，拖动行只改 `display_order`。DSP 转换自动确定：同类型为 `identity`，内部 F32 与线上 S32 为 `fixed_point`，数组到 STRING 为 `array_bytes`；长度、系数及类型组合仍须通过校验。DSP 不提供转换方式和字节序的独立输入。通用 `conversion`、`byte_order` 列保留兼容其他板卡和旧 Dump；DSP 写入、读取及生成使用自动转换结果，字节序兼容值为 0，旧值不影响 DSP 校验和生成。字节序属于接收端配置，UPM 本次不配置。DSP 内部没有 sigID；通用存储中的可空 `sig_id` 仅为兼容字段，不属于 DSP sheet 的显示或编辑定义。
+`address` 是明确的 UPP 字节偏移，拖动行只改 `display_order`。DSP 转换自动确定：同类型为 `identity`，内部 F32 与线上 S32 为 `fixed_point`，数组到 STRING 为 `array_bytes`；长度、系数及类型组合仍须通过校验。DSP 不提供转换方式和字节序的独立输入。通用 `conversion`、`byte_order` 列保留兼容其他板卡和旧 Dump；DSP 写入、读取及生成使用自动转换结果，字节序兼容值为 0，旧值不影响 DSP 校验和生成。字节序属于接收端配置，在 UPM 协议表中独立维护。DSP 内部没有 sigID；通用存储中的可空 `sig_id` 仅为兼容字段，不属于 DSP sheet 的显示或编辑定义。
 
 原工作簿 `UPM-DSP采集数据!O2` 按型号分段计算偏移：常规字段为 `6 + 同型号前面各行的通信字节数之和`，每个型号重新起算。六个名称使用固定偏移：固件版本号版本 48、机器型号 8、机器版本号 24、序列号 62、机器型号编码 94、设备类型编码 96。导入保留 Excel 已计算的 O 列结果；DSP 网页写入由 `transmit.json.calculation` 的 JavaScript 整表脚本计算字节数和偏移。默认脚本按模型升序、上传等级降序、稳定来源顺序计算，复现上述公式；固定地址行的长度仍计入累计量。界面 `effective_address`（UPP偏移地址）和导出 XML 的 `OffsetAddr` 均直接使用 `address`，不再加帧头或型号。相同板卡、端点及型号内，DSP 所有转发字段的 `[address, address + wire_length)` 区间不能重叠；不同型号可以使用相同偏移。
 
@@ -107,11 +109,13 @@ PostgreSQL 的事务/MVCC 不替代这些应用历史记录。运行角色不能
 
 ## 升级与项目归档
 
-平台迁移 `migrations/platform/0002_grouped_platform.sql` 将七张业务/运行表从 `public` 移入对应 Schema，表数、记录、ID、序列、外键、权限范围约束及登录会话保留。它将平台库的 `public._sqlx_migrations` 更新到版本 2，不改动项目库的七张表、`schema_version=5` 或业务 `revision`；两类版本各自管理。代码与手写 SQL 使用 Schema 限定名，安全函数和运行角色授权同步适配。
+平台迁移 `migrations/platform/0002_grouped_platform.sql` 将七张业务/运行表从 `public` 移入对应 Schema，表数、记录、ID、序列、外键、权限范围约束及登录会话保留。它将平台库的 `public._sqlx_migrations` 更新到版本 2，本身不改动项目库的表、`schema_version` 或业务 `revision`；两类版本各自管理。代码与手写 SQL 使用 Schema 限定名，安全函数和运行角色授权同步适配。
 
 项目迁移 `0002_grouped_project.sql` 将现有库整理为 7 张表，完整保留点数据、历史、发布和已有编辑权。旧预览全部失效，现有项目 `revision` 增加 1，`schema_version` 更新为 5。刷新客户端后重新检查待提交草稿；不要删除 `_sqlx_migrations` 或修改已应用的迁移文件。
 
-项目 Dump 只包含两张当前业务表，导入时重新分配 ID 并重建引用，保留目标已有历史。新归档版本为 `(schema_version, migration_version)=(5,2)`，兼容旧 `(4,1)`，仍只解析白名单内的两张点表，不执行上传 SQL。完整迁移须停写，分别备份平台库、各项目库和 config 目录，并一起恢复，保留相同 UUID。旧共享库 v15 必须先拆分为项目迁移 v1，再运行 `cargo run -- migrate` 升级到当前结构。当前仅实现 DSP，UPM 采集留待后续。
+项目迁移 `0003_upm_collection.sql` 增加采集表和 Modbus 转发属性，项目库变为 8 张表、`schema_version=6`，旧预览失效且 revision 增加 1。组织、权限与历史继续沿用现有结构。UPM 的 LOCAL/DSP 模板及设备地址规则见 [UPM 点表](upm.md)。
+
+项目 Dump 包含三张当前业务表，导入重新分配 ID 并重建引用，保留目标已有历史。新归档为 `(6,3)`，兼容旧 `(4,1)`、`(5,2)` 两表归档（采集为空）；只解析白名单数据，不执行上传 SQL。完整迁移仍需同时备份平台库、各项目库和 config 并保留 UUID。
 
 ## JSON 整表计算
 

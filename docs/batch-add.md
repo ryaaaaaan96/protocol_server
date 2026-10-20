@@ -1,6 +1,6 @@
 # DSP 点表批量添加
 
-当前支持 DSP 内部数据（`process`）及 UPP 转发（`forward`）。采集表及其他板卡暂未启用。
+本页 Node.js Excel 示例针对 DSP 内部数据（`process`）及 UPP 转发（`forward`）。UPM 已启用内部、采集和转发表；网页编辑与批量预览 API 支持 `process`、`collect`、`forward`，完整工作簿导入选择 UPM，详见 [UPM 点表](upm.md)。此示例的 Excel 模板仍按 DSP 字段定义。
 
 ## 操作步骤
 
@@ -35,7 +35,7 @@ node scripts/excel-batch/index.mjs --project 1 --board DSP --kind process --file
 
 `group_key` 默认 `LOCAL`；`endpoint_key` 通常为 `UPP_SERVICE`，均以实际 JSON 配置为准。引用接口返回 `native_groups`、`process_points`、`endpoints`。DSP 内部没有 sigID，模板按原 sheet 的可写字段填写，派生列不上传。兼容旧脚本的 `enum_name` / `internal_type` 输入。内部类型、长度、范围、元数据选项和转发转换在服务端统一校验；比例 `scale` 可填小数。
 
-DSP 转发的型号由关联内部点的数据分类固定推导，模板不再提供 `upp_model`。旧文件可以携带匹配的型号，不匹配会拒绝。请先为内部点选择有效分类。`wire_type`、`scale` 留空时自动补齐建议值；显式值保留并校验。DSP 的 `address`、`wire_length` 由 `transmit.json.calculation` 整表计算，模板不提供这两列，也不允许手动提交；无脚本的其他表仍可通过兼容列填写。数据转换由内部与通信类型自动确定，模板不提供 `conversion` 和 `byte_order`。旧文件中的这两列仅作兼容输入，DSP 服务端将转换方式规范为自动推导结果、字节序兼容值规范为 0；UPM 后续独立配置。偏离建议的类型会提示，但非法类型组合或地址冲突仍阻止提交。
+DSP 转发的型号由关联内部点的数据分类固定推导，模板不再提供 `upp_model`。旧文件可以携带匹配的型号，不匹配会拒绝。请先为内部点选择有效分类。`wire_type`、`scale` 留空时自动补齐建议值；显式值保留并校验。DSP 的 `address`、`wire_length` 由 `transmit.json.calculation` 整表计算，模板不提供这两列，也不允许手动提交；无脚本的其他表仍可通过兼容列填写。数据转换由内部与通信类型自动确定，模板不提供 `conversion` 和 `byte_order`。旧文件中的这两列仅作兼容输入，DSP 服务端将转换方式规范为自动推导结果、字节序兼容值规范为 0；UPM 协议表独立配置。偏离建议的类型会提示，但非法类型组合或地址冲突仍阻止提交。
 
 转发数据名称统一取关联内部点，不再提供独立 `name` 和 `enabled` 模板列。存在的 DSP 映射全部参与协议生成和地址冲突校验，不需要转发时删除映射。旧模板的 `name` 不再覆盖内部名称，`enabled: true` 兼容接收，`false` 会被服务端拒绝。`address` 对应“UPP偏移地址”，`wire_length` 对应“UPP协议字节数”，批量添加后仅计算一次，预览列出全部联动影响，提交返回计算后的最终记录。
 

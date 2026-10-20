@@ -12,11 +12,15 @@ import Modal from "./Modal.vue";
 import Badge from "./Badge.vue";
 const props = defineProps<{ pid: number; canWrite: boolean }>();
 const emit = defineEmits<{ close: []; done: [] }>();
+const board = ref("DSP");
 const preview = ref<Row | null>(null),
   busy = ref(false),
   error = ref(""),
   replace = ref(false);
-const counts = computed(() => !preview.value ? [] : [
+const counts = computed(() => !preview.value ? [] : preview.value.import_scope === "upm" ? [
+  ["LOCAL 内部点", preview.value.local_count], ["DSP 模板内部点", preview.value.dsp_count],
+  ["UPP 采集映射", preview.value.collect_count], ["对外转发映射", preview.value.transmit_count],
+] : [
   ["DSP 内部点", preview.value.dsp_count ?? preview.value.point_count],
   ["UPP 转发映射", preview.value.transmit_count],
 ]);
@@ -32,7 +36,7 @@ async function upload(event: Event) {
   f.append("file", file);
   try {
     preview.value = await api(
-      `/projects/${props.pid}/imports/preview`,
+      `/projects/${props.pid}/imports/preview?board=${board.value}`,
       "POST",
       f,
     );
@@ -70,10 +74,11 @@ async function commit() {
           >02 核对预览</span
         ><ChevronRight :size="15" /><span>03 写入数据库</span>
       </div>
+      <label v-if="!preview" class="field">导入板卡<select v-model="board" aria-label="导入板卡" :disabled="busy"><option value="DSP">DSP 功率板</option><option value="UPM">UPM 控制板</option></select></label>
       <template v-if="!preview"
         ><label class="upload-area"
           ><div><Upload :size="30" /></div>
-          <strong>{{ busy ? "正在解析工作簿…" : "选择 UPM 测点工作簿" }}</strong
+          <strong>{{ busy ? "正在解析工作簿…" : "选择 DC-UPS 测点工作簿" }}</strong
           ><span>支持 .xlsx，最大 15 MB。源文件保持不变。</span
           ><input
             type="file"
@@ -83,8 +88,9 @@ async function commit() {
             @change="upload"
         /></label>
         <div class="notice">
-          <strong>导入 DSP 内部点与 UPP 转发映射</strong>
-          <p>读取“DSP内部数据”和“UPM-DSP采集数据”两个工作表，仅更新 DSP 侧点表；项目拓扑、UPM 及其他板卡数据保持不变。</p>
+          <strong>仅更新 {{ board }} 侧点表</strong>
+          <p v-if="board === 'DSP'">读取“DSP内部数据”和“UPM-DSP采集数据”，更新 DSP 内部点和转发映射。</p>
+          <p v-else>读取“UPM单板测点”“UPM-DSP采集数据”“CSU-UPM采集数据”及公共 sigID 映射表，更新 UPM 内部点、采集和两种转发映射。</p>
 
         </div></template
       ><template v-else
@@ -107,7 +113,7 @@ async function commit() {
             ><small>{{ label }}</small>
           </div>
         </div>
-        <p class="notice">本次仅导入 DSP 内部数据和 DSP UPP 转发表。UPM 的 UPP 采集表暂不处理。</p>
+        <p class="notice">本次替换 {{ preview.import_scope === 'upm' ? 'UPM' : 'DSP' }} 板卡点表，其他板卡不受影响。</p>
         <div class="notice">
           <p v-for="w in preview.warnings" :key="w">{{ w }}</p>
         </div>
@@ -134,7 +140,9 @@ async function commit() {
         </div>
         <label class="confirm-checkbox"
           ><input type="checkbox" v-model="replace" /><span
-            >确认替换 DSP 内部数据和 DSP UPP 转发表，保留项目拓扑、UPM 及其他板卡数据。修改前后内容保留在历史记录中。</span
+            >{{ preview.import_scope === 'upm'
+              ? '确认替换 UPM 内部点、UPP 采集表及两种对外转发表，保留项目拓扑、DSP 及其他板卡数据。'
+              : '确认替换 DSP 内部数据和 DSP UPP 转发表，保留项目拓扑、UPM 及其他板卡数据。' }}修改前后内容保留在历史记录中。</span
           ></label
         ></template
       >

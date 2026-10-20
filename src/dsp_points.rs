@@ -10,9 +10,9 @@ use sqlx::PgConnection;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const PROCESS_COLUMNS: &str = "group_key,name,enum_name,sig_id,internal_type,element_count,byte_length,unit,default_value,min_value,max_value,boot_restore,manual_restore,process_enabled,flags,callback,notes,display_order,source_sheet,source_row,metadata";
-pub const TRANSMIT_COLUMNS: &str = "process_point_id,endpoint_key,name,upp_model,address,wire_type,wire_length,scale,access,byte_order,conversion,enabled,display_order,source_sheet,source_row";
+pub const TRANSMIT_COLUMNS: &str = "process_point_id,endpoint_key,name,upp_model,address,wire_type,wire_length,scale,access,byte_order,conversion,enabled,display_order,source_sheet,source_row,register_type,metadata";
 const PROCESS_EDIT: &str = "group_key,name,enum_name,sig_id,internal_type,element_count,byte_length,unit,default_value,min_value,max_value,boot_restore,manual_restore,process_enabled,flags,callback,notes";
-const TRANSMIT_EDIT: &str = "process_point_id,endpoint_key,name,upp_model,address,wire_type,wire_length,scale,access,byte_order,conversion,enabled";
+const TRANSMIT_EDIT: &str = "process_point_id,endpoint_key,name,upp_model,address,wire_type,wire_length,scale,access,byte_order,conversion,enabled,register_type";
 
 fn board_definition<'a>(g: &'a Value, key: &str) -> Option<&'a Value> {
     g["project_config"]["board_types"]
@@ -52,11 +52,15 @@ fn table(kind: &str) -> Result<&'static str> {
     match kind {
         "process" => Ok("points.process_points"),
         "forward" | "transmit" => Ok("points.transmit_points"),
+        "collect" => Ok("points.collect_points"),
         _ => Err(AppError::bad("此板卡尚未启用采集点表")),
     }
 }
 
-fn defaults(kind: &str) -> Value {
+pub(crate) fn defaults(kind: &str) -> Value {
+    if kind == "collect" {
+        return crate::upm_points::collect_defaults();
+    }
     if kind == "process" {
         json!({"group_key":"LOCAL","name":"","enum_name":"","sig_id":null,
             "internal_type":"U16","element_count":1,"byte_length":2,"unit":"",
@@ -66,13 +70,15 @@ fn defaults(kind: &str) -> Value {
     } else {
         json!({"process_point_id":null,"endpoint_key":"UPP_SERVICE","name":"","upp_model":0,
             "address":6,"wire_type":"U16","wire_length":2,"scale":1,"access":"RO","byte_order":0,
-            "conversion":"identity","enabled":true,"display_order":0,"source_sheet":"","source_row":null})
+            "conversion":"identity","enabled":true,"register_type":"HOLDING","metadata":{},"display_order":0,"source_sheet":"","source_row":null})
     }
 }
 
 fn columns(kind: &str) -> &'static str {
     if kind == "process" {
         PROCESS_COLUMNS
+    } else if kind == "collect" {
+        crate::upm_points::COLLECT_COLUMNS
     } else {
         TRANSMIT_COLUMNS
     }
@@ -100,7 +106,7 @@ fn derive_length(point: &mut Value, supplied: Option<&Value>) -> Result<()> {
     Ok(())
 }
 
-async fn insert(
+pub(crate) async fn insert(
     tx: &mut PgConnection,
     pid: i64,
     board_key: &str,
@@ -139,6 +145,8 @@ pub async fn apply(
     }
     let mut allowed: BTreeSet<_> = if kind == "process" {
         PROCESS_EDIT
+    } else if kind == "collect" {
+        crate::point_tables::NATIVE_COLLECT
     } else {
         TRANSMIT_EDIT
     }
@@ -210,15 +218,27 @@ pub async fn apply(
             .as_array()
             .is_some_and(|endpoints| {
                 endpoints.iter().any(|endpoint| {
-                    endpoint["code"] == merged["endpoint_key"] && endpoint["protocol"] == "UPP"
+                    endpoint["code"] == merged["endpoint_key"]
+                        && if kind == "collect" {
+                            endpoint["direction"] == "collect"
+                        } else {
+                            endpoint["direction"] != "collect"
+                        }
                 })
             })
         {
-            return Err(AppError::bad("转发端点不在已应用 JSON 的 UPP 端点配置中"));
+            return Err(AppError::bad("协议端点不在当前表的已应用 JSON 配置中"));
         }
         let point: Value = sqlx::query_scalar("SELECT to_jsonb(p) FROM points.process_points p WHERE project_id=$1 AND board_key=$2 AND id=$3")
             .bind(pid).bind(board_key).bind(merged["process_point_id"].as_i64()).fetch_optional(&mut *tx).await?
             .ok_or(AppError::bad("转发必须关联当前板卡的内部数据点"))?;
+        if kind == "collect" && point["group_key"] == "LOCAL" {
+            return Err(AppError::bad("LOCAL 为本地设备，不建立采集记录"));
+        }
+        if board_key == "UPM" && kind == "forward" {
+            updates.insert("name".into(), point["name"].clone());
+            merged["name"] = point["name"].clone();
+        }
         if dsp {
             if fields
                 .get("enabled")
@@ -328,9 +348,12 @@ pub async fn table_rows(
         sqlx::query_scalar(r#"SELECT to_jsonb(p) || jsonb_build_object(
             'edit_values',to_jsonb(p),'data_type',p.internal_type,
             'resolved_sig_id',p.sig_id,
+            'collection_count',(SELECT count(*) FROM points.collect_points c WHERE c.project_id=p.project_id AND c.process_point_id=p.id),
             'forward_count',(SELECT count(*) FROM points.transmit_points t WHERE t.project_id=p.project_id AND t.process_point_id=p.id))
             FROM points.process_points p WHERE p.project_id=$1 AND p.board_key=$2 ORDER BY p.display_order,p.id"#)
             .bind(pid).bind(board_key).fetch_all(&mut *tx).await?
+    } else if kind == "collect" {
+        crate::upm_points::collect_rows(tx, pid, board_key).await?
     } else {
         sqlx::query_scalar(r#"SELECT to_jsonb(t) || jsonb_build_object(
             'edit_values',to_jsonb(t),'signal_name',p.name,'source_point',to_jsonb(p),
@@ -363,6 +386,9 @@ pub async fn table_rows(
                 row["endpoint_name"] = endpoint["name"].clone();
                 row["protocol"] = endpoint["protocol"].clone();
             }
+        }
+        if board_key == "UPM" {
+            crate::upm_points::project_row(row, &board, kind);
         }
         row["group_name"] = groups
             .iter()
@@ -646,7 +672,10 @@ pub fn validate(g: &Value) -> Vec<Value> {
                 0,
             );
         }
-        if !flag_expression(strv(point, "flags")) || !identifier(strv(point, "callback")) {
+        if !flag_expression(strv(point, "flags"))
+            || !(identifier(strv(point, "callback"))
+                || (point["board_key"] == "UPM" && point["callback"] == "0"))
+        {
             issue(
                 &mut out,
                 entity,
@@ -658,9 +687,14 @@ pub fn validate(g: &Value) -> Vec<Value> {
         }
         // The workbook has no confirmed DSP numeric sigIDs. Native definitions
         // and protocol JSON remain useful without inventing a firmware ABI.
-        numeric_range(&mut out, point);
+        if point["board_key"] != "UPM" {
+            numeric_range(&mut out, point);
+        }
     }
-    for t in rows(g, "transmit_points") {
+    for t in rows(g, "transmit_points")
+        .iter()
+        .filter(|t| t["board_key"] != "UPM")
+    {
         let entity = "transmit_points";
         let dsp = board_definition(g, strv(t, "board_key")).is_some_and(crate::dsp_sheet::is_dsp);
         if !board_definition(g, strv(t, "board_key"))
@@ -676,7 +710,7 @@ pub fn validate(g: &Value) -> Vec<Value> {
                 entity,
                 t,
                 "endpoint",
-                "转发端点不在已应用 JSON 的 UPP 端点配置中",
+                "协议端点不在当前表的已应用 JSON 配置中",
                 0,
             );
         }
@@ -817,6 +851,7 @@ pub fn validate(g: &Value) -> Vec<Value> {
             }
         }
     }
+    out.extend(crate::upm_points::validate(g));
     out
 }
 
@@ -832,6 +867,7 @@ pub async fn history(
     for (table, kind) in [
         ("process_points", "process"),
         ("transmit_points", "transmit"),
+        ("collect_points", "collect"),
     ] {
         let b: BTreeMap<_, _> = rows(before, table)
             .iter()
@@ -887,6 +923,10 @@ pub fn generate(g: &Value) -> BTreeMap<String, String> {
         return files;
     };
     for board in boards.iter().filter(|b| b["point_storage"] == "native") {
+        if board["code"] == "UPM" {
+            files.extend(crate::upm_points::generate(g, board));
+            continue;
+        }
         let code = strv(board, "code");
         let mut process: Vec<_> = rows(g, "process_points")
             .iter()
@@ -1132,9 +1172,9 @@ mod tests {
     #[test]
     fn other_board_wire_configuration_is_independent_of_dsp_categories() {
         let mut g = graph();
-        g["project_config"]["board_types"][0]["code"] = json!("UPM");
-        g["process_points"][0]["board_key"] = json!("UPM");
-        g["transmit_points"][0]["board_key"] = json!("UPM");
+        g["project_config"]["board_types"][0]["code"] = json!("OTHER");
+        g["process_points"][0]["board_key"] = json!("OTHER");
+        g["transmit_points"][0]["board_key"] = json!("OTHER");
         g["process_points"][0]["metadata"] = json!({});
         g["transmit_points"][0]["upp_model"] = json!(42);
         g["transmit_points"][0]["wire_type"] = json!("F32");
@@ -1146,9 +1186,9 @@ mod tests {
     #[test]
     fn other_boards_retain_independent_names_and_enabled_mappings() {
         let mut g = graph();
-        g["project_config"]["board_types"][0]["code"] = json!("UPM");
-        g["process_points"][0]["board_key"] = json!("UPM");
-        g["transmit_points"][0]["board_key"] = json!("UPM");
+        g["project_config"]["board_types"][0]["code"] = json!("OTHER");
+        g["process_points"][0]["board_key"] = json!("OTHER");
+        g["transmit_points"][0]["board_key"] = json!("OTHER");
         let mut disabled = g["transmit_points"][0].clone();
         disabled["id"] = json!(2);
         disabled["enabled"] = json!(false);
@@ -1156,14 +1196,14 @@ mod tests {
         assert!(validate(&g).is_empty());
         let files = generate(&g);
         assert_eq!(
-            files["board_types/UPM/UPP_SERVICE.xml"]
+            files["board_types/OTHER/UPP_SERVICE.xml"]
                 .matches("<point ")
                 .count(),
             1
         );
-        assert!(files["board_types/UPM/UPP_SERVICE.xml"].contains("DataName=\"母线电压输出\""));
+        assert!(files["board_types/OTHER/UPP_SERVICE.xml"].contains("DataName=\"母线电压输出\""));
         let exported: Value =
-            serde_json::from_str(&files["board_types/UPM/transmit.json"]).unwrap();
+            serde_json::from_str(&files["board_types/OTHER/transmit.json"]).unwrap();
         assert_eq!(exported["points"][1]["enabled"], false);
         assert_eq!(exported["points"][1]["name"], "母线电压输出");
     }

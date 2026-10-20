@@ -57,7 +57,15 @@ async function archiveVariant(source, destination, testEnv, versions) {
     created = true;
     native(testEnv.PG_RESTORE_BIN || "pg_restore", ["--exit-on-error", "--no-owner", `--dbname=${nativeUrl}`, source]);
     await database.connect();
-    await database.query("UPDATE public.protocol_studio_project_dump SET payload=(payload::jsonb || $1::jsonb)::text", [JSON.stringify(versions)]);
+    const payload=JSON.parse((await database.query("SELECT payload FROM public.protocol_studio_project_dump")).rows[0].payload);
+    Object.assign(payload,versions);
+    if ([4,5].includes(payload.schema_version)) {
+      delete payload.tables.collect_points;
+      for (const row of payload.tables.transmit_points) {
+        delete row.register_type; delete row.metadata;
+      }
+    }
+    await database.query("UPDATE public.protocol_studio_project_dump SET payload=$1", [JSON.stringify(payload)]);
     native(testEnv.PG_DUMP_BIN || "pg_dump", ["--format=custom", "--no-owner", "--no-privileges", "--table=public.protocol_studio_project_dump", `--file=${destination}`, `--dbname=${nativeUrl}`]);
   } finally {
     await database.end();

@@ -42,6 +42,8 @@ pub fn validate_rule(kind: &str, rule: &Value) -> Result<()> {
     } else {
         vec![
             "endpoint_key",
+            "group_key",
+            "register_type",
             "upp_model",
             "endpoint_id",
             "context_id",

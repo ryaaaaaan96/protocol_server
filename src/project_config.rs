@@ -34,6 +34,16 @@ pub struct BoardType {
 pub struct PointGroup {
     pub code: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub devices: Vec<PointDevice>,
+}
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PointDevice {
+    pub code: String,
+    pub name: String,
+    pub dev_id: u16,
+    pub modbus_base: u16,
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -41,6 +51,14 @@ pub struct PointEndpoint {
     pub code: String,
     pub name: String,
     pub protocol: String,
+    #[serde(default = "transmit_direction", skip_serializing_if = "is_transmit")]
+    pub direction: String,
+}
+fn transmit_direction() -> String {
+    "transmit".into()
+}
+fn is_transmit(direction: &String) -> bool {
+    direction == "transmit"
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -146,13 +164,32 @@ impl Config {
                     || e.code.len() > 80
                     || e.name.trim().is_empty()
                     || e.name.len() > 300
-                    || e.protocol != "UPP"
+                    || !["UPP", "MODBUS"].contains(&e.protocol.as_str())
+                    || !["collect", "transmit"].contains(&e.direction.as_str())
+                    || (e.direction == "collect" && e.protocol != "UPP")
+                    || (t.code != "UPM" && (e.protocol != "UPP" || e.direction != "transmit"))
                     || !endpoints.insert(&e.code)
             }) || (t.point_storage.is_none() && !t.point_endpoints.is_empty())
             {
                 return Err(AppError::bad(
-                    "point_endpoints 须为 native 板卡定义唯一、有效的 UPP 端点",
+                    "point_endpoints 须为 native 板卡定义有效的协议与方向；当前仅 UPM 支持采集和 Modbus",
                 ));
+            }
+            let mut devices = BTreeSet::new();
+            let mut device_ids = BTreeSet::new();
+            for group in &t.point_groups {
+                if group.devices.len() > 1024
+                    || group.devices.iter().any(|device| {
+                        !model::identifier(&device.code)
+                            || device.name.trim().is_empty()
+                            || !devices.insert(&device.code)
+                            || !device_ids.insert(device.dev_id)
+                    })
+                {
+                    return Err(AppError::bad(
+                        "设备实例名称、代码和设备地址须有效，代码和地址在板卡内唯一",
+                    ));
+                }
             }
             if !model::identifier(&t.code)
                 || !model::identifier(&t.model_code)
@@ -291,7 +328,7 @@ pub async fn source(
 }
 pub async fn apply(tx: &mut PgConnection, pid: i64, value: &Value) -> Result<Value> {
     let config = Config::parse(value.clone())?;
-    let used = db::all_json(tx, "SELECT to_jsonb(ref) FROM (SELECT board_key,group_key,NULL::text AS endpoint_key FROM points.process_points WHERE project_id=$1 GROUP BY board_key,group_key UNION SELECT board_key,NULL,endpoint_key FROM points.transmit_points WHERE project_id=$1 GROUP BY board_key,endpoint_key UNION SELECT g->>'board_key',NULL,g->>'endpoint_key' FROM jsonb_array_elements(COALESCE(NULLIF(current_setting('app.project_grants',true),''),'[]')::jsonb) g) ref", pid).await?;
+    let used = db::all_json(tx, "SELECT to_jsonb(ref) FROM (SELECT board_key,group_key,NULL::text AS endpoint_key FROM points.process_points WHERE project_id=$1 GROUP BY board_key,group_key UNION SELECT board_key,NULL,endpoint_key FROM points.transmit_points WHERE project_id=$1 GROUP BY board_key,endpoint_key UNION SELECT board_key,NULL,endpoint_key FROM points.collect_points WHERE project_id=$1 GROUP BY board_key,endpoint_key UNION SELECT g->>'board_key',NULL,g->>'endpoint_key' FROM jsonb_array_elements(COALESCE(NULLIF(current_setting('app.project_grants',true),''),'[]')::jsonb) g) ref", pid).await?;
     validate_references(&config, &used)?;
     let value = serde_json::to_value(&config)?;
     sqlx::query("UPDATE meta.project_state SET topology_config=$2 WHERE id=$1")

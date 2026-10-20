@@ -28,14 +28,14 @@ export async function checkGroupedSchema({ first, second, runtimeUrl, runtimeRol
   migrate();
   const expectedTables = [
     "history.events", "history.releases", "meta.previews", "meta.project_state",
-    "points.process_points", "points.transmit_points", "public._sqlx_migrations",
+    "points.collect_points", "points.process_points", "points.transmit_points", "public._sqlx_migrations",
   ];
   for (const db of [first, second]) {
     const names = (await db.query("SELECT table_schema||'.'||table_name AS name FROM information_schema.tables WHERE table_schema IN ('public','points','history','meta') AND table_type='BASE TABLE' ORDER BY 1")).rows.map(row => row.name);
-    assert.deepEqual(names, expectedTables, "project databases contain precisely seven grouped tables");
+    assert.deepEqual(names, expectedTables, "project databases contain precisely eight grouped tables");
     assert.equal((await db.query("SELECT count(*)::int AS n FROM meta.previews")).rows[0].n, 0, "old previews are invalidated");
-    assert.equal((await db.query("SELECT schema_version FROM meta.project_state")).rows[0].schema_version, 5);
-    assert.equal((await db.query("SELECT max(version)::int AS version FROM public._sqlx_migrations WHERE success")).rows[0].version, 2);
+    assert.equal((await db.query("SELECT schema_version FROM meta.project_state")).rows[0].schema_version, 6);
+    assert.equal((await db.query("SELECT max(version)::int AS version FROM public._sqlx_migrations WHERE success")).rows[0].version, 3);
     assert.equal((await db.query("SELECT encode(checksum,'hex') AS value FROM public._sqlx_migrations WHERE version=1")).rows[0].value, before.checksum, "already applied migration remains unchanged");
     for (const table of ["history.events", "history.releases"]) {
       for (const privilege of ["UPDATE", "DELETE", "TRUNCATE"]) {
@@ -43,14 +43,14 @@ export async function checkGroupedSchema({ first, second, runtimeUrl, runtimeRol
       }
     }
     const protectedTables = (await db.query("SELECT n.nspname||'.'||c.relname AS name,c.relrowsecurity,c.relforcerowsecurity FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname IN ('points','history','meta') AND c.relkind='r'")).rows;
-    assert.equal(protectedTables.length, 6);
+    assert.equal(protectedTables.length, 7);
     assert.ok(protectedTables.every(table => table.relrowsecurity && table.relforcerowsecurity), "all business tables retain forced RLS");
     for (const schema of ["points", "history", "meta", "public"]) {
       assert.equal((await db.query("SELECT has_schema_privilege($1,$2,'CREATE') AS yes", [runtimeRole, schema])).rows[0].yes, false);
     }
   }
   assert.deepEqual(await rows(first, "points.process_points"), before.process, "all point values and IDs survive");
-  assert.deepEqual(await rows(first, "points.transmit_points"), before.transmit);
+  assert.deepEqual((await first.query("SELECT (to_jsonb(t)-'register_type'-'metadata')::text AS value FROM points.transmit_points t ORDER BY id")).rows.map(row=>row.value), before.transmit);
   assert.deepEqual(await rows(second, "points.process_points"), before.secondProcess);
   assert.deepEqual(await rows(first, "history.events", pointColumns, "WHERE kind='point'"), before.points, "point history retains exact before/after JSON, IDs, times, and snapshots");
   assert.deepEqual(await rows(first, "history.events", "legacy_id AS id,project_id,actor_id AS user_id,actor_name,action,entity,before_data,after_data,created_at", "WHERE kind='audit'"), before.audits, "audit history retains source IDs and actor snapshots");
@@ -63,7 +63,7 @@ export async function checkGroupedSchema({ first, second, runtimeUrl, runtimeRol
     { legacy_source: "imports", legacy_id: "301" },
     { legacy_source: "point_history", legacy_id: "101" },
   ]);
-  assert.equal((await first.query("SELECT revision FROM meta.project_state")).rows[0].revision, 8, "upgrading invalidates stale revision-based drafts once");
+  assert.equal((await first.query("SELECT revision FROM meta.project_state")).rows[0].revision, 9, "each schema upgrade invalidates stale revision-based drafts");
   assert.deepEqual(await Promise.all([first, second].map(async db => (await db.query("SELECT last_value::text AS value,is_called FROM points.process_points_id_seq")).rows[0])), before.sequences, "moving tables preserves exact sequence high-water marks, including rolled-back IDs");
   assert.ok(BigInt((await first.query("SELECT nextval('history.events_id_seq')::text AS value")).rows[0].value) > 7001n);
   assert.ok(BigInt((await first.query("SELECT nextval('meta.previews_id_seq')::text AS value")).rows[0].value) > 9001n);
@@ -105,7 +105,7 @@ export async function checkGroupedSchema({ first, second, runtimeUrl, runtimeRol
   }
   const after = await rows(first, "history.events");
   migrate();
-  assert.equal((await first.query("SELECT revision FROM meta.project_state")).rows[0].revision, 8, "repeating migrate must not increment revision");
+  assert.equal((await first.query("SELECT revision FROM meta.project_state")).rows[0].revision, 9, "repeating migrate must not increment revision");
   assert.deepEqual(await rows(first, "history.events"), after, "repeating migrate creates no duplicate history");
-  console.log("PASS: grouped-schema v2 preserves exact point/history/release/lease data, legacy event identities and sequence high-water marks; stale previews expire; seven tables retain RLS and append-only history; repeat migration is idempotent.");
+  console.log("PASS: grouped-schema v3 preserves exact point/history/release/lease data, legacy event identities and sequence high-water marks; stale previews expire; eight tables retain RLS and append-only history; repeat migration is idempotent.");
 }

@@ -30,7 +30,7 @@ const board = computed(() => types.value.find(type => type.code === props.boardK
 const enabled = computed(() => board.value?.point_storage === "native");
 const groups = computed<Row[]>(() => enabled.value ? board.value?.point_groups || [] : []);
 const groupKey = ref<string>();
-const sheetKey = ref<PointKind | "overview">("process");
+const sheetKey = ref<string>("process");
 const pointFocus = ref<number>();
 const pointDirty = ref(false);
 const schema = ref<PointSchema | null>(null), error = ref(""), reload = ref(0);
@@ -61,7 +61,7 @@ watch([groups, () => board.value?.code], ([available, code]) => {
   }
 }, { immediate: true });
 const sheets = computed(() => enabled.value && schema.value
-  ? configuredBoardSheets(schema.value, props.boardKey) : []);
+  ? configuredBoardSheets(schema.value, props.boardKey, board.value?.point_endpoints).filter(sheet => !(props.boardKey === "UPM" && groupKey.value === "LOCAL" && sheet.pointKind === "collect")) : []);
 const hasOverview = computed(() => props.boardKey === "DSP" &&
   ["process", "forward"].every(kind => sheets.value.some(sheet => sheet.key === kind)));
 const sheet = computed(() => sheets.value.find(item => item.key === sheetKey.value) || sheets.value[0]);
@@ -71,11 +71,11 @@ watch([sheets, hasOverview], ([available, overview]) => {
 }, { immediate: true });
 watch(() => sheetKey.value === "overview" ? "DSP 总体视图" : sheet.value?.label || "", label => emit("sheet", label), { immediate: true });
 const points = computed(() => rows(props.graph || {}, "process_points").filter(point => point.board_key === props.boardKey));
-function count(kind: PointKind) {
+function count(kind: PointKind, endpointKey?: string) {
   const selected = points.value.filter(point => groupKey.value == null || point.group_key === groupKey.value);
   if (kind === "process") return selected.length;
   const ids = new Set(selected.map(point => point.id));
-  return rows(props.graph || {}, "transmit_points").filter(point => point.board_key === props.boardKey && ids.has(point.process_point_id)).length;
+  return rows(props.graph || {}, kind === "collect" ? "collect_points" : "transmit_points").filter(point => point.board_key === props.boardKey && ids.has(point.process_point_id) && (!endpointKey || point.endpoint_key === endpointKey)).length;
 }
 function leaveTable() {
   if (pointDirty.value && !window.confirm("有未保存的点表修改，是否放弃？")) return false;
@@ -86,7 +86,7 @@ function leaveTable() {
 function selectGroup(code?: string) {
   if (code !== groupKey.value && leaveTable()) groupKey.value = code;
 }
-function selectSheet(kind: PointKind | "overview") {
+function selectSheet(kind: string) {
   if (kind !== sheetKey.value && leaveTable()) sheetKey.value = kind;
 }
 function openProcess(id: number) {
@@ -98,13 +98,13 @@ function openProcess(id: number) {
 watch([() => props.focus, () => props.graph, sheets], () => {
   if (!props.focus || !props.graph || !enabled.value) return;
   const kind = props.focus.entity === "process_points" ? "process"
-    : props.focus.entity === "transmit_points" ? "forward" : null;
-  if (!kind || !sheets.value.some(item => item.key === kind)) return;
+    : props.focus.entity === "transmit_points" ? "forward" : props.focus.entity === "collect_points" ? "collect" : null;
+  if (!kind || !sheets.value.some(item => item.pointKind === kind)) return;
   const record = rows(props.graph, props.focus.entity).find(item => item.id === props.focus!.id);
   if (!record || record.board_key !== props.boardKey) return;
   const point = kind === "process" ? record : points.value.find(item => item.id === record.process_point_id);
   groupKey.value = point?.group_key;
-  sheetKey.value = kind;
+  sheetKey.value = sheets.value.find(item => item.pointKind === kind && (!item.endpointKey || item.endpointKey === record.endpoint_key))?.key || kind;
   pointFocus.value = record.id;
 }, { immediate: true });
 function done(merged = false) {
@@ -128,7 +128,7 @@ function done(merged = false) {
         <small>{{ type.point_storage === 'native' ? `${rows(graph, 'process_points').filter(point => point.board_key === type.code).length} 个内部点` : '点表暂未启用' }}</small>
       </button>
     </div>
-    <Empty v-if="!enabled" title="此板卡点表暂未启用" detail="当前阶段维护 DSP 内部数据和转发表，此板卡的组成与连接由项目 JSON 定义。" />
+    <Empty v-if="!enabled" title="此板卡点表暂未启用" detail="此板卡的组成与连接由项目 JSON 定义。" />
     <div v-else-if="error" class="notice danger" role="alert">{{ error }} <button class="text-button" @click="reload++">重试</button></div>
     <Loading v-else-if="!schema" />
     <Empty v-else-if="!sheet" title="此板卡暂无展示表格" detail="请检查项目文件中的表格定义和展示配置。" />
@@ -140,20 +140,21 @@ function done(merged = false) {
           @click="selectGroup(group.code)">{{ group.code }} · {{ group.name }}</button>
         <button v-if="groups.length > 1" class="button small" :aria-pressed="groupKey == null" @click="selectGroup()">全部分组</button>
       </div>
+      <p v-if="boardKey === 'UPM'" class="notice">LOCAL 为本地设备；DSP 组共用点表模板，{{ groups.find(group => group.code === 'DSP')?.devices?.length || 0 }} 个设备的地址独立配置。Modbus 实际地址在“设备地址”列显示。</p>
       <div class="entity-tabs" role="tablist" aria-label="板卡内表格">
         <button v-if="hasOverview" role="tab" :aria-selected="sheetKey === 'overview'" :class="{ selected: sheetKey === 'overview' }"
           @click="selectSheet('overview')">总体视图</button>
         <button v-for="item in sheets" :key="item.key" role="tab"
           :aria-selected="sheetKey === item.key" :class="{ selected: sheetKey === item.key }"
-          @click="selectSheet(item.key)">{{ item.label }}<small>{{ count(item.pointKind) }}</small></button>
+          @click="selectSheet(item.key)">{{ item.label }}<small>{{ count(item.pointKind, item.endpointKey) }}</small></button>
       </div>
       <PointOverview v-if="sheetKey === 'overview' && hasOverview" :key="`${boardKey}:overview:${groupKey ?? 'all'}`"
         :pid="pid" :board-key="boardKey" :revision="graph.revision" :can-write="canWrite" :group-key="groupKey"
         @done="done" @error="emit('error', $event)" @dirty="pointDirty = $event" />
       <PointTable v-else :key="`${boardKey}:${sheet.key}:${groupKey ?? 'all'}`" :pid="pid" :board-key="boardKey"
-        :kind="sheet.pointKind" :label="sheet.label" :revision="graph.revision" :can-write="canWrite"
-        :focus-id="pointFocus" :group-key="groupKey" :allow-forward="sheets.some(item => item.key === 'forward')"
-        :forward-label="sheets.find(item => item.key === 'forward')?.label"
+        :kind="sheet.pointKind" :endpoint-key="sheet.endpointKey" :label="sheet.label" :revision="graph.revision" :can-write="canWrite"
+        :focus-id="pointFocus" :group-key="groupKey" :allow-forward="sheets.some(item => item.pointKind === 'forward')"
+        :forward-label="boardKey === 'UPM' ? '对外转发表' : sheets.find(item => item.pointKind === 'forward')?.label"
         @done="done" @conflict="emit('conflict')" @process="openProcess" @error="emit('error', $event)" @dirty="pointDirty = $event" />
     </section>
   </template>

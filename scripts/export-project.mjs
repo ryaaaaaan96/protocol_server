@@ -8,7 +8,7 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const tables = ["process_points", "transmit_points"];
+const tables = ["process_points", "collect_points", "transmit_points"];
 
 function environment() {
   const filename = path.join(root, ".env");
@@ -171,7 +171,7 @@ export async function exportProject(key, destination, overrides = {}) {
     await platformDb.connect();
     await platformDb.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
     const { rows: platformSchema } = await platformDb.query("SELECT to_regclass('meta.projects') IS NOT NULL AS ready");
-    if (!platformSchema[0].ready) throw new Error("请先运行 cargo run -- migrate，将平台数据库迁移到分组结构、项目数据库迁移到 v5 后导出。");
+    if (!platformSchema[0].ready) throw new Error("请先运行 cargo run -- migrate，将平台数据库迁移到分组结构、项目数据库迁移到 v6 后导出。");
     const { rows: registrations } = await platformDb.query("SELECT id,project_uid,database_name FROM meta.projects WHERE config_key=$1 AND status='ready'", [key]);
     if (registrations.length !== 1) throw new Error("平台数据库中未找到唯一的就绪项目。");
     const registry = registrations[0];
@@ -182,17 +182,17 @@ export async function exportProject(key, destination, overrides = {}) {
     await sourceDb.connect();
     await sourceDb.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
     const { rows: stateSchema } = await sourceDb.query("SELECT to_regclass('meta.project_state') IS NOT NULL AS ready");
-    if (!stateSchema[0].ready) throw new Error("请先运行 cargo run -- migrate，将项目数据库迁移到 v5 后导出。");
+    if (!stateSchema[0].ready) throw new Error("请先运行 cargo run -- migrate，将项目数据库迁移到 v6 后导出。");
     const { rows: projects } = await sourceDb.query("SELECT id,project_uid,config_key,revision,schema_version,topology_config FROM meta.project_state");
     if (projects.length !== 1 || projects[0].id !== registry.id || projects[0].project_uid !== registry.project_uid || projects[0].config_key !== key) throw new Error("项目数据库与平台登记的身份不一致。");
     const project = projects[0];
-    if (project.schema_version !== 5) throw new Error("请先迁移项目数据库到 v5。");
+    if (project.schema_version !== 6) throw new Error("请先迁移项目数据库到 v6。");
     if (comparableTopology(manifest.topology) !== comparableTopology(project.topology_config)) {
       throw new Error("服务器 project.json 与已应用的项目拓扑不同，请先在网页检查并导入配置后再导出。");
     }
     const { rows: migrations } = await sourceDb.query("SELECT max(version)::int AS version FROM public._sqlx_migrations WHERE success");
     const payload = {
-      format: "protocol-studio-project", version: 1, key, schema_version: 5,
+      format: "protocol-studio-project", version: 1, key, schema_version: 6,
       migration_version: migrations[0].version, source_revision: project.revision,
       tables: {},
     };

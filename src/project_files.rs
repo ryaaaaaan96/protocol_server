@@ -515,13 +515,20 @@ impl ProjectFiles {
         )?;
         if !manifest.workbook_boards.is_empty() {
             ensure!(
-                manifest.workbook_boards == ["DSP"]
-                    && manifest.topology["board_types"]
-                        .as_array()
-                        .is_some_and(|types| types.iter().any(|t| t["code"] == "DSP"
-                            && t["model_code"] == "DSP"
-                            && t["point_storage"] == "native")),
-                "workbook_boards 当前只支持已配置 native 存储的 DSP 板卡"
+                manifest
+                    .workbook_boards
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+                    == manifest.workbook_boards.len()
+                    && manifest.workbook_boards.iter().all(|code| ["DSP", "UPM"]
+                        .contains(&code.as_str())
+                        && manifest.topology["board_types"]
+                            .as_array()
+                            .is_some_and(|types| types
+                                .iter()
+                                .any(|t| t["code"] == *code && t["point_storage"] == "native"))),
+                "workbook_boards 当前只支持已配置 native 存储的 DSP/UPM 板卡且不能重复"
             );
         }
         if manifest.workbook.is_some()
@@ -534,7 +541,7 @@ impl ProjectFiles {
                 })
         {
             ensure!(
-                manifest.workbook_boards == ["DSP"],
+                manifest.workbook_boards.iter().any(|code| code == "DSP"),
                 "原生 DSP 工作簿必须配置 workbook_boards: [\"DSP\"]，避免导入其他板卡的旧格式数据"
             );
         }
@@ -643,21 +650,29 @@ impl ProjectFiles {
         }
         let hash = hex::encode(Sha256::digest(&bytes));
         if !project.manifest.workbook_boards.is_empty() {
-            if project.manifest.workbook_boards != ["DSP"] {
-                return Err(AppError::bad(
-                    "当前定向工作簿导入仅支持 workbook_boards: [\"DSP\"]",
-                ));
-            }
-            let data =
-                tokio::task::spawn_blocking(move || crate::dsp_workbook::parse_workbook(bytes))
+            let before = crate::topology::snapshot(tx, pid, true).await?;
+            for board in &project.manifest.workbook_boards {
+                let bytes = bytes.clone();
+                if board == "DSP" {
+                    let data = tokio::task::spawn_blocking(move || {
+                        crate::dsp_workbook::parse_workbook(bytes)
+                    })
                     .await
                     .map_err(|_| AppError::bad("DSP 工作簿解析失败"))??;
-            let before = crate::topology::snapshot(tx, pid, true).await?;
-            crate::dsp_points::import(tx, pid, &data).await?;
+                    crate::dsp_points::import(tx, pid, &data).await?;
+                } else {
+                    let data = tokio::task::spawn_blocking(move || {
+                        crate::upm_workbook::parse_workbook(bytes)
+                    })
+                    .await
+                    .map_err(|_| AppError::bad("UPM 工作簿解析失败"))??;
+                    crate::upm_points::import(tx, pid, &data).await?;
+                }
+            }
             let after = crate::topology::snapshot(tx, pid, true).await?;
             let report = crate::topology_validation::validate(&after);
             if report["errors"].as_u64().unwrap_or(0) != 0 {
-                let mut error = AppError::bad("DSP 点表校验失败，项目未创建");
+                let mut error = AppError::bad("点表校验失败，项目未创建");
                 error.2 = Some(json!({"validation":report}));
                 return Err(error);
             }
@@ -669,7 +684,10 @@ impl ProjectFiles {
                 .unwrap_or("points.xlsx");
             db::record_import(tx, pid, user.id, filename, &hash, &report).await?;
             return Ok(
-                json!({"filename":filename,"sha256":hash,"boards":["DSP"],"process_count":data.process.len(),"transmit_count":data.transmit.len(),"validation":report}),
+                json!({"filename":filename,"sha256":hash,"boards":project.manifest.workbook_boards,
+                    "process_count":crate::topology::rows(&after,"process_points").len(),
+                    "collect_count":crate::topology::rows(&after,"collect_points").len(),
+                    "transmit_count":crate::topology::rows(&after,"transmit_points").len(),"validation":report}),
             );
         }
         Err(AppError::bad(
@@ -739,6 +757,61 @@ impl ProjectFiles {
         tx.commit().await?;
         router.finish_project(pid).await?;
         Ok(project)
+    }
+
+    /// Explicit, additive first-time UPM initialization. Repeated runs do not
+    /// replace edited UPM points, and DSP rows are never touched.
+    pub async fn initialize_upm(&self, router: &DatabaseRouter, key: &str) -> Result<()> {
+        let project = self.project(key)?;
+        let username = std::env::var("ADMIN_USERNAME").unwrap_or("admin".into());
+        let user:User=sqlx::query_as("SELECT id,username,display_name,is_admin FROM auth.users WHERE username=$1 AND active AND is_admin")
+            .bind(username).fetch_one(&router.platform).await?;
+        let mut registry = db::context(router, &user, None, false)
+            .await
+            .map_err(|e| anyhow!(e.1))?;
+        let pid: i64 = sqlx::query_scalar(
+            "SELECT id FROM meta.projects WHERE config_key=$1 AND status='ready'",
+        )
+        .bind(key)
+        .fetch_one(&mut *registry)
+        .await?;
+        registry.rollback().await.map_err(|e| anyhow!(e.1))?;
+        let workbook = project
+            .manifest
+            .workbook
+            .as_deref()
+            .context("项目未配置 workbook")?;
+        let bytes = std::fs::read(workbook_path(&project.directory, workbook)?)?;
+        ensure!(bytes.len() <= 15 * 1024 * 1024, "工作簿不能超过 15 MiB");
+        let hash = hex::encode(Sha256::digest(&bytes));
+        let data = tokio::task::spawn_blocking(move || crate::upm_workbook::parse_workbook(bytes))
+            .await?
+            .map_err(|e| anyhow!(e.1))?;
+        let result:crate::error::Result<()> = async {
+            let mut tx=db::unlocked_write_context(router,&user,pid).await?;
+            crate::permissions::require_all(&mut tx,pid).await?;
+            crate::edit_lock::require_available(&mut tx,pid,user.id).await?;
+            let exists:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM points.process_points WHERE project_id=$1 AND board_key='UPM')")
+                .bind(pid).fetch_one(&mut *tx).await?;
+            if exists { println!("UPM 已有内部点，未覆盖任何数据。"); return Ok(()); }
+            let before=crate::topology::snapshot(&mut tx,pid,true).await?;
+            project_config::apply(&mut tx,pid,&project.manifest.topology).await?;
+            crate::upm_points::import(&mut tx,pid,&data).await?;
+            let after=crate::topology::snapshot(&mut tx,pid,true).await?;
+            let report=crate::topology_validation::validate(&after);
+            let errors=crate::topology::new_errors(&crate::topology_validation::validate(&before),&report);
+            if !errors.is_empty() { return Err(AppError::bad(format!("UPM 导入校验失败：{}",json!(errors)))); }
+            db::touch(&mut tx,pid).await?;
+            crate::dsp_points::history(&mut tx,pid,user.id,"upm.initialize",&before,&after).await?;
+            db::record_import(&mut tx,pid,user.id,workbook,&hash,&report).await?;
+            db::audit(&mut tx,user.id,Some(pid),"upm.initialize","UPM",
+                Some(before["project_config"].clone()),Some(after["project_config"].clone())).await?;
+            tx.commit().await?;
+            println!("已导入 UPM：{} 个内部点、{} 条采集、{} 条转发；DSP 数据未改动。",
+                data.process.len(),data.collect.len(),data.transmit.len());
+            Ok(())
+        }.await;
+        result.map_err(|e| anyhow!(e.1))
     }
 
     pub async fn create(&self, router: &DatabaseRouter, key: &str) -> Result<()> {

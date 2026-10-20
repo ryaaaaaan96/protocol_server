@@ -210,6 +210,7 @@ async fn target(
 fn new_project_summary(manifest: &Value, payload: Option<&Value>) -> Result<Value> {
     let graph = json!({"project_config":manifest["topology"],
         "process_points":payload.map(|p|p["tables"]["process_points"].clone()).unwrap_or(json!([])),
+        "collect_points":payload.map(|p|p["tables"]["collect_points"].clone()).unwrap_or(json!([])),
         "transmit_points":payload.map(|p|p["tables"]["transmit_points"].clone()).unwrap_or(json!([]))});
     let report = topology_validation::validate(&graph);
     if report["errors"].as_u64().unwrap_or(0) > 0 {

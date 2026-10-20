@@ -1,7 +1,9 @@
 import type { Row } from "../api";
 import { displayCell } from "./pointGrid";
-import { dspModel, type PointDefinition, type PointKind, type PointTableData } from "./pointTables";
+import { dspModel, type PointDefinition, type PointTableData } from "./pointTables";
 
+export type OverviewKind = "process" | "forward";
+type PointKind = OverviewKind;
 export type OverviewData = { revision: number; process: PointTableData; forward: PointTableData };
 export type OverviewRow = { key: string; process: Row; forward?: Row };
 export type OverviewDraft = Record<string, Row>;

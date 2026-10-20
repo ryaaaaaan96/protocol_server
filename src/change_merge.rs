@@ -62,6 +62,7 @@ pub async fn can_preview(
         let kind = match c.entity.as_str() {
             "point_order" => c.values["kind"].as_str().unwrap_or(""),
             "process_points" => "process",
+            "collect_points" => "collect",
             _ => "forward",
         };
         point_tables::entity(kind)?;
@@ -155,6 +156,7 @@ pub fn rebase(
         let table = match c.values["kind"].as_str() {
             Some("process") => "process_points",
             Some("forward") => "transmit_points",
+            Some("collect") => "collect_points",
             _ => return Err(conflict(c, revision, "未启用的点表排序")),
         };
         if board_config(base, c).is_none() || board_config(base, c) != board_config(current, c) {
@@ -166,7 +168,7 @@ pub fn rebase(
         }
         let guarded: &[&str] = match table {
             "process_points" => &["display_order", "project_id", "board_key", "group_key"],
-            "transmit_points" => &[
+            "transmit_points" | "collect_points" => &[
                 "display_order",
                 "project_id",
                 "board_key",

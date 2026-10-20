@@ -35,6 +35,7 @@ const props = defineProps<{
   canWrite: boolean;
   focusId?: number;
   groupKey?: string;
+  endpointKey?: string;
   processPointId?: number;
   allowForward?: boolean;
   forwardLabel?: string;
@@ -71,7 +72,7 @@ watch(dirty, value => emit("dirty", value), {flush:"sync"});
 onBeforeUnmount(() => emit("dirty", false));
 watch(
   () => [
-    props.pid, props.boardKey, props.kind, props.label, props.revision, reload.value,
+    props.pid, props.boardKey, props.kind, props.endpointKey, props.label, props.revision, reload.value,
   ],
   async (_, __, cleanup) => {
     let cancelled = false;
@@ -91,6 +92,13 @@ watch(
       );
       if (!cancelled) {
         result.definition.label = props.label;
+        if (props.endpointKey) {
+          const protocol = result.options.endpoints.find((endpoint: Row) => endpoint.code === props.endpointKey)?.protocol;
+          const excluded = protocol === "MODBUS" ? ["upp_model"] : ["register_type", "register_count"];
+          result.definition.columns = result.definition.columns.filter((key: string) => !excluded.includes(key));
+          result.definition.editor = result.definition.editor.filter((key: string) => !excluded.includes(key));
+          result.definition.inline = Object.fromEntries(Object.entries(result.definition.inline).filter(([key]) => !excluded.includes(key)));
+        }
         data.value = result;
       }
     } catch (e) {
@@ -112,7 +120,7 @@ const classified = computed(() => !!data.value && isDspForward(data.value));
 watch(data, () => { categoryFilter.value = null; });
 const columnSettings = ref(false), columns = ref<TableColumn[]>([]);
 const columnKey = computed(() => {
-  const base = `point-columns:${props.pid}:${encodeURIComponent(props.boardKey)}:${props.kind}`;
+  const base = `point-columns:${props.pid}:${encodeURIComponent(props.boardKey)}:${props.kind}${props.endpointKey ? `:${encodeURIComponent(props.endpointKey)}` : ""}`;
   return data.value && (isDspSheet(data.value) || isDspForward(data.value))
     ? `${base}:layout:${encodeURIComponent(JSON.stringify(data.value.definition.columns))}` : base;
 });
@@ -161,11 +169,13 @@ const scopedData = computed<PointTableData | null>(() => {
     options.native_groups = (options.native_groups || []).filter(group => group.code === props.groupKey);
     options.process_points = (options.process_points || []).filter(signal => signal.group_key === props.groupKey);
   }
+  if (props.endpointKey) options.endpoints = (options.endpoints || []).filter(endpoint => endpoint.code === props.endpointKey);
+  if (props.kind === "collect") options.process_points = options.process_points.filter(point => point.group_key !== "LOCAL");
   if (props.processPointId != null) options.process_points = options.process_points.filter(s => s.id === props.processPointId);
   return { ...data.value, options };
 });
 function inScope(row: Row) {
-  return (props.processPointId == null || row.process_point_id === props.processPointId) &&
+  return (!props.endpointKey || row.endpoint_key === props.endpointKey) && (props.processPointId == null || row.process_point_id === props.processPointId) &&
     (props.groupKey == null || (row.group_key ?? row.edit_values?.group_key ??
       data.value?.options.process_points.find(point => point.id === row.process_point_id)?.group_key) === props.groupKey);
 }
@@ -208,7 +218,7 @@ const grid = usePointGrid({
   rowWritable: (row, values) => scopeEditable(row) && scopeEditable(row, values),
   allowedChoice: (row, key, choice, values) => key !== "endpoint_key" || scopeEditable(row, { ...values, endpoint_key: choice.id }),
   blocked: () => busy.value || !!review.value || !!orderDraft.value,
-  locked: key => (key === "group_key" && props.groupKey != null) ||
+  locked: key => (key === "endpoint_key" && props.endpointKey != null) || (key === "group_key" && props.groupKey != null) ||
     (key === "process_point_id" && props.processPointId != null),
   error: message => { actionError.value = message; },
 });
@@ -710,6 +720,7 @@ function text(row: Row, key: string) {
       :row="selected"
       :can-write="canWrite && scopeEditable(selected)"
       :group-key="groupKey"
+      :endpoint-key="endpointKey"
       :process-point-id="processPointId"
       @dirty="editorDirty = $event"
       @error="emit('error', $event)"

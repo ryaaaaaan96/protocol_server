@@ -26,6 +26,7 @@ const props = defineProps<{
   row: Row | null;
   canWrite: boolean;
   groupKey?: string;
+  endpointKey?: string;
   processPointId?: number;
 }>();
 const emit = defineEmits<{ close: []; done: [merged?: boolean]; error: [message: string]; conflict: []; dirty: [value: boolean] }>();
@@ -72,7 +73,7 @@ function close() {
   emit("close");
 }
 function locked(key: string) {
-  return (key === "group_key" && props.groupKey != null) ||
+  return (key === "endpoint_key" && props.endpointKey != null) || (key === "group_key" && props.groupKey != null) ||
     (key === "process_point_id" && props.processPointId != null);
 }
 const stringPoint = computed(() => pointIsString(props.data, values.value, props.row || undefined));

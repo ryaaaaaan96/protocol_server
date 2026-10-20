@@ -59,7 +59,7 @@ pub async fn grant_runtime(pool: &PgPool, role: &str, platform: bool) -> Result<
         )
     } else {
         format!(
-            "GRANT USAGE ON SCHEMA public,points,history,meta TO {role}; REVOKE CREATE ON SCHEMA public,points,history,meta FROM {role}; GRANT SELECT,INSERT,UPDATE,DELETE ON points.process_points,points.transmit_points,meta.previews TO {role}; GRANT SELECT,UPDATE ON meta.project_state TO {role}; GRANT SELECT,INSERT ON history.events,history.releases TO {role}; REVOKE UPDATE,DELETE,TRUNCATE ON history.events,history.releases FROM {role}; GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA points,history,meta TO {role};"
+            "GRANT USAGE ON SCHEMA public,points,history,meta TO {role}; REVOKE CREATE ON SCHEMA public,points,history,meta FROM {role}; GRANT SELECT,INSERT,UPDATE,DELETE ON points.process_points,points.collect_points,points.transmit_points,meta.previews TO {role}; GRANT SELECT,UPDATE ON meta.project_state TO {role}; GRANT SELECT,INSERT ON history.events,history.releases TO {role}; REVOKE UPDATE,DELETE,TRUNCATE ON history.events,history.releases FROM {role}; GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA points,history,meta TO {role};"
         )
     };
     sqlx::raw_sql(&grants).execute(pool).await?;

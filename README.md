@@ -1,6 +1,6 @@
 # Protocol Studio · 协议管理平台
 
-使用 Rust、Vue 3、TypeScript 和 PostgreSQL 管理点表。当前实现 **DC-UPS 项目的 DSP 内部数据及 UPP 转发表**；UPM、CSU、IDU 仅显示 JSON 定义的拓扑，点表暂未启用。
+使用 Rust、Vue 3、TypeScript 和 PostgreSQL 管理点表。当前支持 **DSP 内部数据与 UPP 转发表，以及 UPM 的 LOCAL/DSP 内部点、UPP 采集和 Modbus/UPP 对外表**。CSU、IDU 暂仅显示拓扑。
 
 ## 启动与升级
 
@@ -36,19 +36,20 @@ config/dc-ups/
     collect.json               暂未启用
     transmit.json              DSP UPP 转发表的列、字段及编辑规则
     transmit.js                UPP 协议字节数及偏移地址计算
-  CSU/ UPM/ IDU_T/ IDU_R/       其他板卡定义，点表暂未启用
+  UPM/                         内部点、DSP UPP 采集、Modbus/UPP 对外表
+  CSU/ IDU_T/ IDU_R/            其他板卡定义，点表暂未启用
   sources/                     可选的首次创建来源工作簿
   project.dump                 可选的专用单项目归档
 ```
 
-板卡名和 `directory` 在 `project.json.topology.board_types` 指定，不需要额外的 `point-tables/` 层。`point_groups` 定义 LOCAL 等分组；`point_endpoints` 定义 UPP 端点。
+板卡名和 `directory` 在 `project.json.topology.board_types` 指定，不需要额外的 `point-tables/` 层。`point_groups` 定义 LOCAL 等分组；`point_endpoints` 定义协议与采集/转发方向；UPM 分组的 `devices` 定义共享模板的设备实例。
 
 JSON 是组织配置的编辑来源。服务器文件修改后，通过网页读取、检查并导入；网页不提供拓扑编辑表单。表格展示定义刷新即可读取；拓扑导入后才更新数据库中的生效快照，以保证已有点和授权仍有归属。
 
 数据库采用 **一个平台库 + 每项目一个业务库**，共用一个 PostgreSQL 实例：
 
 - `protocol_platform`：账号、登录会话、项目登记、成员权限及平台审计，按 Schema 分组，共 8 张表。
-- `protocol_project_dc_ups`：DC-UPS 的点表、历史、配置快照和发布，按 Schema 分组，共 7 张表。
+- `protocol_project_dc_ups`：DC-UPS 的点表、历史、配置快照和发布，按 Schema 分组，共 8 张表。
 
 平台库：
 
@@ -63,16 +64,30 @@ JSON 是组织配置的编辑来源。服务器文件修改后，通过网页读
 
 | 分组 | 表 | 用途 |
 | --- | --- | --- |
-| `points` | `process_points`、`transmit_points` | 当前内部点和转发映射 |
+| `points` | `process_points`、`collect_points`、`transmit_points` | 当前内部点、采集和转发映射 |
 | `history` | `events`、`releases` | 统一修改/审计/导入事件，以及不可变发布 |
 | `meta` | `project_state`、`previews` | 项目版本、生效配置和编辑权，以及待确认修改/导入 |
 | `public` | `_sqlx_migrations` | 数据库结构升级记录，必须保留 |
 
 新项目按 `protocol_project_<key>` 建库，短横线转为下划线。板卡不单独建库；业务库中没有账号或成员权限表。具体字段见 [数据库结构](docs/architecture.md)。
 
+## UPM 点表
+
+UPM 使用 LOCAL 本地设备和 DSP 共享模板，8 个 DSP 设备地址独立配置。LOCAL 无采集表；DSP 使用 UPP 采集；对外分为 Modbus 和 UPP 两个视图。详见 [UPM 数据来源与地址规则](docs/upm.md)。
+
+已有 DC-UPS 项目首次启用 UPM：
+
+```bash
+cargo run -- migrate
+cargo run -- import-upm dc-ups
+./scripts/dev.sh
+```
+
+重复运行 `import-upm` 保留已有 UPM 点表。网页重新导入 Excel 时选择对应板卡并预览确认。
+
 ## DSP 点表
 
-默认工作簿仅导入两张 sheet：
+DSP 范围读取两张 sheet：
 
 | 来源 | 用途 |
 | --- | --- |
@@ -81,13 +96,13 @@ JSON 是组织配置的编辑来源。服务器文件修改后，通过网页读
 
 DSP 内部数据没有 sigID，以原 sheet 的变量名、类型及参数为定义。网页保留 `VariateName` 的原始大小写、`DateType` 的 `Sys_` 前缀及原列顺序；`EnumTab` 是枚举说明，与变量名分开。原 A1 标题为空，界面标为「数据名称」。长度和精度为只读派生列；“数据类型”和“UPP 模型号”在内部表隐藏。
 
-数据类型仅在转发表编辑：数组建议 `STRING`；标量去掉 `Sys_` 前缀，其中 `F32` 建议 `S32`。新增转发自动提供类型、长度和比例的建议；偏离建议会提示，仍须通过转换校验。已有通信类型和比例保留，需主动应用建议才会替换；协议字节数由整表脚本计算。数据转换自动确定：同类型直接映射，`F32 → S32` 按协议系数缩放，数组到 `STRING` 按字节映射。DSP 不提供“数据转换”和“字节序”配置入口；UPM 配置留待后续。
+数据类型仅在转发表编辑：数组建议 `STRING`；标量去掉 `Sys_` 前缀，其中 `F32` 建议 `S32`。新增转发自动提供类型、长度和比例的建议；偏离建议会提示，仍须通过转换校验。已有通信类型和比例保留，需主动应用建议才会替换；协议字节数由整表脚本计算。数据转换自动确定：同类型直接映射，`F32 → S32` 按协议系数缩放，数组到 `STRING` 按字节映射。DSP 不提供“数据转换”和“字节序”配置入口；UPM 接收端独立配置字节序。
 
 转发表按数据分类筛选，型号在后台固定推导：系统参数1→1、系统参数2→2、任务级观测量→99、中断级观测量→100、控制参数设置→102、任务级标定量→103。修改内部分类会同步所有关联转发，检查权限和目标分类的地址冲突后原子保存；脚本重算受影响的偏移，预览后确认。
 
 转发表的“数据名称”和 `VariateName` 直接引用内部点；数据分类后显示只读“UPP模型号”。“UPP偏移地址”和“UPP协议字节数”显示脚本计算后保存的实际通信布局。取消独立转发名称及启用开关，所有存在的 DSP 映射参与协议生成和地址冲突校验，不需要时删除映射，历史仍保留。
 
-同一个内部点可对应多条转发，通过固定 `process_point_id` 关联。修改变量名不改变引用；系统 ID、来源和兼容字段保留在后台。每块板卡的显示及通讯规则独立配置，本次不创建 UPM 采集点。
+同一个内部点可对应多条转发，通过固定 `process_point_id` 关联。修改变量名不改变引用；系统 ID、来源和兼容字段保留在后台。每块板卡的显示及通讯规则独立配置，UPM 采集配置独立维护，见 [UPM 点表](docs/upm.md)。
 
 网页支持设置弹窗、逐格编辑、复制粘贴、批量添加和撤销草稿。先「开始编辑」，校验通过后确认整批提交；提交失败保留草稿。成功提交释放编辑权。无关字段修改可合并，同字段、引用或顺序冲突会拒绝提交。
 
@@ -95,7 +110,7 @@ DSP 新增「总体视图」：按内部点关联转发参数，无转发的内�
 
 首列拖动只调整显示顺序，不重算 UPP 地址；列隐藏、冻结、顺序和分页设置只保存在当前浏览器。列定义改变时采用新默认布局。范围字段直接在内部数据表维护。校验包括类型/长度、范围、变量名、sheet 参数选项、UPP 地址重叠和关联归属。
 
-当前生成 DSP JSON/XML 及项目快照，可冻结发布并下载 ZIP。发布不可修改；生成文件尚不等同于 DSP 固件编译验收。
+当前生成 DSP JSON/XML、UPM 点表与设备转发地址 JSON 及项目快照，可冻结发布并下载 ZIP。发布不可修改；生成文件尚不等同于 DSP 固件编译验收。
 
 ## 配置与迁移项目
 
@@ -112,11 +127,11 @@ node scripts/export-project.mjs dc-ups
 - 带 Dump：替换该项目当前点表，追加修改历史，保留账号、授权、原历史和发布。
 - 不带 Dump：保留当前点表；新项目点表为空。文件夹中的 XLSX 不会自动导入。
 
-CLI 创建优先使用 Dump，否则只支持 `workbook_boards: ["DSP"]` 的 DSP 来源导入。项目 Dump 不携带历史、账号和发布，完整迁移分别备份平台库、全部项目库和配置目录。新导出的专用归档使用 `(schema_version, migration_version) = (5, 2)`，同时兼容旧 `(4, 1)` 归档；只导入白名单中的两张点表，其他版本拒绝导入。
+CLI 创建优先使用 Dump，否则按 `workbook_boards: ["DSP", "UPM"]` 定向导入配置的板卡。项目 Dump 不携带历史、账号和发布，完整迁移分别备份平台库、全部项目库和配置目录。新导出的专用归档使用 `(schema_version, migration_version) = (6, 3)`，同时兼容旧 `(4, 1)`、`(5, 2)` 两表归档；只导入白名单中的三张点表，其他版本拒绝导入。
 
-已有独立项目库升级到分组结构时，迁移完整保留当前点、历史和发布，合并编辑权及预览存储。旧修改/导入预览失效，项目 `revision` 增加 1、`schema_version` 更新为 5；升级后刷新网页并重新预览尚未提交的修改。
+已有独立项目库升级到分组结构时，迁移完整保留当前点、历史和发布，合并编辑权及预览存储。旧修改/导入预览失效，迁移 0002 将版本更新为 5，迁移 0003 增加采集表并更新为 6，每次结构升级各增加一次 `revision`；升级后刷新网页并重新预览尚未提交的修改。
 
-平台迁移 `migrations/platform/0002_grouped_platform.sql` 将原 `public` 表移入上述分组，仍保留 8 张表及原记录、约束和登录会话。它只更新平台迁移记录，不改变已升级项目的 `schema_version=5` 或 `revision`。先完整备份，再运行 `cargo run -- migrate` 并重启服务；DBeaver 刷新后展开新 Schema，自有 SQL 改用 `auth.users`、`meta.projects` 等限定名。
+平台迁移 `migrations/platform/0002_grouped_platform.sql` 将原 `public` 表移入上述分组，仍保留 8 张表及原记录、约束和登录会话。它只更新平台迁移记录，不改变项目的 `schema_version` 或 `revision`。先完整备份，再运行 `cargo run -- migrate` 并重启服务；DBeaver 刷新后展开新 Schema，自有 SQL 改用 `auth.users`、`meta.projects` 等限定名。
 
 逐表 Excel 追加示例见 [批量添加](docs/batch-add.md)。
 
@@ -146,4 +161,4 @@ node tests/migration.mjs
 
 `config/dc-ups/DSP/transmit.json` 的 `calculation.script_file` 指向独立的 `transmit.js`：一张表一个 JavaScript 脚本，默认导出 `calculate(points, parameters)`，读取整表快照并返回每条记录的 `id`、`wire_length`、`address`。默认规则复现 Excel 的 445 条转发：按模型、上传等级和稳定来源顺序排列，普通偏移从 6 累加，六个名称保留固定地址。界面拖动仅改显示顺序。
 
-修改内部长度、分类、上传等级或转发引用后，保存预览会包含全部联动结果。修改 JS 脚本或 JSON 参数后，在转发表点击“重算协议布局”，预览并保存；读取配置不会改写数据库。布局与当前脚本不一致时阻止生成和发布。无需数据库迁移，UPM 后续单独配置。脚本接口、TS 编写方式及执行限制见 [点表计算](docs/table-calculation.md)。
+修改内部长度、分类、上传等级或转发引用后，保存预览会包含全部联动结果。修改 JS 脚本或 JSON 参数后，在转发表点击“重算协议布局”，预览并保存；读取配置不会改写数据库。布局与当前脚本不一致时阻止生成和发布。无需数据库迁移，UPM 地址目前独立保留源表结果。脚本接口、TS 编写方式及执行限制见 [点表计算](docs/table-calculation.md)。

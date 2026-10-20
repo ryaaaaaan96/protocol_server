@@ -22,12 +22,18 @@ use std::{
 
 const RELATIONS: &[&str] = &[
     "points.process_points",
+    "points.collect_points",
     "points.transmit_points",
     "history.events",
 ];
 // Legacy unqualified point queries and the short events name are resolved only
 // through the project pool's fixed, trusted search_path.
-const SHORT_RELATIONS: &[&str] = &["process_points", "transmit_points", "events"];
+const SHORT_RELATIONS: &[&str] = &[
+    "process_points",
+    "collect_points",
+    "transmit_points",
+    "events",
+];
 const FUNCTIONS: &[&str] = &[
     "count",
     "sum",

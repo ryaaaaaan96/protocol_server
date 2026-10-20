@@ -22,18 +22,22 @@ const RANGE: &str = "default_value,min_value,max_value,boot_restore,manual_resto
 const BINDING: &str = "endpoint_id,context_id,field_id,signal_id";
 const COLLECTION: &str = "poll_interval,set_priority,scan_priority";
 const NATIVE_PROCESS: &str = "group_key,element_count,byte_length,unit,notes";
-const NATIVE_FORWARD: &str = "process_point_id,endpoint_key,name,upp_model,address,wire_type,wire_length,scale,access,byte_order,conversion,enabled";
+const NATIVE_FORWARD: &str = "process_point_id,endpoint_key,name,upp_model,address,wire_type,wire_length,scale,access,byte_order,conversion,enabled,register_type";
+pub(crate) const NATIVE_COLLECT: &str = "process_point_id,endpoint_key,upp_model,address,wire_type,wire_length,scale,access,byte_order,acquisition_mode,poll_interval,set_priority,scan_priority";
 
 pub fn entity(kind: &str) -> Result<&'static str> {
     match kind {
         "process" => Ok("process_points"),
-        "collect" => Err(AppError::bad("此板卡尚未启用采集点表")),
+        "collect" => Ok("collect_points"),
         "forward" => Ok("transmit_points"),
         _ => Err(AppError::not_found()),
     }
 }
 pub fn is_point_entity(entity: &str) -> bool {
-    matches!(entity, "process_points" | "transmit_points")
+    matches!(
+        entity,
+        "process_points" | "transmit_points" | "collect_points"
+    )
 }
 fn keys(csv: &str) -> BTreeSet<&str> {
     csv.split(',').collect()
@@ -50,7 +54,13 @@ fn schema_writable(kind: &str) -> BTreeSet<&str> {
             .union(&keys(NATIVE_PROCESS))
             .copied()
             .collect(),
-        "collect" => keys(BINDING).union(&keys(COLLECTION)).copied().collect(),
+        "collect" => keys(BINDING)
+            .union(&keys(COLLECTION))
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .union(&keys(NATIVE_COLLECT))
+            .copied()
+            .collect(),
         _ => keys(BINDING)
             .union(&keys(NATIVE_FORWARD))
             .copied()
@@ -70,12 +80,13 @@ pub(crate) fn writable(kind: &str) -> BTreeSet<&str> {
             .copied()
             .collect(),
         "forward" => keys(NATIVE_FORWARD),
+        "collect" => keys(NATIVE_COLLECT),
         _ => BTreeSet::new(),
     }
 }
 fn readable(kind: &str) -> BTreeSet<&str> {
     let common = keys(
-        "id,board_key,unit,data_type,byte_length,resolved_sig_id,enum_name,group_key,group_name,metadata",
+        "id,board_key,unit,data_type,byte_length,resolved_sig_id,enum_name,group_key,group_name,metadata,device_addresses,source_variable,source_sig_id,source_notes,register_count",
     );
     let extra = if kind == "process" {
         keys("group_name,contexts,collection_count,forward_count,range_inherited")
@@ -403,9 +414,21 @@ pub async fn read(
         .fetch_one(&mut *tx)
         .await?;
     let board = board(&mut tx, pid, &board_key).await?;
+    if kind == "collect"
+        && !board["point_endpoints"]
+            .as_array()
+            .is_some_and(|endpoints| {
+                endpoints
+                    .iter()
+                    .any(|endpoint| endpoint["direction"] == "collect")
+            })
+    {
+        return Err(AppError::bad("此板卡尚未启用采集点表"));
+    }
     let options = json!({
         "native_groups": board["point_groups"],
-        "endpoints": board["point_endpoints"],
+        "endpoints": board["point_endpoints"].as_array().into_iter().flatten().filter(|endpoint|
+            if kind == "collect" {endpoint["direction"] == "collect"} else {endpoint["direction"] != "collect"}).collect::<Vec<_>>(),
         "process_points": table_rows(&mut tx, pid, &board_key, "process").await?,
     });
     let graph = crate::permissions::catalog(&mut tx, pid).await?;
@@ -488,6 +511,7 @@ pub async fn apply(tx: &mut PgConnection, pid: i64, c: &Change) -> Result<Value>
     let kind = match c.entity.as_str() {
         "process_points" => "process",
         "transmit_points" => "forward",
+        "collect_points" => "collect",
         _ => return Err(AppError::bad("未启用的点表类型")),
     };
     let board_key = c.values["board_key"]
@@ -583,7 +607,7 @@ mod tests {
             .remove("inline");
         assert!(validate_definition(&v).is_err());
         assert!(entity("unknown").is_err());
-        assert!(entity("collect").is_err());
+        assert_eq!(entity("collect").unwrap(), "collect_points");
         assert_eq!(entity("forward").unwrap(), "transmit_points");
         assert!(!writable("process").contains("group_id"));
         assert!(!writable("forward").contains("field_id"));

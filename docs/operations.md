@@ -24,7 +24,7 @@
 ./scripts/dev.sh
 ```
 
-初始化只创建 `protocol_platform` 及账号、权限结构，不创建业务项目。创建命令读取 `config/dc-ups/`，建立 `protocol_project_dc_ups`，重复执行保留现有数据。DC-UPS 的来源工作簿仅导入 DSP 的 552 条内部点、445 条 UPP 转发；UPM 点表尚未启用。
+初始化只创建 `protocol_platform` 及账号、权限结构，不创建业务项目。创建命令读取 `config/dc-ups/`，建立 `protocol_project_dc_ups`，重复执行保留现有数据。来源工作簿导入 DSP 的 552 条内部点、445 条 UPP 转发，以及 UPM 的 606 条内部点、445 条采集及 Modbus/UPP 对外映射。
 
 本地 PostgreSQL 默认监听 `127.0.0.1:55432`，数据保存在 `.runtime/pgdata/`。重启电脑后运行 `node scripts/local-db.mjs start`，再运行 `./scripts/dev.sh`。停止数据库使用 `node scripts/local-db.mjs stop`；数据目录不能当缓存删除。
 
@@ -49,7 +49,7 @@ cargo run -- migrate
 ./scripts/dev.sh
 ```
 
-平台原记录、ID、序列、约束和登录会话保留，权限检查及审计只追加限制保持有效。平台迁移版本记录在自己的 `public._sqlx_migrations`，升级后为 2；已经完成项目迁移的库仍为 7 张表，`meta.project_state.schema_version=5`，业务 `revision` 不变。如果项目库尚未执行其 `0002`，本次 migrate 也会按下节完成项目升级。
+平台原记录、ID、序列、约束和登录会话保留，权限检查及审计只追加限制保持有效。平台迁移版本记录在自己的 `public._sqlx_migrations`，升级后为 2；平台迁移本身不改变业务结构；同一次 migrate 会继续应用项目库尚未执行的迁移，当前项目库版本为 v6（迁移 0003）。
 
 DBeaver 刷新 `protocol_platform`，展开 `auth`、`meta` 和 `history` 查看。旧 `public.users`、`public.projects` 等自有 SQL 改用新限定名，不依赖当前默认 Schema。连接平台库后可核对：
 
@@ -137,7 +137,7 @@ node scripts/export-project.mjs dc-ups
 node scripts/export-project.mjs dc-ups /tmp/project-export
 ```
 
-默认输出 `.runtime/exports/<时间>/dc-ups/`，不覆盖已有目录。脚本从平台登记定位项目库并验证 UUID，需要 Node `pg`、管理员连接及 `pg_dump`；来源库只读。归档是含白名单数据的专用 custom Dump，只携带内部点和转发点两类数据，新导出使用 `(schema_version, migration_version)=(5,2)`。导入兼容旧 `(4,1)` 专用归档，其他版本组合拒绝；兼容范围仅限相同的两张点表，不恢复历史、锁或预览。
+默认输出 `.runtime/exports/<时间>/dc-ups/`，不覆盖已有目录。脚本从平台登记定位项目库并验证 UUID，需要 Node `pg`、管理员连接及 `pg_dump`；来源库只读。归档是含白名单数据的专用 custom Dump，携带内部、采集和转发三类点表，新导出使用 `(schema_version, migration_version)=(6,3)`。兼容旧 `(4,1)`、`(5,2)` 两表归档，旧归档的采集数据视为空；其他版本组合拒绝，不恢复历史、锁或预览。
 
 管理员在网页选择完整文件夹，预览后导入。预览不会创建项目数据库；提交相同 key 覆盖配置，新 key 才创建项目库。
 
@@ -166,3 +166,7 @@ pg_dump -h DB_HOST -U postgres -d protocol_project_dc_ups -Fc -f dc-ups-full.dum
 ## 可选容器部署
 
 Compose 默认平台库为 `protocol_platform`，初始化后不自动创建项目。运行服务需要管理员连接以创建项目库，同时使用独立非超级用户处理日常业务。已有旧卷先按拆分步骤迁移，不能仅更改 `POSTGRES_DB` 就完成升级。容器构建、配置目录持久化权限以及归档客户端须在目标环境验证；目前不把 Docker 运行验证视为本地测试的一部分。
+
+## UPM 采集表升级（项目迁移 0003）
+
+停用旧 HTTP 服务后运行 `cargo run -- migrate`。该迁移添加 `points.collect_points`、转发寄存器区及来源元数据，保留既有点与历史，清除旧预览，schema_version 更新为 6、revision 增加 1。已有 DC-UPS 项目再执行 `cargo run -- import-upm dc-ups`，只在 UPM 尚无数据时导入，然后重启服务。来源修正、设备模板和地址解释见 [UPM 点表](upm.md)。

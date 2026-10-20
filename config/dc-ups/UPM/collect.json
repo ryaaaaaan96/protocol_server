@@ -1,30 +1,36 @@
 {
   "version": 1,
-  "enabled": false,
-  "label": "采集点表",
-  "description": "将下游协议字段关联到本板处理点；切换设备或端点会重新检查引用。",
+  "enabled": true,
+  "label": "DSP UPP 采集表",
+  "description": "对应 UPM-DSP采集数据。LOCAL 不建立采集记录；※ 参数保持为空。",
   "columns": [
     "signal_name",
-    "context_name",
-    "dev_id",
+    "enum_name",
     "resolved_sig_id",
-    "endpoint_name",
-    "protocol",
-    "transport",
-    "field_name",
     "upp_model",
-    "effective_address",
-    "effective_type",
-    "effective_length",
-    "data_type",
+    "address",
+    "wire_type",
+    "wire_length",
     "scale",
-    "poll_interval"
+    "access",
+    "byte_order",
+    "acquisition_mode",
+    "poll_interval",
+    "set_priority",
+    "scan_priority",
+    "device_addresses"
   ],
   "editor": [
-    "endpoint_id",
-    "context_id",
-    "signal_id",
-    "field_id",
+    "process_point_id",
+    "endpoint_key",
+    "upp_model",
+    "address",
+    "wire_type",
+    "wire_length",
+    "scale",
+    "access",
+    "byte_order",
+    "acquisition_mode",
     "poll_interval",
     "set_priority",
     "scan_priority"
@@ -32,136 +38,119 @@
   "ordering": {
     "mode": "display",
     "group_by": [
-      "endpoint_id",
-      "context_id"
+      "endpoint_key",
+      "group_key",
+      "upp_model"
     ]
   },
   "inline": {
-    "signal_name": "signal_id",
-    "context_name": "context_id",
-    "endpoint_name": "endpoint_id",
-    "field_name": "field_id",
-    "poll_interval": "poll_interval"
+    "upp_model": "upp_model",
+    "address": "address",
+    "wire_type": "wire_type",
+    "wire_length": "wire_length",
+    "scale": "scale",
+    "access": "access",
+    "byte_order": "byte_order",
+    "acquisition_mode": "acquisition_mode",
+    "poll_interval": "poll_interval",
+    "set_priority": "set_priority",
+    "scan_priority": "scan_priority"
   },
   "fields": {
-    "resolved_sig_id": {
-      "label": "sigID"
-    },
     "enum_name": {
-      "label": "枚举"
+      "label": "ENMU"
     },
-    "data_type": {
-      "label": "内部类型"
-    },
-    "byte_length": {
-      "label": "内部字节数"
-    },
-    "unit": {
-      "label": "单位"
-    },
-    "default_value": {
-      "label": "默认值覆盖",
-      "nullable": true,
-      "hint": "留空继承数据定义；表格展示生效值。",
-      "column_label": "默认值"
-    },
-    "min_value": {
-      "label": "下限覆盖",
-      "nullable": true,
-      "hint": "留空继承数据定义；表格展示生效值。",
-      "column_label": "下限"
-    },
-    "max_value": {
-      "label": "上限覆盖",
-      "nullable": true,
-      "hint": "留空继承数据定义；表格展示生效值。",
-      "column_label": "上限"
+    "device_addresses": {
+      "label": "设备地址"
     },
     "signal_name": {
-      "label": "处理点"
+      "label": "内部点"
     },
-    "context_name": {
-      "label": "逻辑设备"
+    "process_point_id": {
+      "label": "内部点",
+      "type": "number",
+      "reference": "process_points"
     },
-    "dev_id": {
-      "label": "dev_id"
-    },
-    "endpoint_name": {
-      "label": "协议端点"
-    },
-    "protocol": {
-      "label": "协议"
-    },
-    "transport": {
-      "label": "传输方式"
-    },
-    "field_name": {
-      "label": "协议字段"
+    "endpoint_key": {
+      "label": "协议端点",
+      "reference": "endpoints"
     },
     "upp_model": {
-      "label": "UPP 模型"
-    },
-    "effective_address": {
-      "label": "协议地址 / 偏移"
-    },
-    "effective_type": {
-      "label": "通信类型"
-    },
-    "effective_length": {
-      "label": "通信字节数"
-    },
-    "scale": {
-      "label": "协议系数"
-    },
-    "poll_interval": {
-      "label": "轮询周期参数",
+      "label": "UPP 模型号",
       "type": "number",
       "default": 0
     },
-    "endpoint_id": {
-      "label": "协议端点",
-      "reference": "endpoints",
-      "type": "number"
+    "address": {
+      "label": "协议地址 / 偏移",
+      "type": "number",
+      "default": 0,
+      "hint": "UPP 按字节；Modbus 按寄存器。DSP 模板为相对偏移，设备基址定义于 project.json。"
     },
-    "context_id": {
-      "label": "逻辑设备",
-      "reference": "contexts",
-      "type": "number"
+    "wire_type": {
+      "label": "通信类型",
+      "options": [
+        "U8",
+        "U16",
+        "S16",
+        "U32",
+        "S32",
+        "F32",
+        "STRING"
+      ],
+      "default": "U16"
     },
-    "signal_id": {
-      "label": "本地内部信号",
-      "reference": "signals",
-      "type": "number"
+    "wire_length": {
+      "label": "协议字节数",
+      "type": "number",
+      "default": 2
     },
-    "field_id": {
-      "label": "协议字段",
-      "reference": "fields",
-      "type": "number"
+    "scale": {
+      "label": "精度",
+      "type": "number",
+      "default": 1
+    },
+    "access": {
+      "label": "读写权限",
+      "options": [
+        "RO",
+        "RW",
+        "WO"
+      ],
+      "default": "RO"
+    },
+    "byte_order": {
+      "label": "字节序",
+      "type": "number",
+      "default": 0
+    },
+    "acquisition_mode": {
+      "label": "采集方式",
+      "options": [
+        "poll",
+        "upload"
+      ],
+      "default": "poll",
+      "hint": "poll 为主动轮询，upload 为接收 DSP 上报。"
+    },
+    "poll_interval": {
+      "label": "UPP 轮询间隔",
+      "type": "number",
+      "nullable": true
     },
     "set_priority": {
       "label": "设置优先级",
       "type": "number",
-      "default": 0
+      "nullable": true
     },
     "scan_priority": {
-      "label": "扫描优先级",
+      "label": "轮询优先级",
       "type": "number",
-      "default": 0
+      "nullable": true
     },
-    "address_length": {
-      "label": "地址长度"
-    },
-    "register_type": {
-      "label": "寄存器区"
-    },
-    "access": {
-      "label": "读写属性"
-    },
-    "byte_order": {
-      "label": "字节序"
-    },
-    "port": {
-      "label": "端口"
+    "resolved_sig_id": {
+      "label": "sigID",
+      "type": "number",
+      "nullable": true
     }
   }
 }

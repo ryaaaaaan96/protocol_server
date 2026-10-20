@@ -108,10 +108,10 @@ fn column_name(mut index: u32) -> String {
 
 /// A DSP-only import must not parse or validate unrelated UPM worksheets.
 pub fn parse_workbook(bytes: Vec<u8>) -> Result<DspImport> {
-    parse(&workbook_rows(bytes)?)
+    parse(&workbook_rows(bytes, &[PROCESS_SHEET, TRANSMIT_SHEET])?)
 }
 
-fn workbook_rows(bytes: Vec<u8>) -> Result<Vec<Value>> {
+pub(crate) fn workbook_rows(bytes: Vec<u8>, sheets: &[&str]) -> Result<Vec<Value>> {
     let mut archive = zip::ZipArchive::new(Cursor::new(&bytes))
         .map_err(|_| AppError::bad("请上传有效的 .xlsx 工作簿"))?;
     let mut expanded = 0u64;
@@ -130,7 +130,7 @@ fn workbook_rows(bytes: Vec<u8>) -> Result<Vec<Value>> {
     let mut workbook: Xlsx<_> = Xlsx::new(Cursor::new(bytes))
         .map_err(|error| AppError::bad(format!("无法读取工作簿：{error}")))?;
     let mut rows = Vec::new();
-    for sheet in [PROCESS_SHEET, TRANSMIT_SHEET] {
+    for &sheet in sheets {
         if !workbook.sheet_names().iter().any(|name| name == sheet) {
             return Err(AppError::bad(format!("缺少工作表：{sheet}")));
         }
@@ -380,8 +380,11 @@ mod tests {
     fn fixture() -> Vec<Value> {
         static ROWS: OnceLock<Vec<Value>> = OnceLock::new();
         ROWS.get_or_init(|| {
-            workbook_rows(include_bytes!("../config/dc-ups/sources/DC-UPS测点数据表.xlsx").to_vec())
-                .unwrap()
+            workbook_rows(
+                include_bytes!("../config/dc-ups/sources/DC-UPS测点数据表.xlsx").to_vec(),
+                &[PROCESS_SHEET, TRANSMIT_SHEET],
+            )
+            .unwrap()
         })
         .clone()
     }

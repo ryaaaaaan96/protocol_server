@@ -23,6 +23,8 @@ mod table_calculation;
 mod topology;
 mod topology_codegen;
 mod topology_validation;
+mod upm_points;
+mod upm_workbook;
 
 use anyhow::Context;
 use axum::{
@@ -68,8 +70,9 @@ async fn main() -> anyhow::Result<()> {
     anyhow::ensure!(
         arguments.is_empty()
             || arguments == ["migrate"]
-            || (arguments.len() == 2 && arguments[0] == "create-project"),
-        "用法：protocol-server [migrate | create-project <项目目录名>]"
+            || (arguments.len() == 2
+                && ["create-project", "import-upm"].contains(&arguments[0].as_str())),
+        "用法：protocol-server [migrate | create-project <项目目录名> | import-upm <项目目录名>]"
     );
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -139,6 +142,9 @@ async fn main() -> anyhow::Result<()> {
     let project_files = project_files::ProjectFiles::load()?;
     if arguments.first().is_some_and(|a| a == "create-project") {
         return project_files.create(&pool, &arguments[1]).await;
+    }
+    if arguments.first().is_some_and(|a| a == "import-upm") {
+        return project_files.initialize_upm(&pool, &arguments[1]).await;
     }
     let dummy_hash = auth::hash_password("invalid-password-placeholder".into())
         .await

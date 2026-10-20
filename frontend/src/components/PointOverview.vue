@@ -2,9 +2,9 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { api, type Row } from "../api";
 import { fieldForColumn, parseCell } from "../domain/pointGrid";
-import { communicationHint, type PointKind, type PointTableData } from "../domain/pointTables";
+import { communicationHint, type PointTableData } from "../domain/pointTables";
 import { columnSource, initialValues, overviewDefinition, overviewEntries, overviewRows, overviewText, overviewValues, sourceKey,
-  type OverviewData, type OverviewDraft, type OverviewRow } from "../domain/pointOverview";
+  type OverviewKind as PointKind, type OverviewData, type OverviewDraft, type OverviewRow } from "../domain/pointOverview";
 import { orderedColumns, restoreColumns, type TableColumn } from "../domain/tableColumns";
 import { allowsPoint } from "../domain/permissions";
 import { usePermissionContext } from "../composables/useProjectPermissions";

@@ -7,7 +7,7 @@ use crate::{
 };
 use axum::{
     Json,
-    extract::{Multipart, Path, State},
+    extract::{Multipart, Path, Query, State},
     http::{StatusCode, header},
     response::IntoResponse,
 };
@@ -121,16 +121,27 @@ pub async fn validate(
     report["issues"].as_array_mut().unwrap().extend(issues);
     Ok(Json(report))
 }
+#[derive(Deserialize)]
+pub struct ImportScope {
+    #[serde(default = "dsp_import_scope")]
+    board: String,
+}
+fn dsp_import_scope() -> String {
+    "DSP".into()
+}
 pub async fn preview_import(
     State(s): State<AppState>,
     u: User,
     Path(pid): Path<i64>,
+    Query(scope): Query<ImportScope>,
     mut multipart: Multipart,
 ) -> Result<Json<Value>> {
     let mut tx = db::context(&s.pool, &u, Some(pid), true).await?;
     crate::permissions::require_all(&mut tx, pid).await?;
-    let dsp_only: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM meta.project_state p CROSS JOIN LATERAL jsonb_array_elements(p.topology_config->'board_types') b WHERE p.id=$1 AND b->>'model_code'='DSP' AND b->>'point_storage'='native')")
-        .bind(pid).fetch_one(&mut *tx).await?;
+    if !["DSP", "UPM"].contains(&scope.board.as_str()) {
+        return Err(AppError::bad("工作簿板卡范围只支持 DSP 或 UPM"));
+    }
+    let configured = crate::dsp_points::native_board(&mut tx, pid, &scope.board).await?;
     tx.rollback().await?;
     let field = multipart
         .next_field()
@@ -147,12 +158,28 @@ pub async fn preview_import(
         .map_err(|_| AppError::bad("文件过大或上传失败"))?
         .to_vec();
     let hash = hex::encode(Sha256::digest(&bytes));
-    if !dsp_only {
-        return Err(AppError::bad("当前仅支持已配置 DSP 内部点表的工作簿导入"));
-    }
-    let data = tokio::task::spawn_blocking(move || crate::dsp_workbook::parse_workbook(bytes))
-        .await
-        .map_err(|_| AppError::bad("DSP Excel 解析失败"))??;
+    let configured = configured.ok_or(AppError::bad("请先应用所选板卡的原生点表配置"))?;
+    let device_count = configured["point_groups"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|g| g["devices"].as_array().map_or(0, Vec::len))
+        .sum::<usize>()
+        .max(1);
+    let board = scope.board.clone();
+    let data = tokio::task::spawn_blocking(move || -> Result<Value> {
+        if board == "UPM" {
+            Ok(serde_json::to_value(crate::upm_workbook::parse_workbook(
+                bytes,
+            )?)?)
+        } else {
+            Ok(serde_json::to_value(crate::dsp_workbook::parse_workbook(
+                bytes,
+            )?)?)
+        }
+    })
+    .await
+    .map_err(|_| AppError::bad("Excel 解析失败"))??;
     let mut tx = db::context(&s.pool, &u, Some(pid), true).await?;
     crate::permissions::require_all(&mut tx, pid).await?;
     let revision = db::lock_project(&mut tx, pid).await?;
@@ -165,14 +192,26 @@ pub async fn preview_import(
     .await?;
     let id: i64 = sqlx::query_scalar("INSERT INTO meta.previews(kind,project_id,created_by,filename,sha256,revision,payload,expires_at) VALUES('import',$1,$2,$3,$4,$5,$6,now()+interval '1 hour') RETURNING id")
         .bind(pid).bind(u.id).bind(&filename).bind(&hash).bind(revision)
-        .bind(json!({"kind":"dsp_native","data":data})).fetch_one(&mut *tx).await?;
+        .bind(json!({"kind":if scope.board=="UPM" {"upm_native"} else {"dsp_native"},"data":data})).fetch_one(&mut *tx).await?;
     tx.commit().await?;
+    let upm = scope.board == "UPM";
+    let process = data["process"].as_array().unwrap();
+    let warnings = if upm {
+        data["warnings"].clone()
+    } else {
+        json!(["本次仅替换 DSP 内部数据与 UPP 转发表；UPM 数据保持原样。"])
+    };
     Ok(Json(
-        json!({"id":id,"filename":filename,"sha256":hash,"revision":revision,"import_scope":"dsp",
-        "point_count":data.process.len(),"dsp_count":data.process.len(),"local_count":0,"transmit_count":data.transmit.len(),
-        "mapping_count":data.transmit.len(),"device_count":1,"sheets":["DSP内部数据","UPM-DSP采集数据"],
-        "warnings":["本次仅替换 DSP 内部数据与 UPP 转发表；UPM 及其他板卡数据保持原样。DSP sigID 未在来源中提供，按变量枚举关联。"],
-        "sample":data.process.iter().take(6).collect::<Vec<_>>()}),
+        json!({"id":id,"filename":filename,"sha256":hash,"revision":revision,
+        "import_scope":if upm {"upm"} else {"dsp"},"point_count":process.len(),
+        "dsp_count":process.iter().filter(|p|p["group_key"]=="DSP" || !upm).count(),
+        "local_count":process.iter().filter(|p|p["group_key"]=="LOCAL" && upm).count(),
+        "collect_count":data["collect"].as_array().map_or(0,Vec::len),
+        "transmit_count":data["transmit"].as_array().unwrap().len(),
+        "mapping_count":data["transmit"].as_array().unwrap().len(),
+        "device_count":device_count,"warnings":warnings,
+        "sheets":if upm {json!(["UPM单板测点","UPM-DSP采集数据","CSU-UPM采集数据","平台公共测点映射表"])} else {json!(["DSP内部数据","UPM-DSP采集数据"])},
+        "sample":process.iter().take(6).collect::<Vec<_>>()}),
     ))
 }
 #[derive(Deserialize)]
@@ -197,17 +236,16 @@ pub async fn commit_import(
         ));
     }
     let before = db::snapshot(&mut tx, pid).await?;
-    let native_dsp = before["project_config"]["board_types"]
-        .as_array()
-        .is_some_and(|types| {
-            types
-                .iter()
-                .any(|board| board["model_code"] == "DSP" && board["point_storage"] == "native")
-        });
-    if native_dsp != (row["payload"]["kind"] == "dsp_native") {
-        return Err(AppError::conflict(
-            "DSP 存储配置已变化，请重新上传并预览工作簿",
-        ));
+    let scope = match row["payload"]["kind"].as_str() {
+        Some("dsp_native") => "DSP",
+        Some("upm_native") => "UPM",
+        _ => return Err(AppError::bad("旧导入预览已失效，请重新上传")),
+    };
+    if crate::dsp_points::native_board(&mut tx, pid, scope)
+        .await?
+        .is_none()
+    {
+        return Err(AppError::conflict("板卡存储配置已变化，请重新上传并预览"));
     }
     if !input.replace
         && topology::TABLES
@@ -216,18 +254,26 @@ pub async fn commit_import(
     {
         return Err(AppError::conflict("项目已有配置，必须明确确认替换"));
     }
-    let data: crate::dsp_workbook::DspImport =
-        serde_json::from_value(row["payload"]["data"].clone())?;
-    crate::dsp_points::import(&mut tx, pid, &data).await?;
+    if scope == "UPM" {
+        let data: crate::upm_workbook::UpmImport =
+            serde_json::from_value(row["payload"]["data"].clone())?;
+        crate::upm_points::import(&mut tx, pid, &data).await?;
+    } else {
+        let data: crate::dsp_workbook::DspImport =
+            serde_json::from_value(row["payload"]["data"].clone())?;
+        crate::dsp_points::import(&mut tx, pid, &data).await?;
+    }
     let graph = topology::snapshot(&mut tx, pid, true).await?;
     let report = topology_validation::validate(&graph);
     let errors = topology::new_errors(&topology_validation::validate(&before), &report);
     if !errors.is_empty() {
-        let mut error = AppError::bad("DSP 导入校验失败，数据未保存");
+        let mut error = AppError::bad("点表导入校验失败，数据未保存");
         error.2 = Some(json!({"errors":errors}));
         return Err(error);
     }
-    let point_count = data.process.len();
+    let point_count = row["payload"]["data"]["process"]
+        .as_array()
+        .map_or(0, Vec::len);
     db::touch(&mut tx, pid).await?;
     db::record_import(
         &mut tx,

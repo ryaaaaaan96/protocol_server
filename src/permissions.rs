@@ -162,7 +162,7 @@ pub fn resources(graph: &Value, table: &str, row: &Value) -> BTreeSet<Grant> {
         "process_points" => {
             out.insert(Grant::new(key, "internal", None));
         }
-        "transmit_points" => {
+        "transmit_points" | "collect_points" => {
             if let Some(ep) = row["endpoint_key"]
                 .as_str()
                 .filter(|e| endpoint(definition, e).is_some())
@@ -200,7 +200,7 @@ pub fn check_change(access: &Access, before: &Value, after: &Value) -> Result<()
         return access.require_all();
     }
     let mut required = BTreeMap::new();
-    for table in ["process_points", "transmit_points"] {
+    for table in crate::topology::TABLES {
         let b: BTreeMap<_, _> = rows(before, table)
             .iter()
             .map(|r| (r["id"].to_string(), r))

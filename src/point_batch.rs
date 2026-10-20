@@ -128,6 +128,9 @@ fn row_kind<'a>(batch: &'a Batch, row: &'a BatchRow) -> Result<&'a str> {
             .kind
             .as_deref()
             .ok_or(AppError::bad("总体视图必须指定每条记录的点表类型"))?;
+        if !["process", "forward"].contains(&kind) {
+            return Err(AppError::bad("DSP 总体视图仅支持内部点和转发"));
+        }
         point_tables::entity(kind)?;
         Ok(kind)
     } else if row.kind.as_deref().is_some_and(|kind| kind != batch.kind) {
@@ -151,6 +154,7 @@ fn check_fields(batch: &Batch, operation: &str, dsp: bool) -> Result<()> {
         let required: &[&str] = match kind {
             "process" => &["name", "enum_name"],
             "forward" if dsp => &["process_point_id"],
+            "collect" => &["process_point_id", "endpoint_key"],
             _ => &["process_point_id", "name"],
         };
         let mut add = |key: &str, message: &str| {
@@ -188,6 +192,9 @@ fn check_fields(batch: &Batch, operation: &str, dsp: bool) -> Result<()> {
                 "min_value",
                 "max_value",
                 "notes",
+                "poll_interval",
+                "set_priority",
+                "scan_priority",
             ];
             if value.is_null() && nullable.contains(&key.as_str()) {
                 continue;
@@ -195,7 +202,8 @@ fn check_fields(batch: &Batch, operation: &str, dsp: bool) -> Result<()> {
             let valid = match key.as_str() {
                 "process_point_id" => value.as_i64().is_some_and(|v| v > 0),
                 "sig_id" | "element_count" | "byte_length" | "upp_model" | "address"
-                | "display_digits" | "wire_length" | "byte_order" => {
+                | "display_digits" | "wire_length" | "byte_order" | "poll_interval"
+                | "set_priority" | "scan_priority" => {
                     value.as_i64().is_some_and(|v| i32::try_from(v).is_ok())
                 }
                 "scale" => value.as_f64().is_some_and(|v| v.is_finite() && v > 0.),
@@ -220,7 +228,11 @@ pub async fn apply(tx: &mut PgConnection, pid: i64, c: &Change) -> Result<Value>
     let board = crate::dsp_points::native_board(tx, pid, &batch.board_key)
         .await?
         .ok_or(AppError::bad("此板卡尚未启用点表存储"))?;
-    check_fields(&batch, &c.operation, crate::dsp_sheet::is_dsp(&board))?;
+    check_fields(
+        &batch,
+        &c.operation,
+        crate::dsp_sheet::is_dsp(&board) || board["code"] == "UPM",
+    )?;
     let mut records = Vec::new();
     let mut errors = Vec::new();
     // Apply internal edits before mappings so conversion/model derivation uses
@@ -288,7 +300,7 @@ pub async fn can_preview(
     c: &Change,
 ) -> Result<bool> {
     let batch = decode(c)?;
-    for kind in ["process", "forward"] {
+    for kind in ["process", "collect", "forward"] {
         let changes: Vec<_> = batch
             .rows
             .iter()
@@ -344,6 +356,7 @@ pub fn annotate(errors: &mut [Value], applied: &Value) {
             let id = &r["record"]["id"];
             let matches = match error["entity"].as_str() {
                 Some("process_points") => r.get("kind").unwrap_or(&applied["kind"]) == "process",
+                Some("collect_points") => r.get("kind").unwrap_or(&applied["kind"]) == "collect",
                 Some("transmit_points") => r.get("kind").unwrap_or(&applied["kind"]) == "forward",
                 _ => false,
             };

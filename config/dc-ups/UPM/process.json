@@ -1,110 +1,84 @@
 {
   "version": 1,
-  "enabled": false,
-  "label": "处理点表",
-  "description": "统一维护内部信号、默认值、上下限及恢复策略；采集与转发通过固定记录 ID 引用。",
+  "enabled": true,
+  "label": "UPM 内部点",
+  "description": "LOCAL 本地测点与 DSP 采集点按模板维护；多个设备实例共用点定义，地址在项目 JSON 中配置。",
   "columns": [
     "name",
-    "group_name",
-    "resolved_sig_id",
     "enum_name",
-    "data_type",
+    "sig_id",
+    "internal_type",
+    "element_count",
     "byte_length",
     "unit",
     "default_value",
     "min_value",
     "max_value",
-    "boot_restore",
-    "manual_restore",
     "flags",
     "callback",
+    "notes",
+    "group_name",
+    "device_addresses",
     "collection_count",
-    "forward_count"
+    "forward_count",
+    "source_sig_id"
   ],
   "editor": [
     "name",
-    "group_id",
-    "data_item_id",
     "enum_name",
     "sig_id",
-    "sig_symbol",
     "internal_type",
-    "flags",
-    "callback",
-    "process_enabled",
+    "element_count",
+    "unit",
     "default_value",
     "min_value",
     "max_value",
-    "boot_restore",
-    "manual_restore"
+    "flags",
+    "callback",
+    "notes",
+    "group_key"
   ],
   "ordering": {
     "mode": "display",
     "group_by": [
-      "group_id"
+      "group_key"
     ]
   },
   "inline": {
     "name": "name",
     "enum_name": "enum_name",
-    "flags": "flags",
-    "callback": "callback",
+    "sig_id": "sig_id",
+    "internal_type": "internal_type",
+    "element_count": "element_count",
+    "unit": "unit",
     "default_value": "default_value",
     "min_value": "min_value",
     "max_value": "max_value",
-    "boot_restore": "boot_restore",
-    "manual_restore": "manual_restore",
-    "group_name": "group_id",
-    "resolved_sig_id": "sig_id",
-    "data_type": "internal_type"
+    "flags": "flags",
+    "callback": "callback",
+    "notes": "notes"
   },
   "fields": {
     "name": {
-      "label": "信号名称"
-    },
-    "group_name": {
-      "label": "点表分组"
-    },
-    "resolved_sig_id": {
-      "label": "sigID"
+      "label": "数据定义"
     },
     "enum_name": {
-      "label": "枚举"
-    },
-    "data_type": {
-      "label": "内部类型"
-    },
-    "byte_length": {
-      "label": "内部字节数"
+      "label": "ENMU"
     },
     "unit": {
       "label": "单位"
     },
-    "default_value": {
-      "label": "默认值覆盖",
-      "nullable": true,
-      "hint": "留空继承数据定义；表格展示生效值。",
-      "column_label": "默认值"
+    "notes": {
+      "label": "备注"
     },
-    "min_value": {
-      "label": "下限覆盖",
-      "nullable": true,
-      "hint": "留空继承数据定义；表格展示生效值。",
-      "column_label": "下限"
+    "source_sig_id": {
+      "label": "源 sigID"
     },
-    "max_value": {
-      "label": "上限覆盖",
-      "nullable": true,
-      "hint": "留空继承数据定义；表格展示生效值。",
-      "column_label": "上限"
+    "device_addresses": {
+      "label": "设备地址"
     },
-    "flags": {
-      "label": "处理标志",
-      "default": "0"
-    },
-    "callback": {
-      "label": "回调函数",
-      "default": "NULL"
+    "group_name": {
+      "label": "设备模板"
     },
     "collection_count": {
       "label": "采集绑定数"
@@ -112,30 +86,17 @@
     "forward_count": {
       "label": "转发绑定数"
     },
-    "group_id": {
-      "label": "点表分组",
-      "reference": "groups",
-      "type": "number"
-    },
-    "data_item_id": {
-      "label": "数据来源定义",
-      "reference": "data",
-      "type": "number",
-      "hint": "定义提供类型、长度、单位和默认范围，可由多个点共享。"
+    "group_key": {
+      "label": "设备模板",
+      "reference": "native_groups"
     },
     "sig_id": {
-      "label": "数字 sigID",
+      "label": "sigID",
       "type": "number",
-      "nullable": true,
-      "hint": "数字与公共符号二选一；引用通过固定记录 ID 关联。"
-    },
-    "sig_symbol": {
-      "label": "公共 sigID 符号",
       "nullable": true
     },
     "internal_type": {
-      "label": "内部类型覆盖",
-      "nullable": true,
+      "label": "数据类型",
       "options": [
         "U8",
         "U16",
@@ -144,28 +105,40 @@
         "S32",
         "F32",
         "STRING"
-      ]
+      ],
+      "default": "U16"
     },
-    "process_enabled": {
-      "label": "加入处理表",
-      "type": "boolean",
-      "default": true
+    "element_count": {
+      "label": "元素数量（字符串为字节数）",
+      "type": "number",
+      "default": 1
     },
-    "boot_restore": {
-      "label": "上电恢复默认值",
-      "type": "boolean",
-      "default": false
+    "byte_length": {
+      "label": "内部字节数",
+      "type": "number"
     },
-    "manual_restore": {
-      "label": "允许手动恢复默认值",
-      "type": "boolean",
-      "default": false
+    "default_value": {
+      "label": "默认值",
+      "nullable": true,
+      "hint": "保持 Excel 原始值；未解析的符号在校验中提示。"
     },
-    "contexts": {
-      "label": "设备上下文"
+    "min_value": {
+      "label": "数据下限",
+      "nullable": true,
+      "hint": "保持 Excel 原始值；未解析的符号在校验中提示。"
     },
-    "range_inherited": {
-      "label": "继承范围"
+    "max_value": {
+      "label": "数据上限",
+      "nullable": true,
+      "hint": "保持 Excel 原始值；未解析的符号在校验中提示。"
+    },
+    "flags": {
+      "label": "ARM 配置参数",
+      "default": "0"
+    },
+    "callback": {
+      "label": "回调函数",
+      "default": "NULL"
     }
   }
 }

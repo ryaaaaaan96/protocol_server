@@ -1,148 +1,141 @@
 {
   "version": 1,
-  "enabled": false,
-  "label": "转发点表",
-  "description": "将处理点提供给对外协议；同一处理点可关联多种协议和多个地址。",
+  "enabled": true,
+  "label": "对外转发表",
+  "description": "LOCAL 和 DSP 内部点分别映射到 Modbus 或 UPP；Modbus 按设备基址展开，同一点可对应多个对外地址。",
   "columns": [
     "signal_name",
-    "context_name",
-    "dev_id",
+    "enum_name",
     "resolved_sig_id",
     "endpoint_name",
-    "protocol",
-    "transport",
-    "field_name",
     "upp_model",
-    "effective_address",
-    "effective_type",
-    "effective_length",
+    "address",
+    "wire_type",
+    "wire_length",
+    "register_type",
+    "register_count",
+    "scale",
     "access",
-    "scale"
+    "byte_order",
+    "device_addresses"
   ],
   "editor": [
-    "endpoint_id",
-    "context_id",
-    "signal_id",
-    "field_id"
+    "process_point_id",
+    "endpoint_key",
+    "upp_model",
+    "address",
+    "wire_type",
+    "wire_length",
+    "register_type",
+    "scale",
+    "access",
+    "byte_order"
   ],
   "ordering": {
     "mode": "display",
     "group_by": [
-      "endpoint_id",
+      "endpoint_key",
+      "group_key",
       "upp_model",
-      "bank"
+      "register_type"
     ]
   },
   "inline": {
-    "signal_name": "signal_id",
-    "context_name": "context_id",
-    "endpoint_name": "endpoint_id",
-    "field_name": "field_id"
+    "upp_model": "upp_model",
+    "address": "address",
+    "wire_type": "wire_type",
+    "wire_length": "wire_length",
+    "register_type": "register_type",
+    "scale": "scale",
+    "access": "access",
+    "byte_order": "byte_order"
   },
   "fields": {
-    "resolved_sig_id": {
-      "label": "sigID"
-    },
     "enum_name": {
-      "label": "枚举"
+      "label": "ENMU"
     },
-    "data_type": {
-      "label": "内部类型"
-    },
-    "byte_length": {
-      "label": "内部字节数"
-    },
-    "unit": {
-      "label": "单位"
-    },
-    "default_value": {
-      "label": "默认值覆盖",
-      "nullable": true,
-      "hint": "留空继承数据定义；表格展示生效值。",
-      "column_label": "默认值"
-    },
-    "min_value": {
-      "label": "下限覆盖",
-      "nullable": true,
-      "hint": "留空继承数据定义；表格展示生效值。",
-      "column_label": "下限"
-    },
-    "max_value": {
-      "label": "上限覆盖",
-      "nullable": true,
-      "hint": "留空继承数据定义；表格展示生效值。",
-      "column_label": "上限"
+    "device_addresses": {
+      "label": "设备地址"
     },
     "signal_name": {
-      "label": "处理点"
-    },
-    "context_name": {
-      "label": "逻辑设备"
-    },
-    "dev_id": {
-      "label": "dev_id"
+      "label": "内部点"
     },
     "endpoint_name": {
       "label": "协议端点"
     },
-    "protocol": {
-      "label": "协议"
+    "process_point_id": {
+      "label": "内部点",
+      "type": "number",
+      "reference": "process_points"
     },
-    "transport": {
-      "label": "传输方式"
-    },
-    "field_name": {
-      "label": "协议字段"
+    "endpoint_key": {
+      "label": "协议端点",
+      "reference": "endpoints"
     },
     "upp_model": {
-      "label": "UPP 模型"
+      "label": "UPP 模型号",
+      "type": "number",
+      "default": 0
     },
-    "effective_address": {
-      "label": "协议地址 / 偏移"
+    "address": {
+      "label": "协议地址 / 偏移",
+      "type": "number",
+      "default": 0,
+      "hint": "UPP 按字节；Modbus 按寄存器。DSP 模板为相对偏移，设备基址定义于 project.json。"
     },
-    "effective_type": {
-      "label": "通信类型"
+    "wire_type": {
+      "label": "通信类型",
+      "options": [
+        "U8",
+        "U16",
+        "S16",
+        "U32",
+        "S32",
+        "F32",
+        "STRING"
+      ],
+      "default": "U16"
     },
-    "effective_length": {
-      "label": "通信字节数"
+    "wire_length": {
+      "label": "协议字节数",
+      "type": "number",
+      "default": 2
     },
     "scale": {
-      "label": "协议系数"
-    },
-    "endpoint_id": {
-      "label": "协议端点",
-      "reference": "endpoints",
-      "type": "number"
-    },
-    "context_id": {
-      "label": "逻辑设备",
-      "reference": "contexts",
-      "type": "number"
-    },
-    "signal_id": {
-      "label": "本地内部信号",
-      "reference": "signals",
-      "type": "number"
-    },
-    "field_id": {
-      "label": "协议字段",
-      "reference": "fields",
-      "type": "number"
-    },
-    "address_length": {
-      "label": "地址长度"
-    },
-    "register_type": {
-      "label": "寄存器区"
+      "label": "精度",
+      "type": "number",
+      "default": 1
     },
     "access": {
-      "label": "读写属性"
+      "label": "读写权限",
+      "options": [
+        "RO",
+        "RW",
+        "WO"
+      ],
+      "default": "RO"
     },
     "byte_order": {
-      "label": "字节序"
+      "label": "字节序",
+      "type": "number",
+      "default": 0
     },
-    "port": {
-      "label": "端口"
+    "register_type": {
+      "label": "Modbus 寄存器区",
+      "options": [
+        "HOLDING",
+        "INPUT"
+      ],
+      "default": "HOLDING"
+    },
+    "register_count": {
+      "label": "Modbus 寄存器数量",
+      "type": "number"
+    },
+    "resolved_sig_id": {
+      "label": "sigID",
+      "type": "number",
+      "nullable": true
     }
   }
 }

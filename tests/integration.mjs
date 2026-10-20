@@ -5,6 +5,7 @@ import crypto from "node:crypto";
 import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { checkUpmPoints } from "./upm-points.mjs";
 import { checkDspPoints } from "./dsp-points.mjs";
 import { checkTableCalculation } from "./table-calculation.mjs";
 import { checkDspTransmitRules } from "./dsp-transmit-rules.mjs";
@@ -30,11 +31,17 @@ migration.pathname=`/${dbname}`;appUrl.pathname=`/${dbname}`;
 const password=crypto.randomBytes(20).toString("hex");
 const projectConfigs=fs.mkdtempSync(path.join(root,".runtime/test-project-configs-"));
 const fixtureSource=path.join(root,"config/dc-ups");
-for(const [baseKey,workbook] of [["dsp_native",true],["dsp_native_other",false],["dsp_rules",false],["dsp_calculation",false],["cli",false],["excel",false],["broken",true]]){
+for(const [baseKey,workbook] of [["upm",true],["dsp_native",true],["dsp_native_other",false],["dsp_rules",false],["dsp_calculation",false],["cli",false],["excel",false],["broken",true]]){
   const key=fixtureKey(baseKey);
   const directory=path.join(projectConfigs,key);fs.cpSync(fixtureSource,directory,{recursive:true});
   const manifest=JSON.parse(fs.readFileSync(path.join(directory,"project.json"),"utf8"));
   manifest.key=key;manifest.name=key;
+  if(baseKey!=="upm") {
+    const upm=manifest.topology.board_types.find(board=>board.code==="UPM");
+    for(const key of ["point_storage","point_groups","point_endpoints"]) delete upm[key];
+    manifest.workspace.boards.UPM.tables=[];
+    manifest.workbook_boards=["DSP"];
+  }
   if(!workbook)manifest.workbook=null;
   if(baseKey==="broken") { manifest.workbook="sources/invalid.xlsx"; fs.writeFileSync(path.join(directory,manifest.workbook),"not an xlsx file"); }
   fs.writeFileSync(path.join(directory,"project.json"),JSON.stringify(manifest));
@@ -155,6 +162,7 @@ async function runIntegration(){
   for(let attempt=0;attempt<10;attempt++) equal((await unknown.raw("/auth/login","POST",{username:"nonexistent",password})).status,401);
   equal((await unknown.raw("/auth/login","POST",{username:"nonexistent",password})).status,429);
   equal((await e.raw("/projects","POST",{config_key:fixtureKey("dsp_native")})).status,403);
+  if (process.argv.includes("--upm")) { await checkUpmPoints({client,engineer:e,engineerId:engineer.id,viewer:v,viewerId:viewer.id,equal,ok,fixtureKey,projectConfigs,testEnv}); console.log(`PASS: ${assertions} assertions`); return; }
   if (process.argv.includes("--calculation")) { await checkTableCalculation({client,engineer:e,engineerId:engineer.id,equal,ok,fixtureKey,projectConfigs}); console.log(`PASS: ${assertions} assertions`); return; }
   if (!process.argv.some(arg=>["--folders","--excel","--databases"].includes(arg))) await checkDspPoints({client,engineer:e,viewer:v,engineerId:engineer.id,viewerId:viewer.id,equal,ok,
     migrationUrl:migration.toString(),appUrl:appUrl.toString(),testEnv,projectConfigs,fixtureKey});
@@ -190,8 +198,8 @@ async function runIntegration(){
       const business=new pg.Client({connectionString:url.toString()});await business.connect();
       try{
         const tables=(await business.query("SELECT schemaname||'.'||tablename AS name FROM pg_tables WHERE schemaname IN ('public','points','history','meta') ORDER BY 1")).rows.map(row=>row.name);
-        equal(tables.length,7);
-        for(const name of ["public._sqlx_migrations","meta.project_state","meta.previews","points.process_points","points.transmit_points","history.events","history.releases"])
+        equal(tables.length,8);
+        for(const name of ["public._sqlx_migrations","meta.project_state","meta.previews","points.process_points","points.collect_points","points.transmit_points","history.events","history.releases"])
           ok(tables.includes(name),`project contains ${name}`);
         const state=(await business.query("SELECT id,config_key,project_uid FROM meta.project_state")).rows;
         equal(state.length,1);equal(state[0].id,entry.id);equal(state[0].config_key,entry.config_key);equal(state[0].project_uid,entry.project_uid);

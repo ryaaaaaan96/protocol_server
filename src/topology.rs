@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use sqlx::{Acquire, PgConnection};
 use std::collections::BTreeSet;
 
-pub const TABLES: &[&str] = &["process_points", "transmit_points"];
+pub const TABLES: &[&str] = &["process_points", "collect_points", "transmit_points"];
 pub fn rows<'a>(g: &'a Value, k: &str) -> &'a [Value] {
     g[k].as_array().map(Vec::as_slice).unwrap_or(&[])
 }
