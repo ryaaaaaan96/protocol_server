@@ -11,9 +11,24 @@ pub(crate) fn xml(s: &str) -> String {
         .replace('\n', "&#10;")
         .replace('\r', "")
 }
-pub async fn generate(tx: &mut PgConnection, pid: i64) -> Result<Value> {
+pub async fn generate(
+    tx: &mut PgConnection,
+    pid: i64,
+    definitions: &crate::project_files::ProjectFiles,
+) -> Result<Value> {
     let graph = crate::topology::snapshot(tx, pid, true).await?;
     let mut generated = crate::topology_codegen::generate(&graph)?;
+    let issues = crate::table_calculation::issues(tx, pid, definitions, &graph).await?;
+    if !issues.is_empty() {
+        generated["blocked"] = Value::Bool(true);
+        generated["files"] = serde_json::json!({});
+        let count = generated["validation"]["errors"].as_u64().unwrap_or(0) + issues.len() as u64;
+        generated["validation"]["issues"]
+            .as_array_mut()
+            .unwrap()
+            .extend(issues);
+        generated["validation"]["errors"] = count.into();
+    }
     generated["revision"] = graph["revision"].clone();
     Ok(generated)
 }

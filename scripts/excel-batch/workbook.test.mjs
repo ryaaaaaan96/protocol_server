@@ -68,7 +68,7 @@ test("templates cover each table without overwriting existing files", async t =>
       }
     }
     if (kind === "forward") {
-      for (const derived of ["upp_model", "name", "enabled", "conversion", "byte_order"]) assert.equal(actualHeaders.includes(derived), false);
+      for (const derived of ["upp_model", "name", "enabled", "conversion", "byte_order", "address", "wire_length"]) assert.equal(actualHeaders.includes(derived), false);
     }
     await assert.rejects(writeTemplate(file, kind), { code: "EEXIST" });
     await assert.rejects(readRows(file, kind), /当前 0 行/);
@@ -158,4 +158,11 @@ test("server definition defaults apply only to missing editable fields and prese
 
   const oldDefinition = { editor: ["enum_name", "internal_type"], fields: { enum_name: { default: "OLD" }, internal_type: { default: "U8" } } };
   assert.deepEqual(withDefinitionDefaults(rows, oldDefinition), rows);
+});
+
+test("scripted DSP forwarding accepts only source and endpoint", async t => {
+  const { file, book, sheet } = await fixture(t, ["process_point_id", "endpoint_key"], [[11, "UPP_SERVICE"]]);
+  sheet.name = "forward";
+  await book.xlsx.writeFile(file);
+  assert.deepEqual((await readRows(file,"forward"))[0].values, {process_point_id:11, endpoint_key:"UPP_SERVICE"});
 });

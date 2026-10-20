@@ -9,6 +9,7 @@ import {
   isDspForward,
   communicationFields,
   communicationRecommendation,
+  editableCommunicationRecommendation,
   communicationHint,
   communicationDiffers,
   type PointTableData,
@@ -54,7 +55,7 @@ if (!props.row) {
       values.value.endpoint_key = endpoints[0]?.id ?? null;
   }
 }
-if (!props.row && isDspForward(props.data)) Object.assign(values.value, communicationRecommendation(props.data, values.value) || {});
+if (!props.row && isDspForward(props.data)) Object.assign(values.value, editableCommunicationRecommendation(props.data, values.value));
 const initial: Row = JSON.parse(JSON.stringify(values.value));
 const scopeAllowed = computed(() => allowsPoint(permissions.state.value, props.boardKey, props.data.kind, props.data, props.row));
 const canSubmit = computed(() => props.canWrite && scopeAllowed.value && allowsPoint(permissions.state.value, props.boardKey, props.data.kind, props.data, { edit_values: values.value }));
@@ -81,7 +82,7 @@ const recommendationHint = computed(() => communicationHint(props.data, values.v
 const recommendationDiffers = computed(() => communicationDiffers(props.data, values.value, props.row || undefined));
 function applyRecommendation() {
   if (!canSubmit.value || busy.value || !recommendation.value) return;
-  Object.assign(values.value, recommendation.value);
+  Object.assign(values.value, editableCommunicationRecommendation(props.data, values.value, props.row || undefined));
   communicationEdited = false;
   preview.value = null;
   error.value = "";
@@ -107,7 +108,7 @@ function set(key: string, event: Event) {
   error.value = "";
   if (communicationFields.some(field => field === key)) communicationEdited = true;
   if (key === "process_point_id" && !props.row && !communicationEdited)
-    Object.assign(values.value, communicationRecommendation(props.data, values.value) || {});
+    Object.assign(values.value, editableCommunicationRecommendation(props.data, values.value));
   if (f.reference) {
     for (let pass = 0; pass < 2; pass++)
       for (const k of def.editor)

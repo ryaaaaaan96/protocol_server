@@ -506,6 +506,7 @@ mod tests {
             "metadata":{"ram":"N","cpu":"CPU2","source_cells":{"values":{"N":"N"}}}});
         let fields = json!({"ram":"Y"});
         let change = crate::topology::Change {
+            calculation_rule: Value::Null,
             revision: 1,
             entity: "process_points".into(),
             operation: "update".into(),

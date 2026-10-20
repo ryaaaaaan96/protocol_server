@@ -46,7 +46,7 @@ export async function checkExcelBatch({client, equal, ok, fixtureKey}) {
     const forwardFile=path.join(temporary,"forward.xlsx"),forwardReport=path.join(temporary,"forward-report.json");
     await populate(forwardFile,"forward",{process_point_id:point.id,endpoint_key:"UPP_SERVICE",address:6,wire_type:"S32",wire_length:4,scale:0.01,access:"RO",byte_order:0,conversion:"fixed_point"});
     const forwardBook=new ExcelJS.Workbook();await forwardBook.xlsx.readFile(forwardFile);
-    for(const removed of ["upp_model","name","enabled","conversion","byte_order"])ok(!forwardBook.getWorksheet("forward").getRow(1).values.includes(removed));
+    for(const removed of ["upp_model","name","enabled","conversion","byte_order","address","wire_length"])ok(!forwardBook.getWorksheet("forward").getRow(1).values.includes(removed));
     ok((await cli([...common,"--kind","forward","--file",forwardFile,"--commit","--report",forwardReport])).includes("添加成功"));
     const result=JSON.parse(await fs.readFile(forwardReport,"utf8"));
     equal(result.record.rows[0].record.upp_model,102);
@@ -59,7 +59,7 @@ export async function checkExcelBatch({client, equal, ok, fixtureKey}) {
     await populate(automaticFile,"forward",{process_point_id:point.id,endpoint_key:"UPP_SERVICE",address:20});
     await cli([...common,"--kind","forward","--file",automaticFile,"--commit","--report",automaticReport]);
     const automatic=JSON.parse(await fs.readFile(automaticReport,"utf8")).record.rows[0].record;
-    equal(automatic.upp_model,102);equal(automatic.wire_type,"S32");equal(automatic.wire_length,4);
+    equal(automatic.address,10);equal(automatic.upp_model,102);equal(automatic.wire_type,"S32");equal(automatic.wire_length,4);
     equal(automatic.name,point.name);equal(automatic.enabled,true);
     equal(automatic.scale,0.0001);equal(automatic.conversion,"fixed_point");
     equal((await client.call(`${url}/topology`)).transmit_points.length,2);

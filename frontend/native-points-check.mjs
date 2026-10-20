@@ -9,7 +9,7 @@ async function compile(path) {
   }).outputText;
 }
 const choicesUrl = moduleUrl(await compile("./src/domain/pointTables.ts"));
-const { pointChoices, pointDataType, pointIsString, isDspSheet, isDspForward, pointChangeSummary, communicationRecommendation, communicationHint, communicationDiffers } = await import(choicesUrl);
+const { pointChoices, pointDataType, pointIsString, isDspSheet, isDspForward, pointChangeSummary, communicationRecommendation, communicationHint, communicationDiffers, editableCommunicationRecommendation } = await import(choicesUrl);
 const { parseCell, displayCell, fieldForColumn } = await import(moduleUrl((await compile("./src/domain/pointGrid.ts")).replace('"./pointTables"', JSON.stringify(choicesUrl))));
 const { allowsPoint } = await import(moduleUrl(await compile("./src/domain/permissions.ts")));
 const { belongsToBoard, scopedRows } = await import(moduleUrl(await compile("./src/domain/board.ts")));
@@ -112,7 +112,7 @@ assert.deepEqual(pointChoices(forward, "process_point_id", {}).map(record => rec
 assert.equal(parseCell(forward, "process_point_id", "母线电压", mapping), 1);
 assert.equal(parseCell(forward, "scale", "0.001", mapping), 0.001);
 assert.equal(displayCell(forward, forwardRow, "upp_model", {}), "1");
-assert.equal(displayCell(forward, forwardRow, "effective_address", { address: 10 }), "10");
+assert.equal(displayCell(forward, forwardRow, "effective_address", { address: 10 }), "6");
 assert.equal(displayCell(forward, forwardRow, "signal_name", { process_point_id: 2 }), "设备名称");
 assert.equal(displayCell(forward, forwardRow, "enum_name", { process_point_id: 2 }), "DEVICE_NAME");
 assert.equal(displayCell(forward, forwardRow, "data_type", { process_point_id: 2 }), "STRING");
@@ -136,7 +136,7 @@ assert.equal(displayCell(forward, forwardRow, "upp_model", { process_point_id: 2
 assert.equal(displayCell(forward, forwardRow, "upp_model", { process_point_id: null }), "待计算");
 assert.equal(displayCell(forward, forwardRow, "upp_model", { process_point_id: 999 }), "待计算");
 assert.equal(displayCell(forward, forwardRow, "effective_length", { process_point_id: 2 }), "4", "Changing the source never replaces the actual protocol length with its internal length");
-assert.equal(displayCell(forward, forwardRow, "effective_length", { wire_length: 32 }), "32");
+assert.equal(displayCell(forward, forwardRow, "effective_length", { wire_length: 32 }), "4");
 assert.equal(fieldForColumn(forward, "upp_model"), undefined);
 assert.ok(!forwardDefinition.editor.includes("upp_model"));
 assert.equal(displayCell(forward, forwardRow, "category", { process_point_id: 2 }), "任务级观测量");
@@ -148,7 +148,7 @@ assert.equal(communicationRecommendation(generic, mapping), undefined);
 assert.match(communicationHint(forward, { ...mapping, wire_type: "F32" }), /当前 F32 偏离建议/);
 assert.equal(communicationDiffers(forward, { ...mapping, scale: 1 }), false);
 assert.equal(communicationDiffers(forward, mapping), true);
-assert.equal(communicationDiffers(forward, { ...mapping, scale: 1, wire_length: null }, mapping), true);
+assert.equal(communicationDiffers(forward, { ...mapping, scale: 1, wire_length: null }, mapping), false);
 assert.equal(communicationRecommendation(forward, { process_point_id: null }, mapping), undefined);
 assert.equal(pointChangeSummary({ entity: "transmit_points", before: { upp_model: 1 }, after: { upp_model: 99 } }, forwardDefinition.fields), "UPP模型号：1 → 99；数据分类：系统参数1 → 任务级观测量");
 assert.equal(pointChangeSummary({ entity: "transmit_points",
@@ -170,3 +170,8 @@ assert.equal(allowsPoint(protocolPermissions, "UPM", "forward", forward, forward
 assert.equal(allowsPoint(protocolPermissions, "DSP", "process", process, processRow), false);
 assert.deepEqual(pointChoices(forward, "endpoint_key", {}).map(endpoint => endpoint.id), ["UPP_SERVICE"]);
 console.log("PASS: DSP sheet projections, hidden protocol fields, communication recommendations, category summaries, editable aliases, array bounds, generic tables and scoped permissions");
+
+assert.equal(forwardDefinition.calculation.engine, "javascript");
+assert.equal(forwardDefinition.calculation.script_file, "transmit.js");
+for (const column of ["effective_address", "effective_length"]) assert.equal(fieldForColumn(forward, column), undefined);
+assert.deepEqual(editableCommunicationRecommendation(forward, mapping), {wire_type:"S32", scale:1});

@@ -2,6 +2,7 @@
 name = "protocol-server"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.87"
 
 [dependencies]
 axum = { version = "0.8", features = ["multipart"] }
@@ -23,3 +24,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dotenvy = "0.15"
 anyhow = "1"
 json-patch = "4.2.0"
+rquickjs = "0.14.0"

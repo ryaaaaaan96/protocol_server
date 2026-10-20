@@ -4,8 +4,7 @@ import {
   choiceLabel,
   pointChoices,
   pointIsString,
-  communicationFields,
-  communicationRecommendation,
+  editableCommunicationRecommendation,
   type PointTableData,
 } from "../domain/pointTables";
 import {
@@ -335,8 +334,8 @@ export function usePointGrid(options: Options) {
   function applyRecommendation(row: Row) {
     if (!finish() || !options.data.value || options.blocked() || !options.writable()) return false;
     const data = options.data.value;
-    const suggestion = communicationRecommendation(data, values(row), row);
-    if (!suggestion || communicationFields.some(key => {
+    const suggestion = editableCommunicationRecommendation(data, values(row), row);
+    if (!Object.keys(suggestion).length || Object.keys(suggestion).some(key => {
       const column = Object.keys(data.definition.inline).find(column => data.definition.inline[column] === key);
       return !column || !editable(row, column);
     })) return false;

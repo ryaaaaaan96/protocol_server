@@ -127,6 +127,7 @@ pub async fn preview(
         u,
         Path(pid),
         Json(Change {
+            calculation_rule: Value::Null,
             revision: input.revision,
             expected: input.expected,
             entity: "point_order".into(),

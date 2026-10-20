@@ -496,6 +496,22 @@ async function previewChange() {
   }
   finally { busy.value = false; }
 }
+async function previewCalculation() {
+  if (!data.value || !canEditTable.value || dirty.value || busy.value || review.value) return;
+  busy.value = true;
+  reviewMode.value = "save";
+  actionError.value = "";
+  try {
+    review.value = await api(`/projects/${props.pid}/boards/${encodeURIComponent(props.boardKey)}/point-tables/forward/preview`, "POST", {
+      revision: data.value.revision, operation: "recalculate", values: {},
+    });
+    if (!review.value?.allowed) emit("error", review.value?.errors.map((e: Row) => e.message).join("；") || "计算检查未通过");
+  } catch (e) {
+    actionError.value = (e as Error).message;
+    emit("error", actionError.value);
+    if (revisionConflict(e)) conflict();
+  } finally { busy.value = false; }
+}
 function conflict() {
   review.value = null;
   editing.value = false;
@@ -530,6 +546,7 @@ function text(row: Row, key: string) {
         />
       </div>
       <div class="inline">
+        <button v-if="def.calculation && canEditTable" class="button small" :disabled="dirty || busy || !!review" title="按当前配置计算整张表的字节数和偏移，预览后保存" @click="previewCalculation">重算协议布局</button>
         <button v-if="canEditTable" class="button small" :disabled="!grid.activeRow.value || !grid.active.value || !grid.editable(grid.activeRow.value, grid.active.value.column)" @click="grid.activeRow.value && grid.active.value && grid.start(grid.activeRow.value, grid.active.value.column)"><Pencil :size="14" />编辑单元格</button>
         <button class="icon-btn" aria-label="表格操作说明" title="表格操作说明" @click="showHelp = true"><CircleHelp :size="17" /></button>
         <button
@@ -682,7 +699,7 @@ function text(row: Row, key: string) {
       </div>
     </Modal>
     <ContextMenu v-if="tableMenu" :key="tableMenu.serial" :x="tableMenu.x" :y="tableMenu.y" :label="menuLabel" :items="menuItems" @select="menuAction" @close="tableMenu = null" />
-    <PointChangePreview v-if="review" :pid="pid" :preview="review" :check-only="reviewMode === 'check'" :can-write="canEditTable && draftWithinScope && orderWithinScope" :fields="def.fields" :title="reviewMode === 'check' ? '草稿检查结果' : grid.changedRows.value ? '单元格变更预览' : '排序变更预览'" @close="review = null" @done="saved" @error="emit('error', $event)" @conflict="previewConflict" />
+    <PointChangePreview v-if="review" :pid="pid" :preview="review" :check-only="reviewMode === 'check'" :can-write="canEditTable && draftWithinScope && orderWithinScope" :fields="def.fields" :title="reviewMode === 'check' ? '草稿检查结果' : grid.changedRows.value ? '单元格变更预览' : orderDraft ? '排序变更预览' : '协议布局计算预览'" @close="review = null" @done="saved" @error="emit('error', $event)" @conflict="previewConflict" />
     <PointColumns v-if="columnSettings" :definition="def" :columns="columns" @close="columnSettings = false" @apply="applyColumns" />
     <PointEditor
       v-if="editing"

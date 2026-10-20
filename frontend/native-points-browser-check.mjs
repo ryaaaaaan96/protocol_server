@@ -75,7 +75,7 @@ try {
         if (values.wire_type === "F32") {
           const id = payload.rows?.[0]?.id ?? payload.id;
           const mapping = { ...mappings.find(item => item.id === id), ...values };
-          const valid = mapping.wire_length === 4 && mapping.scale === 1;
+          const valid = mapping.scale === 1;
           return route.fulfill({ json: valid
             ? { ...preview, warnings: [{ name: "母线电压", message: "当前 F32 偏离建议 S32，请确认接收端协议。" }] }
             : { ...preview, allowed: false, errors: [{ message: "F32 直接映射需要 4 字节和系数 1。" }] } });
@@ -209,6 +209,11 @@ try {
   await page.locator("dialog").getByRole("button", { name: "关闭", exact: true }).last().click();
   await page.getByRole("tab", { name: /^DSP UPP转发表/ }).click();
   await expect(rows()).toHaveCount(3);
+  for (const column of ["effective_address", "effective_length"]) await expect(cell(column)).toHaveAttribute("aria-readonly", "true");
+  await page.getByRole("button", {name:"重算协议布局",exact:true}).click();
+  await expect(page.locator("dialog")).toContainText("协议布局计算预览");
+  assert.equal(requests.at(-1).body.operation,"recalculate");
+  await page.locator("dialog").getByRole("button",{name:"关闭",exact:true}).last().click();
   await expect(cell("upp_model")).toHaveText("1");
   await expect(cell("upp_model")).toHaveAttribute("aria-readonly", "true");
   for (const key of ["name", "enabled", "byte_length"]) await expect(cell(key)).toHaveCount(0);
@@ -272,34 +277,36 @@ try {
   await openRowAction(page, rows().first());
   await expect(page.getByLabel("转发字段名称", { exact: true })).toHaveCount(0);
   await expect(page.getByLabel("启用", { exact: true })).toHaveCount(0);
-  await page.getByLabel("UPP偏移地址", { exact: true }).fill("18");
+  for (const label of ["UPP偏移地址", "UPP协议字节数"]) await expect(page.getByLabel(label, {exact:true})).toHaveCount(0);
+  await page.getByLabel("读写属性", {exact:true}).selectOption("RW");
   await page.getByRole("button", { name: "检查关联影响", exact: true }).click();
   await expect(page.locator("dialog")).toContainText("关联检查通过");
-  assert.equal(requests.at(-1).body.values.address, 18);
+  assert.equal(requests.at(-1).body.values.access, "RW");
+  assert.ok(!("address" in requests.at(-1).body.values));
   for (const key of ["name", "enabled", "byte_order", "conversion"]) assert.ok(!(key in requests.at(-1).body.values));
   assert.equal(requests.at(-1).body.expected.scale, 0.001);
   await page.locator("dialog").getByRole("button", { name: "关闭", exact: true }).last().click();
   await page.getByRole("button", { name: "新建DSP UPP转发表", exact: true }).click();
   await page.getByLabel("数据名称", { exact: true }).selectOption("1");
   await expect(page.getByLabel(forwardDefinition.fields.wire_type.label, { exact: true })).toHaveValue("S32");
-  await expect(page.getByLabel("UPP协议字节数", { exact: true })).toHaveValue("4");
+  await expect(page.getByLabel("UPP协议字节数", { exact: true })).toHaveCount(0);
   await expect(page.getByLabel("协议系数", { exact: true })).toHaveValue("0.001");
   await page.getByLabel("数据名称", { exact: true }).selectOption("2");
   await expect(page.getByLabel(forwardDefinition.fields.wire_type.label, { exact: true })).toHaveValue("U16");
-  await expect(page.getByLabel("UPP协议字节数", { exact: true })).toHaveValue("2");
+  await expect(page.getByLabel("UPP协议字节数", { exact: true })).toHaveCount(0);
   await page.getByLabel(forwardDefinition.fields.wire_type.label, { exact: true }).selectOption("F32");
   await page.getByLabel("数据名称", { exact: true }).selectOption("1");
   await expect(page.getByLabel(forwardDefinition.fields.wire_type.label, { exact: true })).toHaveValue("F32");
-  await expect(page.getByLabel("UPP协议字节数", { exact: true })).toHaveValue("2");
-  await page.getByLabel("UPP协议字节数", { exact: true }).fill("4");
+  await expect(page.getByLabel("UPP协议字节数", { exact: true })).toHaveCount(0);
+
   for (const label of ["数据转换", "字节序"]) await expect(page.getByLabel(label, { exact: true })).toHaveCount(0);
   await page.getByLabel("协议系数", { exact: true }).fill("1");
   await page.getByRole("button", { name: "检查关联影响", exact: true }).click();
   await expect(page.locator("dialog")).toContainText("关联检查通过");
   await expect(page.locator("dialog .point-communication-warnings")).toContainText("当前 F32 偏离建议 S32");
   const overrideCreate = requests.at(-1).body.values;
-  assert.deepEqual(Object.fromEntries(["wire_type", "wire_length", "scale"].map(key => [key, overrideCreate[key]])), {
-    wire_type: "F32", wire_length: 4, scale: 1,
+  assert.deepEqual(Object.fromEntries(["wire_type", "scale"].map(key => [key, overrideCreate[key]])), {
+    wire_type: "F32", scale: 1,
   });
   await page.locator("dialog").getByRole("button", { name: "应用通信建议", exact: true }).click();
   await expect(page.getByLabel(forwardDefinition.fields.wire_type.label, { exact: true })).toHaveValue("S32");
@@ -308,7 +315,7 @@ try {
   assert.equal(forwardCreate.process_point_id, 1);
   assert.equal(forwardCreate.endpoint_key, "UPP_SERVICE");
   assert.equal(forwardCreate.wire_type, "S32");
-  assert.equal(forwardCreate.wire_length, 4);
+  assert.ok(!("wire_length" in forwardCreate));
   assert.equal(forwardCreate.scale, 0.001);
   for (const key of ["upp_model", "name", "enabled", "byte_order", "conversion"]) assert.ok(!(key in forwardCreate));
   for (const key of ["endpoint_id", "context_id", "signal_id", "field_id"]) assert.ok(!(key in forwardCreate), `${key} must not be injected`);

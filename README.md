@@ -35,6 +35,7 @@ config/dc-ups/
     process.json               DSP 内部数据的列、字段及编辑规则
     collect.json               暂未启用
     transmit.json              DSP UPP 转发表的列、字段及编辑规则
+    transmit.js                UPP 协议字节数及偏移地址计算
   CSU/ UPM/ IDU_T/ IDU_R/       其他板卡定义，点表暂未启用
   sources/                     可选的首次创建来源工作簿
   project.dump                 可选的专用单项目归档
@@ -80,11 +81,11 @@ JSON 是组织配置的编辑来源。服务器文件修改后，通过网页读
 
 DSP 内部数据没有 sigID，以原 sheet 的变量名、类型及参数为定义。网页保留 `VariateName` 的原始大小写、`DateType` 的 `Sys_` 前缀及原列顺序；`EnumTab` 是枚举说明，与变量名分开。原 A1 标题为空，界面标为「数据名称」。长度和精度为只读派生列；“数据类型”和“UPP 模型号”在内部表隐藏。
 
-数据类型仅在转发表编辑：数组建议 `STRING`；标量去掉 `Sys_` 前缀，其中 `F32` 建议 `S32`。新增转发自动提供类型、长度和比例的建议；偏离建议会提示，仍须通过转换校验。已有类型、长度和比例保留，需主动应用建议才会替换。数据转换自动确定：同类型直接映射，`F32 → S32` 按协议系数缩放，数组到 `STRING` 按字节映射。DSP 不提供“数据转换”和“字节序”配置入口；UPM 配置留待后续。
+数据类型仅在转发表编辑：数组建议 `STRING`；标量去掉 `Sys_` 前缀，其中 `F32` 建议 `S32`。新增转发自动提供类型、长度和比例的建议；偏离建议会提示，仍须通过转换校验。已有通信类型和比例保留，需主动应用建议才会替换；协议字节数由整表脚本计算。数据转换自动确定：同类型直接映射，`F32 → S32` 按协议系数缩放，数组到 `STRING` 按字节映射。DSP 不提供“数据转换”和“字节序”配置入口；UPM 配置留待后续。
 
-转发表按数据分类筛选，型号在后台固定推导：系统参数1→1、系统参数2→2、任务级观测量→99、中断级观测量→100、控制参数设置→102、任务级标定量→103。修改内部分类会同步所有关联转发，检查权限和目标分类的地址冲突后原子保存；不自动重排偏移。
+转发表按数据分类筛选，型号在后台固定推导：系统参数1→1、系统参数2→2、任务级观测量→99、中断级观测量→100、控制参数设置→102、任务级标定量→103。修改内部分类会同步所有关联转发，检查权限和目标分类的地址冲突后原子保存；脚本重算受影响的偏移，预览后确认。
 
-转发表的“数据名称”和 `VariateName` 直接引用内部点；数据分类后显示只读“UPP模型号”。“UPP偏移地址”保存显式偏移，“UPP协议字节数”显示实际通信长度。取消独立转发名称及启用开关，所有存在的 DSP 映射参与协议生成和地址冲突校验，不需要时删除映射，历史仍保留。
+转发表的“数据名称”和 `VariateName` 直接引用内部点；数据分类后显示只读“UPP模型号”。“UPP偏移地址”和“UPP协议字节数”显示脚本计算后保存的实际通信布局。取消独立转发名称及启用开关，所有存在的 DSP 映射参与协议生成和地址冲突校验，不需要时删除映射，历史仍保留。
 
 同一个内部点可对应多条转发，通过固定 `process_point_id` 关联。修改变量名不改变引用；系统 ID、来源和兼容字段保留在后台。每块板卡的显示及通讯规则独立配置，本次不创建 UPM 采集点。
 
@@ -96,7 +97,7 @@ DSP 内部数据没有 sigID，以原 sheet 的变量名、类型及参数为定
 
 ## 配置与迁移项目
 
-每个板卡目录包含 `process.json`、`collect.json`、`transmit.json`。字段包括 `version: 1`、`enabled`、`label`、`description`、`columns`、`editor`、`ordering`、`inline`、`fields`。隐藏表格不会删除数据或改变权限；新增存储字段仍需后端实现。项目文件中转发表标识为 `transmit`，API 使用 `forward`。
+每个板卡目录包含 `process.json`、`collect.json`、`transmit.json`。字段包括 `version: 1`、`enabled`、`label`、`description`、`columns`、`editor`、`ordering`、`inline`、`fields`，转发表可增加 `calculation`。隐藏表格不会删除数据或改变权限；新增存储字段仍需后端实现。项目文件中转发表标识为 `transmit`，API 使用 `forward`。
 
 导出可移植项目文件夹：
 
@@ -130,6 +131,7 @@ node tests/point-grid-selection.mjs
 node frontend/native-points-check.mjs
 node frontend/browser-check.mjs
 node --test scripts/excel-batch/workbook.test.mjs
+cargo build                        # 更新接口测试使用的后端可执行文件
 node tests/integration.mjs
 node tests/migration.mjs
 ```
@@ -137,3 +139,9 @@ node tests/migration.mjs
 集成与迁移检查创建并清理独立临时数据库，支持 `TEST_MIGRATION_DATABASE_URL` / `TEST_DATABASE_URL`，未提供时读取 `.env`。需要本地 `pg`、运行角色及匹配的 `pg_dump` / `pg_restore`。浏览器测试需要 Playwright Chromium 和系统库。`node tests/local-db.mjs` 验证本地数据库工具，不操作现有业务库。
 
 后端在 `src/`，前端在 `frontend/src/`，迁移在 `migrations/`，运维脚本在 `scripts/`。外部 PostgreSQL 建议使用 18；迁移管理员与 `protocol_app` 运行角色必须分开，运行角色不得拥有超级用户或 `BYPASSRLS` 权限。部署参数、完整备份及 Docker 说明见 [运维文档](docs/operations.md)。
+
+### DSP 协议计算脚本
+
+`config/dc-ups/DSP/transmit.json` 的 `calculation.script_file` 指向独立的 `transmit.js`：一张表一个 JavaScript 脚本，默认导出 `calculate(points, parameters)`，读取整表快照并返回每条记录的 `id`、`wire_length`、`address`。默认规则复现 Excel 的 445 条转发：按模型、上传等级和稳定来源顺序排列，普通偏移从 6 累加，六个名称保留固定地址。界面拖动仅改显示顺序。
+
+修改内部长度、分类、上传等级或转发引用后，保存预览会包含全部联动结果。修改 JS 脚本或 JSON 参数后，在转发表点击“重算协议布局”，预览并保存；读取配置不会改写数据库。布局与当前脚本不一致时阻止生成和发布。无需数据库迁移，UPM 后续单独配置。脚本接口、TS 编写方式及执行限制见 [点表计算](docs/table-calculation.md)。

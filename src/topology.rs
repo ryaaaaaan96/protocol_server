@@ -53,6 +53,8 @@ pub async fn read(State(s): State<AppState>, u: User, Path(pid): Path<i64>) -> R
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Change {
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub calculation_rule: Value,
     pub revision: i32,
     pub entity: String,
     pub operation: String,
@@ -188,6 +190,7 @@ pub async fn preview(
         access.require_all()?;
     }
     let before_report = crate::topology_validation::validate(&before);
+    c.calculation_rule = calculation_rule(&s, &mut tx, pid, &c).await?;
     // SQLx manages the savepoint and rolls it back on early return/drop.
     let mut proposed = tx.begin().await?;
     let applied = apply_change(&s, &mut proposed, pid, &c).await;
@@ -336,7 +339,7 @@ pub async fn commit(
         &mut tx, u.id, Some(pid), &format!("topology.{}", c.operation),
         &format!("{}:{}", c.entity, row["id"]),
         Some(json!({"record":before_record,"revision":revision})),
-        Some(json!({"record":if c.operation == "delete" {Value::Null} else {row.clone()},"impact":effects,"merged":merged,"base_revision":c.revision})),
+        Some(json!({"record":if c.operation == "delete" {Value::Null} else {row.clone()},"impact":effects,"merged":merged,"base_revision":c.revision,"calculation_rule":c.calculation_rule})),
     ).await?;
     crate::dsp_points::history(
         &mut tx,
@@ -361,6 +364,28 @@ pub async fn commit(
 }
 
 async fn apply_change(s: &AppState, tx: &mut PgConnection, pid: i64, c: &Change) -> Result<Value> {
+    let rule = calculation_rule(s, tx, pid, c).await?;
+    crate::table_calculation::guard(&c.calculation_rule, &rule)?;
+    if !rule.is_null() && c.operation != "delete" {
+        let supplied = if c.entity == "point_batch" {
+            c.values["rows"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|row| &row["values"])
+                .collect::<Vec<_>>()
+        } else {
+            vec![&c.values["fields"]]
+        };
+        if supplied
+            .iter()
+            .any(|fields| fields.get("address").is_some() || fields.get("wire_length").is_some())
+        {
+            return Err(AppError::bad(
+                "UPP偏移地址和协议字节数由本表脚本自动计算，不能手动提交",
+            ));
+        }
+    }
     if c.entity == "project_config" {
         let key: Option<String> =
             sqlx::query_scalar("SELECT config_key FROM meta.project_state WHERE id=$1")
@@ -382,13 +407,54 @@ async fn apply_change(s: &AppState, tx: &mut PgConnection, pid: i64, c: &Change)
             }
         }
     }
-    if c.entity == "point_batch" {
-        crate::point_batch::apply(tx, pid, c).await
+    let mut record = if c.entity == "point_calculation" {
+        if c.operation != "recalculate" || rule.is_null() {
+            return Err(AppError::bad("此表没有配置计算脚本"));
+        }
+        json!({"board_key":c.values["board_key"],"kind":"forward"})
+    } else if c.entity == "point_batch" {
+        crate::point_batch::apply(tx, pid, c).await?
     } else if c.entity == "point_order" {
-        crate::point_order::apply(tx, pid, c, &s.project_files).await
+        crate::point_order::apply(tx, pid, c, &s.project_files).await?
     } else {
-        apply(tx, pid, c).await
+        apply(tx, pid, c).await?
+    };
+    if !rule.is_null() {
+        let board = strv(&c.values, "board_key");
+        crate::table_calculation::apply(tx, pid, board, &rule).await?;
+        let graph = snapshot(tx, pid, true).await?;
+        if c.entity == "point_batch" {
+            let entity = crate::point_tables::entity(strv(&c.values, "kind"))?;
+            for row in record["rows"].as_array_mut().into_iter().flatten() {
+                if let Some(current) = find(&graph, entity, num(&row["record"], "id")) {
+                    row["record"] = current.clone();
+                }
+            }
+        } else if c.operation != "delete" {
+            if let Some(current) = find(&graph, &c.entity, num(&record, "id")) {
+                record = current.clone();
+            }
+        }
     }
+    Ok(record)
+}
+
+async fn calculation_rule(
+    s: &AppState,
+    tx: &mut PgConnection,
+    pid: i64,
+    c: &Change,
+) -> Result<Value> {
+    if crate::point_tables::is_point_entity(&c.entity)
+        || c.entity == "point_batch"
+        || c.entity == "point_calculation"
+    {
+        let board = c.values["board_key"]
+            .as_str()
+            .ok_or(AppError::bad("缺少板卡标识"))?;
+        return crate::table_calculation::configuration(tx, pid, &s.project_files, board).await;
+    }
+    Ok(Value::Null)
 }
 
 #[cfg(test)]

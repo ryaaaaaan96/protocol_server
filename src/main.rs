@@ -19,6 +19,7 @@ mod project_dump;
 mod project_files;
 mod project_folders;
 mod sql_workspace;
+mod table_calculation;
 mod topology;
 mod topology_codegen;
 mod topology_validation;

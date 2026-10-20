@@ -2,7 +2,7 @@
   "version": 1,
   "enabled": true,
   "label": "DSP UPP转发表",
-  "description": "按 DSP 内部数据的名称和分类展示 UPP 转发；模型号由分类固定推导，所有记录参与转发。数据类型按 DateType 和 ArrayCnt 给出建议，可按通信协议调整；转换方式自动确定，提交前校验类型、长度、系数及地址。",
+  "description": "按 DSP 内部数据的名称和分类展示 UPP 转发；模型号固定推导。calculation 脚本参考 Excel 计算协议字节数和偏移地址，保存前预览全部联动影响并校验。",
   "columns": [
     "signal_name",
     "variable_name",
@@ -17,9 +17,7 @@
   "editor": [
     "process_point_id",
     "endpoint_key",
-    "address",
     "wire_type",
-    "wire_length",
     "scale",
     "access"
   ],
@@ -34,9 +32,7 @@
     "scale": "scale",
     "access": "access",
     "signal_name": "process_point_id",
-    "effective_address": "address",
-    "effective_type": "wire_type",
-    "effective_length": "wire_length"
+    "effective_type": "wire_type"
   },
   "fields": {
     "signal_name": {
@@ -60,7 +56,7 @@
       "label": "UPP偏移地址",
       "type": "number",
       "default": 6,
-      "hint": "UPP 帧头占 6 字节。拖动仅调整显示顺序，不会重算偏移。"
+      "hint": "由本表 calculation 脚本统一计算；界面拖动不改变协议顺序。"
     },
     "effective_type": {
       "label": "数据类型"
@@ -84,7 +80,7 @@
     "wire_length": {
       "label": "UPP协议字节数",
       "type": "number",
-      "hint": "当前转发字段在 UPP 协议中的实际字节数；与内部存储字节数分别配置并校验。"
+      "hint": "由本表 calculation 脚本按通信类型和内部总长度计算。"
     },
     "scale": {
       "label": "协议系数",
@@ -125,5 +121,28 @@
       "label": "UPP模型号",
       "hint": "由关联内部点的数据分类固定推导，不可单独编辑。"
     }
+  },
+  "calculation": {
+    "engine": "javascript",
+    "parameters": {
+      "header_bytes": 6,
+      "type_bytes": {
+        "U8": 1,
+        "U16": 2,
+        "S16": 2,
+        "U32": 4,
+        "S32": 4,
+        "F32": 4
+      },
+      "fixed_offsets": {
+        "固件版本号版本": 48,
+        "机器型号": 8,
+        "机器版本号": 24,
+        "序列号": 62,
+        "机器型号编码": 94,
+        "设备类型编码": 96
+      }
+    },
+    "script_file": "transmit.js"
   }
 }

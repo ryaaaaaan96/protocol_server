@@ -5,15 +5,15 @@ export const columns = {
   // This offline example follows the DSP internal worksheet. Other boards may
   // define a different set of editable fields in their own process.json.
   process: ["name", "variable_name", "sheet_type", "enum_table", "display_digits", "element_count", "default_value", "max_value", "min_value", "unit", "access", "ram", "flash", "eeprom", "calibration", "structure", "cpu", "upload_level", "category", "notes"],
-  forward: ["process_point_id", "endpoint_key", "address", "wire_type", "wire_length", "scale", "access"],
+  forward: ["process_point_id", "endpoint_key", "wire_type", "scale", "access"],
 };
 const legacyProcessColumns = ["group_key", "enum_name", "sig_id", "internal_type", "flags", "callback", "process_enabled", "boot_restore", "manual_restore"];
-const legacyForwardColumns = ["name", "enabled", "upp_model", "byte_order", "conversion"];
+const legacyForwardColumns = ["name", "enabled", "upp_model", "byte_order", "conversion", "address", "wire_length"];
 const numbers = new Set(["sig_id", "display_digits", "element_count", "process_point_id", "upp_model", "address", "wire_length", "byte_order"]);
 const booleans = new Set(["process_enabled", "boot_restore", "manual_restore", "enabled"]);
 const required = {
   process: [["name"], ["variable_name", "enum_name"], ["sheet_type", "internal_type"]],
-  forward: ["process_point_id", "endpoint_key", "address"].map(key => [key]),
+  forward: ["process_point_id", "endpoint_key"].map(key => [key]),
 };
 const dspChoices = {
   sheet_type: ["Sys_U8", "Sys_U16", "Sys_S16", "Sys_U32", "Sys_S32", "Sys_F32"],
@@ -38,9 +38,9 @@ const descriptions = {
   max_value: "数值上限；STRING 不填写", boot_restore: "上电恢复；默认 false",
   manual_restore: "手动恢复；默认 false", process_point_id: "当前板卡已有内部点 ID（必填）",
   endpoint_key: "project.json 中的 UPP 端点代码，例如 UPP_SERVICE（必填）",
-  upp_model: "兼容旧模板；DSP 型号由内部点的数据分类固定推导，填写不同值将拒绝", address: "UPP偏移地址（必填，单位字节）",
+  upp_model: "兼容旧模板；DSP 型号由内部点的数据分类固定推导，填写不同值将拒绝", address: "兼容无计算脚本的表；DSP 默认由脚本计算，请勿填写",
   wire_type: "数据类型 U8/U16/S16/U32/S32/F32/STRING；留空采用内部 DateType / ArrayCnt 推导建议，偏离建议时提示",
-  wire_length: "UPP协议字节数；留空按所选类型计算", scale: "比例系数，支持小数；留空按转换方式及内部显示精度建议",
+  wire_length: "兼容无计算脚本的表；DSP 默认由脚本计算，请勿填写", scale: "比例系数，支持小数；留空按转换方式及内部显示精度建议",
   access: "访问属性 RO/WO/RW，默认 RO", byte_order: "兼容旧模板；DSP 不单独配置字节序，规范为 0",
   conversion: "兼容旧模板；DSP 按内部类型与通信类型自动推导", enabled: "兼容旧模板；DSP 转发记录全部参与协议，不能填写 false",
   ram: "RAM：Y/N，默认 N", flash: "FLASH：Y/N，默认 Y",
@@ -174,7 +174,7 @@ export async function writeTemplate(file, kind) {
   if (kind === "forward") {
     help.addRow(["数据名称", "由关联内部点统一提供，无需另填转发字段名称；所有转发记录参与协议，不提供单独启用开关。"]);
     help.addRow(["分类", "UPP 模型号由关联内部点的数据分类固定推导，无需填写。请先为内部点选择有效分类。"]);
-    help.addRow(["建议配置", "wire_type/wire_length/scale 可留空，由服务端成套建议。数据转换由内部与通信类型自动推导，DSP 不单独配置字节序。手工类型偏离建议会提示，仍须通过类型、长度及地址校验。"]);
+    help.addRow(["建议配置", "wire_type/scale 可留空，由服务端建议；协议字节数和偏移由本表脚本自动计算。数据转换由内部与通信类型自动推导，DSP 不单独配置字节序。手工类型偏离建议会提示，仍须通过类型、长度及地址校验。"]);
   }
   help.addRow(["规则", "第 1 行保留英文字段名，第 2 行开始填数据；仅处理指定工作表，每批最多 200 行。"]);
   help.addRow(["空值", "空单元格省略，采用字段默认值。代码和 ID 请用 --references 查询，不能跨项目复用。"]);

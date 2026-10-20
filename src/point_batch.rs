@@ -59,6 +59,7 @@ pub async fn preview(
         u,
         Path(pid),
         Json(Change {
+            calculation_rule: Value::Null,
             revision: request.revision,
             entity: "point_batch".into(),
             operation: request.operation,
@@ -203,6 +204,7 @@ pub async fn apply(tx: &mut PgConnection, pid: i64, c: &Change) -> Result<Value>
             &mut proposed,
             pid,
             &Change {
+                calculation_rule: Value::Null,
                 revision: c.revision,
                 entity: point_tables::entity(&batch.kind)?.into(),
                 operation: c.operation.clone(),
@@ -440,6 +442,7 @@ mod tests {
     #[test]
     fn dependencies_follow_json_board_and_referenced_process_point() {
         let change = Change {
+            calculation_rule: Value::Null,
             revision: 1,
             entity: "point_batch".into(),
             operation: "create".into(),

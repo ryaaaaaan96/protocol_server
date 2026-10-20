@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { checkDspPoints } from "./dsp-points.mjs";
+import { checkTableCalculation } from "./table-calculation.mjs";
 import { checkDspTransmitRules } from "./dsp-transmit-rules.mjs";
 import { checkProjectFolders } from "./project-folders.mjs";
 import { checkExcelBatch } from "./excel-batch.mjs";
@@ -29,7 +30,7 @@ migration.pathname=`/${dbname}`;appUrl.pathname=`/${dbname}`;
 const password=crypto.randomBytes(20).toString("hex");
 const projectConfigs=fs.mkdtempSync(path.join(root,".runtime/test-project-configs-"));
 const fixtureSource=path.join(root,"config/dc-ups");
-for(const [baseKey,workbook] of [["dsp_native",true],["dsp_native_other",false],["dsp_rules",false],["cli",false],["excel",false],["broken",true]]){
+for(const [baseKey,workbook] of [["dsp_native",true],["dsp_native_other",false],["dsp_rules",false],["dsp_calculation",false],["cli",false],["excel",false],["broken",true]]){
   const key=fixtureKey(baseKey);
   const directory=path.join(projectConfigs,key);fs.cpSync(fixtureSource,directory,{recursive:true});
   const manifest=JSON.parse(fs.readFileSync(path.join(directory,"project.json"),"utf8"));
@@ -37,6 +38,17 @@ for(const [baseKey,workbook] of [["dsp_native",true],["dsp_native_other",false],
   if(!workbook)manifest.workbook=null;
   if(baseKey==="broken") { manifest.workbook="sources/invalid.xlsx"; fs.writeFileSync(path.join(directory,manifest.workbook),"not an xlsx file"); }
   fs.writeFileSync(path.join(directory,"project.json"),JSON.stringify(manifest));
+  // Retain the explicit-address regression fixtures; the dedicated fixture
+  // and Excel uploader exercise the new scripted default.
+  if (!["dsp_calculation", "excel"].includes(baseKey)) {
+    const filename = path.join(directory, "DSP/transmit.json");
+    const definition = JSON.parse(fs.readFileSync(filename,"utf8"));
+    delete definition.calculation;
+    definition.editor.push("address", "wire_length");
+    Object.assign(definition.inline, {effective_address:"address", effective_length:"wire_length"});
+    fs.writeFileSync(filename, JSON.stringify(definition));
+  }
+
 }
 const testEnv={...process.env,...env,MIGRATION_DATABASE_URL:migration.toString(),DATABASE_URL:appUrl.toString(),
   ADMIN_PASSWORD:password,ADMIN_USERNAME:"test_admin",BIND_ADDR:"127.0.0.1:18081",RUST_LOG:"warn",PROJECT_CONFIG_DIR:projectConfigs};
@@ -143,8 +155,10 @@ async function runIntegration(){
   for(let attempt=0;attempt<10;attempt++) equal((await unknown.raw("/auth/login","POST",{username:"nonexistent",password})).status,401);
   equal((await unknown.raw("/auth/login","POST",{username:"nonexistent",password})).status,429);
   equal((await e.raw("/projects","POST",{config_key:fixtureKey("dsp_native")})).status,403);
+  if (process.argv.includes("--calculation")) { await checkTableCalculation({client,engineer:e,engineerId:engineer.id,equal,ok,fixtureKey,projectConfigs}); console.log(`PASS: ${assertions} assertions`); return; }
   if (!process.argv.some(arg=>["--folders","--excel","--databases"].includes(arg))) await checkDspPoints({client,engineer:e,viewer:v,engineerId:engineer.id,viewerId:viewer.id,equal,ok,
     migrationUrl:migration.toString(),appUrl:appUrl.toString(),testEnv,projectConfigs,fixtureKey});
+  if (!process.argv.some(arg=>["--folders","--excel","--databases"].includes(arg))) await checkTableCalculation({client,engineer:e,engineerId:engineer.id,equal,ok,fixtureKey,projectConfigs});
   if (!process.argv.some(arg=>["--folders","--excel","--databases"].includes(arg))) await checkDspTransmitRules({client,engineer:e,engineerId:engineer.id,equal,ok,fixtureKey});
   if (!process.argv.some(arg=>["--excel","--databases"].includes(arg))) await checkProjectFolders({client,engineer:e,viewer:v,engineerId:engineer.id,viewerId:viewer.id,password,
     makeClient:()=>new Client(),projectConfigs,fixtureSource,testEnv,equal,ok,fixtureKey});

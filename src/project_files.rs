@@ -379,9 +379,11 @@ fn load_table_directory(project_path: &Path, manifest: &Manifest) -> Result<Valu
             ];
             // All nine business/metadata properties are explicit; no global defaults are read.
             ensure!(
-                object.keys().all(|key| REQUIRED.contains(&key.as_str()))
+                object
+                    .keys()
+                    .all(|key| REQUIRED.contains(&key.as_str()) || key == "calculation")
                     && REQUIRED.iter().all(|key| object.contains_key(*key)),
-                "{}: 表格须完整包含 version、enabled、label、description、columns、editor、ordering、inline、fields，且不能包含其他属性",
+                "{}: 表格须完整包含 version、enabled、label、description、columns、editor、ordering、inline、fields，可选 calculation，不支持其他属性",
                 path.display()
             );
             ensure!(
@@ -393,6 +395,40 @@ fn load_table_directory(project_path: &Path, manifest: &Manifest) -> Result<Valu
                 .remove("enabled")
                 .and_then(|value| value.as_bool())
                 .with_context(|| format!("{}: enabled 必须为布尔值", path.display()))?;
+            if let Some(calculation) = object.get_mut("calculation") {
+                let rule = calculation
+                    .as_object_mut()
+                    .with_context(|| format!("{}: calculation 必须为对象", path.display()))?;
+                ensure!(
+                    rule.len() == 3
+                        && ["engine", "parameters", "script_file"]
+                            .iter()
+                            .all(|key| rule.contains_key(*key)),
+                    "{}: calculation 只支持 engine、parameters、script_file",
+                    path.display()
+                );
+                let reference = rule["script_file"]
+                    .as_str()
+                    .context("script_file 必须为字符串")?;
+                ensure!(
+                    !reference.contains('\\')
+                        && Path::new(reference)
+                            .extension()
+                            .and_then(|ext| ext.to_str())
+                            == Some("js"),
+                    "{}: script_file 必须指向板卡目录内的 .js 文件",
+                    path.display()
+                );
+                let script_path =
+                    project_relative_path(board_path, reference, "script_file", false)?;
+                let mut script = String::new();
+                std::fs::File::open(&script_path)?
+                    .take(32_769)
+                    .read_to_string(&mut script)
+                    .with_context(|| format!("读取脚本 {}", script_path.display()))?;
+                // Capture source, not just its path: previews must detect file-only edits.
+                rule.insert("script".into(), json!(script));
+            }
             point_tables::validate_table_file(kind, &value)
                 .map_err(|error| anyhow!("{}: {}", path.display(), error.1))?;
             enable_table(&mut tables, kind, enabled);
@@ -1139,6 +1175,81 @@ mod tests {
         value.as_object_mut().unwrap().remove("ordering");
         fixture.write("alpha/DSP/process.json", &value);
         assert!(fixture.error().contains("完整包含"));
+    }
+
+    #[test]
+    fn table_scripts_reload_source_and_reject_invalid_references() {
+        let fixture = Fixture::new();
+        fixture.project("alpha", "甲项目");
+        let mut table = fixture.read("alpha/DSP/transmit.json");
+        table["calculation"] = json!({
+            "engine":"javascript","script_file":"transmit.js","parameters":{}
+        });
+        fixture.write("alpha/DSP/transmit.json", &table);
+        let script_path = fixture.0.join("alpha/DSP/transmit.js");
+        assert!(fixture.error().contains("transmit.js")); // Missing asset.
+        std::fs::write(
+            &script_path,
+            "export default function calculate() { return []; }",
+        )
+        .unwrap();
+        let files = fixture.load().unwrap();
+        let before = files.definition(Some("alpha")).unwrap();
+        std::fs::write(
+            &script_path,
+            "export default function calculate() { return []; }\n// v2",
+        )
+        .unwrap();
+        let after = files.definition(Some("alpha")).unwrap();
+        assert_ne!(
+            before["boards"]["DSP"]["forward"]["calculation"]["script"],
+            after["boards"]["DSP"]["forward"]["calculation"]["script"]
+        );
+
+        for reference in [
+            "../outside.js",
+            "/tmp/outside.js",
+            "bad\\path.js",
+            "transmit.ts",
+            "",
+        ] {
+            table["calculation"]["script_file"] = json!(reference);
+            fixture.write("alpha/DSP/transmit.json", &table);
+            assert!(fixture.error().contains("script_file"), "{reference}");
+        }
+        table["calculation"]["script_file"] = json!("transmit.js");
+        table["calculation"]["script"] = json!("inline is not allowed");
+        fixture.write("alpha/DSP/transmit.json", &table);
+        assert!(fixture.error().contains("只支持"));
+        table["calculation"]
+            .as_object_mut()
+            .unwrap()
+            .remove("script");
+        fixture.write("alpha/DSP/transmit.json", &table);
+        for script in ["export default function {", &" ".repeat(32_769)] {
+            std::fs::write(&script_path, script).unwrap();
+            assert!(fixture.error().contains("点表计算失败"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn table_script_symlink_cannot_read_another_board_or_project() {
+        let fixture = Fixture::new();
+        fixture.project("alpha", "甲项目");
+        fixture.project("beta", "乙项目");
+        let mut table = fixture.read("alpha/DSP/transmit.json");
+        table["calculation"] =
+            json!({"engine":"javascript","script_file":"transmit.js","parameters":{}});
+        fixture.write("alpha/DSP/transmit.json", &table);
+        let target = fixture.0.join("beta/DSP/transmit.js");
+        std::fs::write(
+            &target,
+            "export default function calculate() { return []; }",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(target, fixture.0.join("alpha/DSP/transmit.js")).unwrap();
+        assert!(fixture.error().contains("不能越出"));
     }
 
     #[test]

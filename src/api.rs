@@ -114,9 +114,12 @@ pub async fn validate(
         .bind(pid)
         .execute(&mut *tx)
         .await?;
-    Ok(Json(topology_validation::validate(
-        &topology::snapshot(&mut tx, pid, true).await?,
-    )))
+    let graph = topology::snapshot(&mut tx, pid, true).await?;
+    let mut report = topology_validation::validate(&graph);
+    let issues = crate::table_calculation::issues(&mut tx, pid, &s.project_files, &graph).await?;
+    report["errors"] = json!(report["errors"].as_u64().unwrap_or(0) + issues.len() as u64);
+    report["issues"].as_array_mut().unwrap().extend(issues);
+    Ok(Json(report))
 }
 pub async fn preview_import(
     State(s): State<AppState>,
@@ -259,7 +262,9 @@ pub async fn generate(
 ) -> Result<Json<Value>> {
     // PostgreSQL provides a consistent snapshot across all generation queries.
     let mut tx = db::read_snapshot_context(&s.pool, &u, pid).await?;
-    Ok(Json(codegen::generate(&mut tx, pid).await?))
+    Ok(Json(
+        codegen::generate(&mut tx, pid, &s.project_files).await?,
+    ))
 }
 pub async fn releases(
     State(s): State<AppState>,
@@ -289,7 +294,7 @@ pub async fn release(
     if input.revision != rev {
         return Err(AppError::revision_conflict(input.revision, rev));
     }
-    let generated = codegen::generate(&mut tx, pid).await?;
+    let generated = codegen::generate(&mut tx, pid, &s.project_files).await?;
     if generated["blocked"] == true {
         return Err(AppError::conflict(
             "存在阻断性校验错误，请在校验中心修复后发布",

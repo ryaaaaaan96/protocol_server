@@ -183,10 +183,29 @@ pub(crate) fn validate_table_file(kind: &str, table: &Value) -> Result<()> {
         "inline",
         "fields",
     ];
-    if object.len() != required.len() || required.iter().any(|key| !object.contains_key(*key)) {
+    if object
+        .keys()
+        .any(|key| !required.contains(&key.as_str()) && key != "calculation")
+        || required.iter().any(|key| !object.contains_key(*key))
+    {
         return Err(AppError::bad(
             "单表配置须完整包含 label、description、columns、editor、ordering、inline、fields",
         ));
+    }
+    if let Some(rule) = table.get("calculation") {
+        if kind != "forward" {
+            return Err(AppError::bad("当前仅转发表支持 calculation"));
+        }
+        crate::table_calculation::validate(rule)?;
+        if table["editor"].as_array().is_some_and(|fields| {
+            fields
+                .iter()
+                .any(|field| field == "address" || field == "wire_length")
+        }) {
+            return Err(AppError::bad(
+                "脚本计算的 address 和 wire_length 不能同时配置为编辑字段",
+            ));
+        }
     }
     let fields = table["fields"]
         .as_object()
@@ -435,8 +454,13 @@ pub async fn preview(
     Json(c): Json<PointChange>,
 ) -> Result<Json<Value>> {
     let c = Change {
+        calculation_rule: Value::Null,
         revision: c.revision,
-        entity: entity(&kind)?.into(),
+        entity: if kind == "forward" && c.operation == "recalculate" {
+            "point_calculation".into()
+        } else {
+            entity(&kind)?.into()
+        },
         operation: c.operation,
         id: c.id,
         values: json!({"board_key":board_key,"fields":c.values}),

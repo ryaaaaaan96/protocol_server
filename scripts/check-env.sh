@@ -70,10 +70,16 @@ info "操作系统：$(uname -s) / $(uname -m)；本地数据库脚本支持 Lin
 printf '\n开发与测试工具\n'
 check_tool node '前端、数据库工具与集成测试' '安装 Node.js；使用 fnm/nvm 时先在当前终端激活已安装版本。'
 check_tool npm '前端与本地数据库依赖安装' '安装或激活 Node.js 自带的 npm。'
-check_tool rustc 'Rust 编译器' '安装 Rust 工具链，需支持 Rust 2024 edition。'
+check_tool rustc 'Rust 编译器' '安装 Rust 1.87 或更新版本（QuickJS 依赖要求）。'
+if command -v rustc >/dev/null 2>&1; then
+  rust_version=$(rustc --version | awk '{print $2}')
+  if [[ "$rust_version" =~ ^([0-9]+)\.([0-9]+) ]] && (( BASH_REMATCH[1] < 1 || (BASH_REMATCH[1] == 1 && BASH_REMATCH[2] < 87) )); then
+    need "Rust $rust_version 低于最低版本 1.87" '运行 rustup update stable。'
+  fi
+fi
 check_tool cargo '后端构建与测试' '安装 Rust 工具链并使 cargo 位于 PATH。'
 check_tool python3 '工作簿导入与生成文件测试' '安装 Python 3。'
-check_tool cc 'Rust 链接' 'Ubuntu/Debian 可安装 build-essential。'
+check_tool cc 'Rust 链接及 QuickJS 引擎编译' 'Ubuntu/Debian 可安装 build-essential；macOS 可运行 xcode-select --install。'
 
 printf '\n配置与数据迁移\n'
 if [[ ! -f .env && -n "${DATABASE_URL:-}" ]]; then
@@ -109,7 +115,17 @@ for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
     for (const board of manifest.topology.board_types) {
       if (typeof board.directory !== 'string' || !board.directory) throw new Error(`板卡 ${board.code} 缺少 directory`);
       for (const table of ['process', 'collect', 'transmit']) {
-        requireFile(path.resolve(directory, board.directory, `${table}.json`), project);
+        const tableFile = path.resolve(directory, board.directory, `${table}.json`);
+        requireFile(tableFile, project);
+        const definition = JSON.parse(fs.readFileSync(tableFile, 'utf8'));
+        if (definition.calculation) {
+          const reference = definition.calculation.script_file;
+          if (typeof reference !== 'string' || path.isAbsolute(reference) || reference.includes('\\')
+              || reference.split('/').includes('..') || !reference.endsWith('.js')) {
+            throw new Error(`${tableFile}：script_file 必须指向板卡目录内的 .js 文件`);
+          }
+          requireFile(path.resolve(path.dirname(tableFile), reference), fs.realpathSync(path.dirname(tableFile)));
+        }
       }
     }
     if (manifest.workbook != null) {
@@ -126,7 +142,7 @@ for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
       if (archives.length > 1) throw new Error('存在多个 Dump，无法确定要导入的归档');
       if (archives.length) requireFile(path.join(directory, archives[0]), project);
     }
-    console.log(`[就绪] ${manifestFile}：板卡表格文件及可选来源齐全`);
+    console.log(`[就绪] ${manifestFile}：板卡表格、计算脚本及可选来源齐全`);
   } catch (error) {
     failed = true;
     console.log(`[缺少] ${manifestFile}：${error.message}`);

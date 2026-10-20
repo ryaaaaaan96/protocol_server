@@ -13,6 +13,7 @@ export type PointField = {
   multiline?: boolean;
 };
 export type PointDefinition = {
+  calculation?: { engine: "javascript"; script_file: string; script: string; parameters: Record<string, unknown> };
   label: string;
   description: string;
   columns: string[];
@@ -94,7 +95,12 @@ export function communicationHint(data: PointTableData, values: Row, row?: Row):
 
 export function communicationDiffers(data: PointTableData, values: Row, row?: Row): boolean {
   const suggestion = communicationRecommendation(data, values, row);
-  return !!suggestion && communicationFields.some(key => !Object.is(Object.hasOwn(values, key) ? values[key] : row?.[key], suggestion[key]));
+  return !!suggestion && communicationFields.filter(key => !data.definition.calculation || key !== "wire_length").some(key => !Object.is(Object.hasOwn(values, key) ? values[key] : row?.[key], suggestion[key]));
+}
+
+export function editableCommunicationRecommendation(data: PointTableData, values: Row, row?: Row): Row {
+  return Object.fromEntries(Object.entries(communicationRecommendation(data, values, row) || {})
+    .filter(([key]) => data.definition.editor.includes(key)));
 }
 
 export function dspCategory(model: unknown): string {

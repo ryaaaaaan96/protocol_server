@@ -203,6 +203,7 @@ mod tests {
     use super::*;
     fn change() -> Change {
         Change {
+            calculation_rule: Value::Null,
             revision: 1,
             entity: "process_points".into(),
             operation: "update".into(),
@@ -252,6 +253,7 @@ mod tests {
                 {"id":2,"project_id":1,"board_key":"DSP","endpoint_key":"UPP_SERVICE","upp_model":99,"process_point_id":2,"name":"second output","display_order":2}]
         });
         let c = Change {
+            calculation_rule: Value::Null,
             revision: 8,
             entity: "point_order".into(),
             operation: "reorder".into(),
