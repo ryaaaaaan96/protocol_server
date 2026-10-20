@@ -40,7 +40,7 @@ try {
     if (path === "/api/projects") return ok([project]);
     if (path.endsWith("/permissions")) return ok(permissions);
     if (path.endsWith("/overview")) return ok({ project, validation, has_configuration: true });
-    if (path.endsWith("/topology")) return ok(graph);
+    if (path.endsWith("/topology")) return ok({ ...graph, validation });
     if (path.includes("/edit-lock")) {
       if (path.endsWith("/acquire")) owned = true;
       if (path.endsWith("/release")) owned = false;
@@ -67,10 +67,14 @@ try {
     errors.push(`Unexpected ${method} ${path}`);
     return route.fulfill({ status: 500, json: { error: `Unexpected ${method} ${path}` } });
   });
+  const modules = [];
+  page.on("request", request => modules.push(request.url()));
   await page.goto("/");
   const nav = page.getByRole("navigation", { name: "项目与板卡导航" });
   await expect(page.getByLabel("当前项目").locator("option:checked")).toHaveText("DC-UPS");
   await expect(page.getByRole("group", { name: "项目板卡类型协议拓扑" })).toBeVisible();
+  assert.equal(requests.some(request => request.path.endsWith("/overview")), false, "startup must not load a second project snapshot");
+  assert.equal(modules.some(url => url.includes("/pages/TopologyWorkspace.vue")), false, "point editor must load only when opened");
   await page.getByRole("button", { name: "查看 DSP 板卡内部信息", exact: true }).click();
   await expect(page.locator(".point-table tbody tr")).toHaveCount(1);
   await expect(page.getByRole("button", { name: "新建DSP内部数据", exact: true })).toHaveCount(0);

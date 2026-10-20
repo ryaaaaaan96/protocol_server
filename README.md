@@ -20,6 +20,8 @@ node scripts/local-db.mjs start
 ./scripts/dev.sh
 ```
 
+加载优化：页面与编辑弹窗按需加载；项目首页直接使用拓扑接口返回的版本和校验结果，避免重复读取点表。Rust 服务对支持的响应启用 Gzip，带内容哈希的 `/assets/` 文件缓存一年；HTML、业务接口和错误响应保持 `no-store`。更新后重启 `./scripts/dev.sh` 即可生效，无需额外缓存服务或数据库迁移。部署时保留上一版本的哈希资源一段时间，避免已打开的页面按需加载旧文件时出现 404。
+
 更新代码涉及数据库迁移时，先停止旧 HTTP 服务、备份数据库，然后执行 `cargo run -- migrate`，再运行 `./scripts/dev.sh`。**旧单库 v15 必须先执行分库迁移，不能直接运行新版本的 migrate**，操作及回退方法见 [部署与数据库迁移](docs/operations.md)。不要删除或修改已经应用的迁移文件。
 
 本地 PostgreSQL 默认端口为 `55432`，真实持久数据在 `.runtime/pgdata/`。停止数据库使用 `node scripts/local-db.mjs stop`。`dev.sh` 不自动启动数据库、迁移或创建项目。
