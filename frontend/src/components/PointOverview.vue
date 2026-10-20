@@ -258,7 +258,7 @@ watch([head, visibleColumns], async (_, __, cleanup) => {
     </div>
     <div v-if="actionError" class="notice danger" role="alert">{{ actionError }} <button class="text-button" @click="discard() && reload++">重新载入数据</button></div>
     <div ref="root" class="table-scroll sheet-scroll point-table point-grid point-overview">
-      <table role="grid" aria-label="DSP 总体视图" :aria-readonly="!canWrite" :aria-rowcount="filtered.length + 1">
+      <table role="grid" :aria-label="`${boardKey} 总体视图`" :aria-readonly="!canWrite" :aria-rowcount="filtered.length + 1">
         <thead ref="head"><tr>
           <th class="row-number">行</th>
           <th v-for="column in visibleColumns" :key="column.key" :data-column-key="column.key"

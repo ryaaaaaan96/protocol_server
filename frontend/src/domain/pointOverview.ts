@@ -31,7 +31,7 @@ export function overviewDefinition(data: OverviewData): PointDefinition {
   const internal = data.process.definition.columns;
   const forward = data.forward.definition.columns
     .filter(key => !["signal_name", "variable_name", "category"].includes(key));
-  if (!forward.includes("endpoint_key")) forward.push("endpoint_key");
+  if (!forward.includes("endpoint_key") && !forward.includes("endpoint_name")) forward.push("endpoint_key");
   const columns = [
     ...internal.filter(key => leading.has(key)).map(key => `process:${key}`),
     // The shared name, variable and category are edited on their internal point.
@@ -39,7 +39,7 @@ export function overviewDefinition(data: OverviewData): PointDefinition {
     ...internal.filter(key => !leading.has(key)).map(key => `process:${key}`),
   ];
   return {
-    label: "DSP 总体视图", description: "", columns, editor: [], inline: {}, ordering: { mode: "disabled", group_by: [] },
+    label: `${data.process.board_key} 总体视图`, description: "", columns, editor: [], inline: {}, ordering: { mode: "disabled", group_by: [] },
     fields: Object.fromEntries(columns.map(key => {
       const { kind, column } = columnSource(key);
       return [key, data[kind].definition.fields[column] || { label: column }];

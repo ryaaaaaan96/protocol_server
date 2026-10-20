@@ -1,7 +1,7 @@
 {
   "version": 1,
   "enabled": true,
-  "label": "对外转发表",
+  "label": "转发点表",
   "description": "LOCAL 和 DSP 内部点分别映射到 Modbus 或 UPP；Modbus 按设备基址展开，同一点可对应多个对外地址。",
   "columns": [
     "signal_name",

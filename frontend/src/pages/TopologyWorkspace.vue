@@ -62,8 +62,8 @@ watch([groups, () => board.value?.code], ([available, code]) => {
 }, { immediate: true });
 const sheets = computed(() => enabled.value && schema.value
   ? configuredBoardSheets(schema.value, props.boardKey, board.value?.point_endpoints).filter(sheet => !(groups.value.find(group => group.code === groupKey.value)?.collect_enabled === false && sheet.pointKind === "collect")) : []);
-const hasOverview = computed(() => board.value?.point_rules?.sheet_layout === true &&
-  ["process", "forward"].every(kind => sheets.value.some(sheet => sheet.key === kind)));
+const hasOverview = computed(() => enabled.value &&
+  ["process", "forward"].every(kind => sheets.value.some(sheet => sheet.pointKind === kind)));
 const sheet = computed(() => sheets.value.find(item => item.key === sheetKey.value) || sheets.value[0]);
 watch([sheets, hasOverview], ([available, overview]) => {
   if (sheetKey.value === "overview" && overview) return;
@@ -154,7 +154,7 @@ function done(merged = false) {
       <PointTable v-else :key="`${boardKey}:${sheet.key}:${groupKey ?? 'all'}`" :pid="pid" :board-key="boardKey"
         :kind="sheet.pointKind" :endpoint-key="sheet.endpointKey" :label="sheet.label" :revision="graph.revision" :can-write="canWrite"
         :focus-id="pointFocus" :group-key="groupKey" :allow-forward="sheets.some(item => item.pointKind === 'forward')"
-        :forward-label="sheets.filter(item => item.pointKind === 'forward').length > 1 ? '对外转发表' : sheets.find(item => item.pointKind === 'forward')?.label"
+        :forward-label="schema.boards[boardKey]?.forward?.label"
         @done="done" @conflict="emit('conflict')" @process="openProcess" @error="emit('error', $event)" @dirty="pointDirty = $event" />
     </section>
   </template>

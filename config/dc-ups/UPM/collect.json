@@ -1,7 +1,7 @@
 {
   "version": 1,
   "enabled": true,
-  "label": "DSP UPP 采集表",
+  "label": "采集点表",
   "description": "对应 UPM-DSP采集数据。LOCAL 不建立采集记录；※ 参数保持为空。",
   "columns": [
     "signal_name",

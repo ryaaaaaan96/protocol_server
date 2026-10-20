@@ -14,7 +14,8 @@ export function configuredBoardSheets(schema: PointSchema, code: string, endpoin
     const definition = sheet && schema.boards[code]?.[sheet.pointKind];
     if (sheet?.pointKind === "forward" && endpoints.filter(endpoint => endpoint.direction !== "collect").length > 1 && definition)
       return endpoints.filter(endpoint => endpoint.direction !== "collect").map(endpoint => ({
-        ...sheet, key: `forward:${endpoint.code}`, endpointKey: endpoint.code, label: endpoint.name,
+        ...sheet, key: `forward:${endpoint.code}`, endpointKey: endpoint.code,
+        label: `${definition.label} · ${endpoints.filter(item => item.direction !== "collect" && item.protocol === endpoint.protocol).length === 1 ? endpoint.protocol : endpoint.name}`,
       }));
     return sheet && definition ? [{ ...sheet, label: board?.labels?.[key] ?? definition.label }] : [];
   });

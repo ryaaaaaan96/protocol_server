@@ -13,6 +13,7 @@ for(const [kind,file] of [["process","process"],["collect","collect"],["forward"
 const points=[
   {id:1,board_key:"UPM",group_key:"LOCAL",name:"本地电压",enum_name:"LOCAL_VOLTAGE",sig_id:101,internal_type:"U16",element_count:1,byte_length:2},
   {id:2,board_key:"UPM",group_key:"DSP",name:"DSP 电压",enum_name:"DSP_VOLTAGE",sig_id:201,internal_type:"U16",element_count:1,byte_length:2},
+  {id:3,board_key:"UPM",group_key:"DSP",name:"未转发测点",enum_name:"DSP_UNMAPPED",sig_id:202,internal_type:"U16",element_count:1,byte_length:2},
 ];
 const collect=[{id:1,board_key:"UPM",process_point_id:2,endpoint_key:"DSP_UPP",upp_model:99,address:6,
   wire_type:"U16",wire_length:2,scale:0.1,access:"RO",byte_order:0,acquisition_mode:"poll",poll_interval:3,set_priority:0,scan_priority:0}];
@@ -27,7 +28,8 @@ const data=kind=>({
     endpoints:board.point_endpoints.filter(e=>kind==="collect"?e.direction==="collect":e.direction!=="collect")},
   rows:(kind==="process"?points:kind==="collect"?collect:forward).map(row=>{
     const p=kind==="process"?row:points.find(p=>p.id===row.process_point_id);
-    return {...row,group_key:p.group_key,signal_name:p.name,enum_name:p.enum_name,edit_values:{...row}};
+    return {...row,group_key:p.group_key,signal_name:p.name,enum_name:p.enum_name,
+      endpoint_name:board.point_endpoints.find(e=>e.code===row.endpoint_key)?.name,edit_values:{...row}};
   }),
 });
 const errors=[],requests=[];
@@ -52,23 +54,51 @@ try {
     const req=route.request(),url=new URL(req.url());
     if(req.method()==="GET") return route.fulfill({json:url.pathname.endsWith("/schema")
       ?{boards:{UPM:definitions},workspace:{boards:{UPM:{tables:["process","collect","transmit"]}}}}
+      :url.pathname.endsWith("/overview")?{revision:1,process:data("process"),forward:data("forward")}
       :data(url.pathname.split("/").at(-1))});
     requests.push({path:url.pathname,body:req.postDataJSON()});
     return route.fulfill({json:{id:1,allowed:true,errors:[],impact:{count:1,changes:[]}}});
   });
   await page.goto("/__upm_test");
-  await expect(page.getByRole("tab",{name:/UPM 内部点/})).toHaveAttribute("aria-selected","true");
-  await expect(page.getByRole("tab",{name:/DSP UPP 采集表/})).toHaveCount(0);
-  await page.getByRole("tab",{name:/Modbus 对外表/}).click();
+  await expect(page.getByRole("tab",{name:/处理点表/})).toHaveAttribute("aria-selected","true");
+  await expect(page.getByRole("tab",{name:/采集点表/})).toHaveCount(0);
+  await page.getByRole("tab",{name:"总体视图",exact:true}).click();
+  await expect(page.getByRole("grid",{name:"UPM 总体视图",exact:true})).toBeVisible();
+  const overviewRows=()=>page.locator(".point-overview tbody tr");
+  const overviewCell=(key,index=0)=>overviewRows().nth(index).locator(`[data-column-key="${key}"]`);
+  await expect(overviewRows()).toHaveCount(2); // One LOCAL point, two independent endpoints.
+  await expect(overviewCell("forward:endpoint_name",0)).toHaveText("Modbus 对外表");
+  await expect(overviewCell("forward:endpoint_name",1)).toHaveText("CSU-UPM UPP 对外表");
+  await overviewCell("process:name").dblclick();
+  await page.getByLabel("数据定义",{exact:true}).fill("共享处理点");
+  await page.getByLabel("数据定义",{exact:true}).press("Tab");
+  await expect(overviewCell("process:name",1)).toHaveText("共享处理点");
+  await overviewCell("forward:scale",1).dblclick();
+  await page.getByLabel("精度",{exact:true}).fill("0.5");
+  await page.getByLabel("精度",{exact:true}).press("Enter");
+  await expect(overviewCell("forward:scale",0)).toHaveText("0.1");
+  await expect(overviewCell("forward:scale",1)).toHaveText("0.5");
+  await page.getByRole("button",{name:"检查",exact:true}).click();
+  assert.ok(requests.at(-1).path.endsWith("/overview/batch/preview"));
+  assert.deepEqual(requests.at(-1).body.rows.map(({kind,id,values})=>({kind,id,values})),[
+    {kind:"process",id:1,values:{name:"共享处理点"}},
+    {kind:"forward",id:2,values:{scale:0.5}},
+  ]);
+  await page.getByRole("button",{name:"继续编辑",exact:true}).click();
+  await page.getByRole("tab",{name:/转发点表 · MODBUS/}).click();
   await expect(page.locator("tbody tr")).toHaveCount(1);
   await expect(page.getByRole("columnheader",{name:/Modbus 寄存器区/})).toBeVisible();
   await expect(page.getByRole("columnheader",{name:/UPP 模型号/})).toHaveCount(0);
-  await page.getByRole("tab",{name:/CSU-UPM UPP 对外表/}).click();
+  await page.getByRole("tab",{name:/转发点表 · UPP/}).click();
   await expect(page.locator("tbody tr")).toHaveCount(1);
   await expect(page.getByRole("columnheader",{name:/UPP 模型号/})).toBeVisible();
   await expect(page.getByRole("columnheader",{name:/Modbus 寄存器区/})).toHaveCount(0);
   await page.getByRole("button",{name:"DSP · DSP 设备共享模板",exact:true}).click();
-  await page.getByRole("tab",{name:/DSP UPP 采集表/}).click();
+  await page.getByRole("tab",{name:"总体视图",exact:true}).click();
+  await expect(overviewRows()).toHaveCount(2);
+  await expect(overviewCell("process:name",1)).toHaveText("未转发测点");
+  await expect(overviewCell("forward:scale",1)).toHaveText("—");
+  await page.getByRole("tab",{name:/采集点表/}).click();
   await expect(page.locator("tbody tr")).toHaveCount(1);
   await page.locator('tbody [data-column-key="poll_interval"]').dblclick();
   await page.getByLabel("编辑 UPP 轮询间隔",{exact:true}).fill("8");
@@ -77,7 +107,7 @@ try {
   assert.ok(requests.at(-1).path.endsWith("/collect/batch/preview"));
   assert.equal(requests.at(-1).body.rows[0].values.poll_interval,8);
   await page.getByRole("button",{name:"继续编辑",exact:true}).click();
-  await page.getByRole("tab",{name:/Modbus 对外表/}).click();
+  await page.getByRole("tab",{name:/转发点表 · MODBUS/}).click();
   await expect(page.locator("tbody tr")).toHaveCount(1);
   await expect(page.locator("tbody")).toContainText("DSP1: 50000；DSP8: 57000");
   await page.route("**/__upm_import",route=>route.fulfill({contentType:"text/html; charset=utf-8",body:`<!doctype html><html><head><meta charset="utf-8"></head><body><div id="test"></div><script type="module">
