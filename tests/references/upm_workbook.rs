@@ -1,3 +1,4 @@
+// Frozen regression oracle for the pre-JSON importer; never compiled into the server.
 //! UPM import keeps receiver sigIDs separate from DSP and CSU sigIDs.
 use crate::{
     error::{AppError, Result},
@@ -83,7 +84,7 @@ fn point(row: &Value, group: &str, name: &str, en: &str, typ: &str, length: i64)
     if length <= 0 || length > 65535 || length % width != 0 {
         return Err(error(row, "数据类型与长度不一致"));
     }
-    let mut value = crate::dsp_points::defaults("process");
+    let mut value = crate::native_points::defaults("process");
     value["board_key"] = json!("UPM");
     value["group_key"] = json!(group);
     value["name"] = json!(name);
@@ -99,7 +100,7 @@ fn point(row: &Value, group: &str, name: &str, en: &str, typ: &str, length: i64)
     Ok(value)
 }
 fn mapping(row: &Value, kind: &str, point: &Value, endpoint: &str) -> Value {
-    let mut value = crate::dsp_points::defaults(kind);
+    let mut value = crate::native_points::defaults(kind);
     value["board_key"] = json!("UPM");
     value["process_group"] = point["group_key"].clone();
     value["process_enum"] = point["enum_name"].clone();
@@ -390,7 +391,7 @@ mod tests {
                 );
             }
         }
-        let errors: Vec<_> = crate::dsp_points::validate(&graph)
+        let errors: Vec<_> = crate::native_points::validate(&graph)
             .into_iter()
             .filter(|i| i["level"] == "error")
             .collect();

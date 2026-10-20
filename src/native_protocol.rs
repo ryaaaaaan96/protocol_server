@@ -1,4 +1,4 @@
-//! UPM templates: LOCAL has no collector; DSP instances share one point set.
+//! Common process templates, incoming collectors and protocol address validation.
 use crate::{
     error::{AppError, Result},
     topology::{num, rows, strv},
@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 pub const COLLECT_COLUMNS: &str = "process_point_id,endpoint_key,upp_model,address,wire_type,wire_length,scale,access,byte_order,acquisition_mode,poll_interval,set_priority,scan_priority,display_order,source_sheet,source_row,metadata";
 
 pub fn collect_defaults() -> Value {
-    json!({"process_point_id":null,"endpoint_key":"DSP_UPP","upp_model":0,"address":6,
+    json!({"process_point_id":null,"endpoint_key":"","upp_model":0,"address":6,
         "wire_type":"U16","wire_length":2,"scale":1,"access":"RO","byte_order":0,
         "acquisition_mode":"poll","poll_interval":null,"set_priority":null,"scan_priority":null,
         "display_order":0,"source_sheet":"","source_row":null,"metadata":{}})
@@ -33,8 +33,8 @@ pub async fn collect_rows(tx: &mut PgConnection, pid: i64, board: &str) -> Resul
     .await?)
 }
 
-fn devices<'a>(board: &'a Value, group: &Value) -> Vec<&'a Value> {
-    board["point_groups"]
+fn devices(board: &Value, group: &Value) -> Vec<Value> {
+    let configured: Vec<Value> = board["point_groups"]
         .as_array()
         .into_iter()
         .flatten()
@@ -42,7 +42,13 @@ fn devices<'a>(board: &'a Value, group: &Value) -> Vec<&'a Value> {
         .and_then(|g| g["devices"].as_array())
         .into_iter()
         .flatten()
-        .collect()
+        .cloned()
+        .collect();
+    if configured.is_empty() {
+        vec![json!({"code":"default","dev_id":0,"modbus_base":0})]
+    } else {
+        configured
+    }
 }
 fn endpoint<'a>(board: &'a Value, row: &Value) -> Option<&'a Value> {
     board["point_endpoints"]
@@ -52,6 +58,10 @@ fn endpoint<'a>(board: &'a Value, row: &Value) -> Option<&'a Value> {
 }
 
 pub fn project_row(row: &mut Value, board: &Value, kind: &str) {
+    if kind == "forward" && crate::board_rules::inherited_name(board) {
+        row["name"] = row["signal_name"].clone();
+        row["field_name"] = row["signal_name"].clone();
+    }
     row["source_variable"] = row["metadata"]["source_variable"].clone();
     row["source_sig_id"] = row["metadata"]["source_sig_id"].clone();
     row["source_notes"] = row["metadata"]["notes"].clone();
@@ -81,37 +91,32 @@ pub fn project_row(row: &mut Value, board: &Value, kind: &str) {
 /// Keep this board's raw integer representation. `scale` is engineering
 /// precision, not a request to rewrite the wire encoding as DSP fixed-point.
 pub fn validate(g: &Value) -> Vec<Value> {
-    let unsupported: Vec<_> = rows(g, "collect_points")
+    let mut issues = vec![];
+    for board in rows(&g["project_config"], "board_types")
         .iter()
-        .filter(|r| r["board_key"] != "UPM")
-        .map(|r| {
-            json!({"key":format!("collect_points:{}:board",r["id"]),
-            "entity":"collect_points","id":r["id"],"level":"error","code":"board",
-            "message":"当前仅 UPM 板卡启用采集映射"})
-        })
-        .collect();
-    let Some(board) = g["project_config"]["board_types"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|b| b["code"] == "UPM" && b["point_storage"] == "native")
-    else {
-        return unsupported.into_iter().chain(["collect_points","transmit_points"].iter().flat_map(|table|
-                rows(g,table).iter().filter(|r|r["board_key"]=="UPM").map(move |row|
-                    json!({"key":format!("{table}:{}:board",row["id"]),"level":"error",
-                        "entity":table,"id":row["id"],"code":"board","message":"UPM 映射缺少原生板卡配置"})))).collect();
-    };
-    let mut issues = unsupported;
+        .filter(|b| b["point_storage"] == "native")
+    {
+        validate_board(g, board, &mut issues);
+    }
+    for row in rows(g, "collect_points") {
+        if crate::board_rules::board(g, strv(row, "board_key")).is_none() {
+            issues.push(json!({"key":format!("collect_points:{}:board",row["id"]),"entity":"collect_points","id":row["id"],"level":"error","code":"board","message":"采集映射缺少板卡配置"}));
+        }
+    }
+    issues
+}
+fn validate_board(g: &Value, board: &Value, issues: &mut Vec<Value>) {
+    let raw = crate::board_rules::raw(board);
     let mut add = |entity: &str, row: &Value, code: &str, message: &str, warning: bool| {
         issues.push(json!({"key":format!("{entity}:{}:{code}",row["id"]),
             "level":if warning {"warning"} else {"error"},"entity":entity,"id":row["id"],
             "name":row["name"],"code":code,"message":message}));
     };
-    for point in rows(g, "process_points")
-        .iter()
-        .filter(|p| p["board_key"] == "UPM")
-    {
-        if point["sig_id"].is_null() {
+    for point in rows(g, "process_points").iter().filter(|p| {
+        p["board_key"] == board["code"]
+            && (raw || crate::board_rules::flag(board, "warn_missing_sig_id"))
+    }) {
+        if point["sig_id"].is_null() && crate::board_rules::flag(board, "warn_missing_sig_id") {
             add(
                 "process_points",
                 point,
@@ -119,6 +124,9 @@ pub fn validate(g: &Value) -> Vec<Value> {
                 "来源未配置 sigID；保留空值，生成固件前须确认",
                 true,
             );
+        }
+        if !raw {
+            continue;
         }
         let mut inconsistent = false;
         let typ = strv(point, "internal_type");
@@ -162,15 +170,16 @@ pub fn validate(g: &Value) -> Vec<Value> {
             // cells. New edits are errors unless the complete values still match
             // the immutable import baseline.
             let source = &point["metadata"]["original_ranges"];
-            let original = [
-                "default_value",
-                "min_value",
-                "max_value",
-                "internal_type",
-                "byte_length",
-            ]
-            .iter()
-            .all(|key| source[*key] == point[*key]);
+            let original = crate::board_rules::flag(board, "source_range_warnings")
+                && [
+                    "default_value",
+                    "min_value",
+                    "max_value",
+                    "internal_type",
+                    "byte_length",
+                ]
+                .iter()
+                .all(|key| source[*key] == point[*key]);
             add(
                 "process_points",
                 point,
@@ -185,7 +194,12 @@ pub fn validate(g: &Value) -> Vec<Value> {
         ("transmit_points", "transmit"),
     ] {
         let mut occupied: BTreeMap<String, Vec<(i64, i64, i64)>> = BTreeMap::new();
-        for row in rows(g, table).iter().filter(|r| r["board_key"] == "UPM") {
+        for row in rows(g, table).iter().filter(|r| {
+            r["board_key"] == board["code"]
+                && (raw
+                    || direction == "collect"
+                    || endpoint(board, r).is_some_and(|e| e["protocol"] == "MODBUS"))
+        }) {
             let Some(ep) = endpoint(board, row).filter(|e| {
                 if direction == "collect" {
                     e["direction"] == "collect"
@@ -207,32 +221,29 @@ pub fn validate(g: &Value) -> Vec<Value> {
                     && p["board_key"] == row["board_key"]
                     && p["project_id"] == row["project_id"]
             }) else {
-                add(
-                    table,
-                    row,
-                    "reference",
-                    "必须关联当前 UPM 板卡的内部点",
-                    false,
-                );
+                add(table, row, "reference", "必须关联当前板卡的内部点", false);
                 continue;
             };
-            if direction == "collect" && point["group_key"] == "LOCAL" {
+            if direction == "collect"
+                && !crate::board_rules::can_collect(board, &point["group_key"])
+            {
                 add(
                     table,
                     row,
                     "local_collection",
-                    "LOCAL 不允许建立采集记录",
+                    "当前分组不允许建立采集记录",
                     false,
                 );
             }
-            if row["wire_type"] != point["internal_type"]
-                || row["wire_length"] != point["byte_length"]
+            if (raw || direction == "collect")
+                && (row["wire_type"] != point["internal_type"]
+                    || row["wire_length"] != point["byte_length"])
             {
                 add(
                     table,
                     row,
                     "representation",
-                    "UPM 原始存储类型和长度必须与通信映射一致",
+                    "原始存储类型和长度必须与通信映射一致",
                     false,
                 );
             }
@@ -263,12 +274,12 @@ pub fn validate(g: &Value) -> Vec<Value> {
                     add(table, row, "polling", "采集方式或轮询参数无效", false);
                 }
             }
-            if direction == "transmit" && row["conversion"] != "identity" {
+            if direction == "transmit" && raw && row["conversion"] != "identity" {
                 add(
                     table,
                     row,
                     "conversion",
-                    "UPM 使用原始值映射，转换配置须为 identity",
+                    "原始值映射的转换配置须为 identity",
                     false,
                 );
             }
@@ -294,7 +305,7 @@ pub fn validate(g: &Value) -> Vec<Value> {
             for device in instances {
                 let address = num(row, "address")
                     + if modbus {
-                        num(device, "modbus_base")
+                        num(&device, "modbus_base")
                     } else {
                         0
                     };
@@ -316,7 +327,7 @@ pub fn validate(g: &Value) -> Vec<Value> {
                     format!(
                         "{}:{}:{}",
                         strv(ep, "code"),
-                        strv(device, "code"),
+                        strv(&device, "code"),
                         num(row, "upp_model")
                     )
                 };
@@ -337,26 +348,27 @@ pub fn validate(g: &Value) -> Vec<Value> {
             }
         }
     }
-    issues
 }
 
 /// Used only by explicit workbook import; never by config reads or reloads.
 pub async fn import(
     tx: &mut PgConnection,
     pid: i64,
-    data: &crate::upm_workbook::UpmImport,
+    board_key: &str,
+    data: &crate::workbook_import::ImportData,
 ) -> Result<()> {
-    let board = crate::dsp_points::native_board(tx, pid, "UPM")
+    let board = crate::native_points::native_board(tx, pid, board_key)
         .await?
-        .ok_or(AppError::bad("请先应用 UPM 原生板卡配置"))?;
+        .ok_or(AppError::bad("请先应用板卡配置"))?;
     if data.process.is_empty() {
-        return Err(AppError::bad("UPM 工作簿没有内部点"));
+        return Err(AppError::bad("工作簿没有内部点"));
     }
     for table in ["collect_points", "transmit_points", "process_points"] {
         sqlx::query(&format!(
-            "DELETE FROM points.{table} WHERE project_id=$1 AND board_key='UPM'"
+            "DELETE FROM points.{table} WHERE project_id=$1 AND board_key=$2"
         ))
         .bind(pid)
+        .bind(board_key)
         .execute(&mut *tx)
         .await?;
     }
@@ -368,9 +380,9 @@ pub async fn import(
             .flatten()
             .any(|g| g["code"] == point["group_key"])
         {
-            return Err(AppError::bad("UPM 工作簿分组未配置"));
+            return Err(AppError::bad("工作簿分组未配置"));
         }
-        let row = crate::dsp_points::insert(tx, pid, "UPM", "process", point).await?;
+        let row = crate::native_points::insert(tx, pid, board_key, "process", point).await?;
         ids.insert(
             (
                 strv(point, "group_key").to_owned(),
@@ -387,9 +399,9 @@ pub async fn import(
                     strv(mapping, "process_group").to_owned(),
                     strv(mapping, "process_enum").to_owned(),
                 ))
-                .ok_or(AppError::bad("UPM 映射找不到内部点"))?
+                .ok_or(AppError::bad("映射找不到内部点"))?
                 .clone();
-            crate::dsp_points::insert(tx, pid, "UPM", kind, &row).await?;
+            crate::native_points::insert(tx, pid, board_key, kind, &row).await?;
         }
     }
     Ok(())
@@ -404,12 +416,12 @@ pub fn generate(g: &Value, board: &Value) -> BTreeMap<String, String> {
     ] {
         let points: Vec<_> = rows(g, table)
             .iter()
-            .filter(|r| r["board_key"] == "UPM")
+            .filter(|r| r["board_key"] == board["code"])
             .collect();
         files.insert(
-            format!("board_types/UPM/{kind}.json"),
+            format!("board_types/{}/{kind}.json", strv(board, "code")),
             serde_json::to_string_pretty(&json!({
-            "version":1,"board_key":"UPM","groups":board["point_groups"],
+            "version":1,"board_key":board["code"],"groups":board["point_groups"],
             "endpoints":board["point_endpoints"],"points":points}))
             .unwrap(),
         );
@@ -417,7 +429,7 @@ pub fn generate(g: &Value, board: &Value) -> BTreeMap<String, String> {
     let mut expanded = vec![];
     for row in rows(g, "transmit_points")
         .iter()
-        .filter(|r| r["board_key"] == "UPM" && r["enabled"] == true)
+        .filter(|r| r["board_key"] == board["code"] && r["enabled"] == true)
     {
         let Some(point) = rows(g, "process_points")
             .iter()
@@ -430,13 +442,15 @@ pub fn generate(g: &Value, board: &Value) -> BTreeMap<String, String> {
         };
         for device in devices(board, &point["group_key"]) {
             let mut item = row.clone();
-            item["name"] = point["name"].clone();
+            if crate::board_rules::inherited_name(board) {
+                item["name"] = point["name"].clone();
+            }
             item["device"] = device.clone();
             item["protocol"] = ep["protocol"].clone();
             item["address"] = json!(
                 num(row, "address")
                     + if ep["protocol"] == "MODBUS" {
-                        num(device, "modbus_base")
+                        num(&device, "modbus_base")
                     } else {
                         0
                     }
@@ -448,7 +462,10 @@ pub fn generate(g: &Value, board: &Value) -> BTreeMap<String, String> {
         }
     }
     files.insert(
-        "board_types/UPM/transmit-instances.json".into(),
+        format!(
+            "board_types/{}/transmit-instances.json",
+            strv(board, "code")
+        ),
         serde_json::to_string_pretty(&expanded).unwrap(),
     );
     files
@@ -467,7 +484,7 @@ mod tests {
         point["board_key"] = json!("UPM");
         point["sig_id"] = json!(1);
         point["metadata"] = json!({"original_ranges":original});
-        let mut graph = json!({"project_config":{"board_types":[{"code":"UPM","point_storage":"native"}]},
+        let mut graph = json!({"project_config":{"board_types":[{"code":"UPM","point_storage":"native","point_rules":{"raw_representation":true,"source_range_warnings":true}}]},
             "process_points":[point]});
         assert_eq!(validate(&graph)[0]["level"], "warning");
         graph["process_points"][0]["internal_type"] = json!("U8");

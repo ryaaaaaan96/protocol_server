@@ -22,17 +22,11 @@ const METADATA: [(&str, &str); 11] = [
     ("category", "W"),
 ];
 const TYPES: [&str; 6] = ["U8", "U16", "S16", "U32", "S32", "F32"];
-const CATEGORIES: [(&str, i64); 6] = [
-    ("系统参数1", 1),
-    ("系统参数2", 2),
-    ("任务级观测量", 99),
-    ("中断级观测量", 100),
-    ("控制参数设置", 102),
-    ("任务级标定量", 103),
-];
-
-pub fn is_dsp(board: &Value) -> bool {
-    board["code"] == "DSP" || board["model_code"] == "DSP"
+pub fn enabled(board: &Value) -> bool {
+    crate::board_rules::flag(board, "sheet_layout")
+}
+pub fn upp_model_for(board: &Value, point: &Value) -> Option<i64> {
+    board["point_rules"]["category_models"][category(point)].as_i64()
 }
 
 fn text<'a>(row: &'a Value, key: &str) -> &'a str {
@@ -49,11 +43,13 @@ pub fn category(point: &Value) -> &str {
     source(point, "category", "W").as_str().unwrap_or_default()
 }
 
+#[cfg(test)]
 pub fn upp_model(point: &Value) -> Option<i64> {
-    CATEGORIES
-        .iter()
-        .find(|(name, _)| *name == category(point))
-        .map(|(_, model)| *model)
+    upp_model_for(&test_board(), point)
+}
+#[cfg(test)]
+pub fn test_board() -> Value {
+    serde_json::from_str::<Value>(include_str!("../config/dc-ups/project.json")).unwrap()["topology"]["board_types"].as_array().unwrap().iter().find(|b|b["code"]=="DSP").unwrap().clone()
 }
 
 fn display_digits(point: &Value) -> i64 {
@@ -100,7 +96,7 @@ pub fn wire_defaults(point: &Value, selected: Option<&str>) -> Value {
         "conversion":conversion})
 }
 
-pub fn project_forward(row: &mut Value, point: &Value) {
+pub fn project_forward_for(board: &Value, row: &mut Value, point: &Value) {
     // DSP mappings inherit the live source name and always participate in UPP.
     // Keep edit_values untouched: legacy columns are still concurrency baselines.
     row["name"] = point["name"].clone();
@@ -109,7 +105,7 @@ pub fn project_forward(row: &mut Value, point: &Value) {
     row["conversion"] = wire_defaults(point, row["wire_type"].as_str())["conversion"].clone();
     row["byte_order"] = json!(0);
     let mut point = point.clone();
-    project(&mut point);
+    project_for(board, &mut point);
     for field in ["category", "variable_name", "sheet_type"] {
         row[field] = point[field].clone();
     }
@@ -120,7 +116,7 @@ pub fn project_forward(row: &mut Value, point: &Value) {
 }
 
 /// Include editable aliases in both the displayed row and its concurrency baseline.
-pub fn project(row: &mut Value) {
+pub fn project_for(board: &Value, row: &mut Value) {
     let mut fields = Map::new();
     let original = source(row, "source_variable", "B")
         .as_str()
@@ -172,7 +168,7 @@ pub fn project(row: &mut Value) {
     }
     fields.insert(
         "sheet_upp_model".into(),
-        upp_model(row).map_or(json!(""), |model| json!(model)),
+        upp_model_for(board, row).map_or(json!(""), |model| json!(model)),
     );
     if !row["edit_values"].is_object() {
         row["edit_values"] = row.clone();
@@ -191,7 +187,11 @@ fn string_field<'a>(key: &str, value: &'a Value) -> Result<&'a str> {
 }
 
 /// Resolve only whitelisted worksheet aliases. Source cells remain immutable evidence.
-pub fn normalize(fields: &Map<String, Value>, old: &Value) -> Result<Map<String, Value>> {
+pub fn normalize_for(
+    board: &Value,
+    fields: &Map<String, Value>,
+    old: &Value,
+) -> Result<Map<String, Value>> {
     if fields.contains_key("metadata") || READ_FIELDS.split(',').any(|key| fields.contains_key(key))
     {
         return Err(AppError::bad("来源元数据和派生列不能直接修改"));
@@ -244,20 +244,24 @@ pub fn normalize(fields: &Map<String, Value>, old: &Value) -> Result<Map<String,
         } else {
             let value = string_field(key, &value)?;
             let valid = value.is_empty()
-                || match key {
-                    "access" => ["RO", "RW"].contains(&value),
-                    "ram" | "flash" | "eeprom" | "calibration" => ["Y", "N"].contains(&value),
-                    "cpu" => ["CPU1", "CPU2"].contains(&value),
-                    "upload_level" => [
-                        "0：不上传",
-                        "1：上传至UPM",
-                        "2：UPM进行轮询",
-                        "3：CSU进行轮询",
-                    ]
-                    .contains(&value),
-                    "category" => CATEGORIES.iter().any(|(category, _)| *category == value),
-                    "structure" => identifier(value),
-                    _ => true,
+                || if let Some(options) = board["point_rules"]["value_options"][key].as_array() {
+                    options.iter().any(|v| v == value)
+                } else {
+                    match key {
+                        "access" => ["RO", "RW"].contains(&value),
+                        "ram" | "flash" | "eeprom" | "calibration" => ["Y", "N"].contains(&value),
+                        "cpu" => ["CPU1", "CPU2"].contains(&value),
+                        "upload_level" => [
+                            "0：不上传",
+                            "1：上传至UPM",
+                            "2：UPM进行轮询",
+                            "3：CSU进行轮询",
+                        ]
+                        .contains(&value),
+                        "category" => board["point_rules"]["category_models"].get(value).is_some(),
+                        "structure" => identifier(value),
+                        _ => true,
+                    }
                 };
             if !valid {
                 return Err(AppError::bad(format!(
@@ -274,6 +278,18 @@ pub fn normalize(fields: &Map<String, Value>, old: &Value) -> Result<Map<String,
     Ok(updates)
 }
 
+#[cfg(test)]
+fn project(row: &mut Value) {
+    project_for(&test_board(), row)
+}
+#[cfg(test)]
+fn project_forward(row: &mut Value, point: &Value) {
+    project_forward_for(&test_board(), row, point)
+}
+#[cfg(test)]
+fn normalize(fields: &Map<String, Value>, old: &Value) -> Result<Map<String, Value>> {
+    normalize_for(&test_board(), fields, old)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -405,9 +421,12 @@ mod tests {
             )
             .is_ok()
         );
-        assert!(is_dsp(&json!({"code":"DSP"})));
-        assert!(is_dsp(&json!({"code":"DSP2","model_code":"DSP"})));
-        assert!(!is_dsp(&json!({"code":"UPM"})));
+        assert!(!enabled(&json!({"code":"DSP"})));
+        assert!(enabled(
+            &json!({"code":"CUSTOM","point_rules":{"sheet_layout":true}})
+        ));
+        assert!(!enabled(&json!({"code":"DSP2","model_code":"DSP"})));
+        assert!(!enabled(&json!({"code":"UPM"})));
     }
 
     #[test]

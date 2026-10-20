@@ -140,7 +140,7 @@ try {
   fs.mkdirSync(configFolder, { recursive: true });
   fs.writeFileSync(path.join(configFolder, "project.json"), JSON.stringify({ version: 1, key: keys[1], name: "Second project", topology: config }));
   const exportEnv = { ...env, PROJECT_CONFIG_DIR: configRoot, MIGRATION_DATABASE_URL: connection(platformName) };
-  await assert.rejects(exportProject(keys[1], path.join(temporary, "before-upgrade"), exportEnv), /migrate.*v6/, "exports require the current schema rather than guessing missing schemas");
+  await assert.rejects(exportProject(keys[1], path.join(temporary, "before-upgrade"), exportEnv), /migrate.*v7/, "exports require the current schema rather than guessing missing schemas");
   const migrate = () => {
     const migrated = spawnSync(path.join(root, "target/debug/protocol-server"), ["migrate"], { cwd: root, env: { ...env, DATABASE_URL: runtimeUrl(platformName), MIGRATION_DATABASE_URL: connection(platformName) }, encoding: "utf8", timeout: 120_000 });
     assert.equal(migrated.status, 0, migrated.stderr || "SQLx rejected split-created databases");
@@ -157,19 +157,21 @@ try {
   fs.writeFileSync(incompleteJournal, JSON.stringify(incomplete), { mode: 0o600 });
   await assert.rejects(splitDatabases({ ...options, journalPath: incompleteJournal }), /未完成拆分.*已升级/, "unfinished v1 copy refuses a grouped v2 target without overwriting it");
   assert.equal((await admin.query("SELECT datconnlimit FROM pg_database WHERE datname=$1", [sourceName])).rows[0].datconnlimit, -1, "failed resume restores source connection access");
+  const migratedConfig = (await second.query("SELECT topology_config FROM meta.project_state")).rows[0].topology_config;
+  fs.writeFileSync(path.join(configFolder, "project.json"), JSON.stringify({version:1,key:keys[1],name:"Second project",topology:migratedConfig}));
   const exported = await exportProject(keys[1], path.join(temporary, "export"), { ...env, PROJECT_CONFIG_DIR: configRoot, MIGRATION_DATABASE_URL: connection(platformName) });
   assert.equal(exported.rows, 1);
-  assert.equal(exported.migrationVersion, 3);
+  assert.equal(exported.migrationVersion, 4);
   const listing = execFileSync(env.PG_RESTORE_BIN || "pg_restore", ["--list", path.join(exported.directory, "project.dump")], { env, encoding: "utf8" });
   assert.match(listing, /protocol_studio_project_dump/);
   assert.doesNotMatch(listing, /TABLE public users/);
   const firstConfig = path.join(configRoot, keys[0]);
   fs.mkdirSync(firstConfig);
-  fs.writeFileSync(path.join(firstConfig, "project.json"), JSON.stringify({ version: 1, key: keys[0], name: "First project", topology: config }));
+  fs.writeFileSync(path.join(firstConfig, "project.json"), JSON.stringify({ version: 1, key: keys[0], name: "First project", topology: migratedConfig }));
   await assert.rejects(exportProject(keys[0], path.join(temporary, "unsafe-export"), { ...env, PROJECT_CONFIG_DIR: configRoot, MIGRATION_DATABASE_URL: connection(platformName) }), /安全整数/);
-  assert.equal((await first.query("SELECT revision FROM meta.project_state")).rows[0].revision, 9);
+  assert.equal((await first.query("SELECT revision FROM meta.project_state")).rows[0].revision, 10);
   assert.equal((await first.query("SELECT count(*)::int AS n FROM history.events WHERE kind='point'")).rows[0].n, 1);
-  console.log("PASS: v15 splits through reproducible v1 into grouped platform v2/project v3; exact IDs/JSON/timestamps, permissions, locks and history survive; concurrent connections, foreign targets and backup failures are rejected; failed copy resumes safely; source retained; v6 exports and repeat SQLx migrations pass.");
+  console.log("PASS: v15 splits through reproducible v1 into grouped platform v2/project v4; exact IDs/JSON/timestamps, permissions, locks and history survive; concurrent connections, foreign targets and backup failures are rejected; failed copy resumes safely; source retained; v7 exports and repeat SQLx migrations pass.");
 } finally {
   pg.Client.prototype.query = originalQuery;
   await Promise.allSettled(opened.map(db => db.end()));

@@ -1,3 +1,4 @@
+// Frozen regression oracle for the pre-JSON importer; never compiled into the server.
 //! Import DSP definitions without treating the ARM collector's signal IDs as DSP IDs.
 //!
 //! `UPM-DSP采集数据` describes the wire contract exposed by DSP. Its cached model,
@@ -271,14 +272,14 @@ pub fn parse(rows: &[Value]) -> Result<DspImport> {
             .map(|index| &process[*index])
             .ok_or_else(|| invalid(row, format!("转发枚举 {en} 未找到对应 DSP 内部变量")))?;
         let upp_model = integer(row, "N", "UPP 模型号", 1, 65535)?;
-        let expected_model = crate::dsp_sheet::upp_model(point)
+        let expected_model = crate::sheet_layout::upp_model(point)
             .ok_or_else(|| invalid(row, format!("转发枚举 {en} 的内部点缺少有效数据分类")))?;
         if upp_model != expected_model {
             return Err(invalid(
                 row,
                 format!(
                     "UPP 模型号 {upp_model} 与内部数据分类「{}」推导的 {expected_model} 不一致",
-                    crate::dsp_sheet::category(point)
+                    crate::sheet_layout::category(point)
                 ),
             ));
         }
@@ -381,7 +382,7 @@ mod tests {
         static ROWS: OnceLock<Vec<Value>> = OnceLock::new();
         ROWS.get_or_init(|| {
             workbook_rows(
-                include_bytes!("../config/dc-ups/sources/DC-UPS测点数据表.xlsx").to_vec(),
+                include_bytes!("../../config/dc-ups/sources/DC-UPS测点数据表.xlsx").to_vec(),
                 &[PROCESS_SHEET, TRANSMIT_SHEET],
             )
             .unwrap()
@@ -637,7 +638,7 @@ mod tests {
     #[test]
     fn reads_dsp_workbook_without_the_legacy_importer() {
         let direct = parse_workbook(
-            include_bytes!("../config/dc-ups/sources/DC-UPS测点数据表.xlsx").to_vec(),
+            include_bytes!("../../config/dc-ups/sources/DC-UPS测点数据表.xlsx").to_vec(),
         )
         .unwrap();
         let from_rows = parse(&fixture()).unwrap();
@@ -646,8 +647,8 @@ mod tests {
     }
 
     #[test]
-    fn requires_only_the_two_dsp_sheets() {
-        let source = include_bytes!("../config/dc-ups/sources/DC-UPS测点数据表.xlsx");
+    fn requires_only_the_two_sheet_layouts() {
+        let source = include_bytes!("../../config/dc-ups/sources/DC-UPS测点数据表.xlsx");
         let mut archive = zip::ZipArchive::new(Cursor::new(source)).unwrap();
         let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
         for index in 0..archive.len() {

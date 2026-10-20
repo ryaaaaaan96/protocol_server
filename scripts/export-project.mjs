@@ -68,7 +68,22 @@ function comparableTopology(value) {
     }
   }
   // Directory locations affect file organization, not the persisted board graph.
-  for (const board of config?.board_types || []) delete board.directory;
+  for (const board of config?.board_types || []) {
+    delete board.directory;
+    // Match Rust's optional/default serialization without erasing explicit rules.
+    for (const key of ["point_storage", "point_rules", "workbook_import"]) if (board[key] == null) delete board[key];
+    for (const key of ["point_groups", "point_endpoints"]) if (Array.isArray(board[key]) && !board[key].length) delete board[key];
+    for (const group of board.point_groups || []) {
+      if (Array.isArray(group.devices) && !group.devices.length) delete group.devices;
+      if (group.collect_enabled == null) delete group.collect_enabled;
+    }
+    for (const endpoint of board.point_endpoints || []) if (endpoint.direction === "transmit") delete endpoint.direction;
+    const rules = board.point_rules;
+    if (rules) {
+      for (const key of ["sheet_layout", "raw_representation", "inherit_name", "source_range_warnings", "warn_missing_sig_id"]) if (rules[key] === false) delete rules[key];
+      for (const key of ["null_callbacks", "category_models", "value_options"]) if (rules[key] && !Object.keys(rules[key]).length) delete rules[key];
+    }
+  }
   function sort(item) {
     if (Array.isArray(item)) return item.map(sort);
     if (item && typeof item === "object") return Object.fromEntries(Object.keys(item).sort().map(key => [key, sort(item[key])]));
@@ -171,7 +186,7 @@ export async function exportProject(key, destination, overrides = {}) {
     await platformDb.connect();
     await platformDb.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
     const { rows: platformSchema } = await platformDb.query("SELECT to_regclass('meta.projects') IS NOT NULL AS ready");
-    if (!platformSchema[0].ready) throw new Error("请先运行 cargo run -- migrate，将平台数据库迁移到分组结构、项目数据库迁移到 v6 后导出。");
+    if (!platformSchema[0].ready) throw new Error("请先运行 cargo run -- migrate，将平台数据库迁移到分组结构、项目数据库迁移到 v7 后导出。");
     const { rows: registrations } = await platformDb.query("SELECT id,project_uid,database_name FROM meta.projects WHERE config_key=$1 AND status='ready'", [key]);
     if (registrations.length !== 1) throw new Error("平台数据库中未找到唯一的就绪项目。");
     const registry = registrations[0];
@@ -182,17 +197,17 @@ export async function exportProject(key, destination, overrides = {}) {
     await sourceDb.connect();
     await sourceDb.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
     const { rows: stateSchema } = await sourceDb.query("SELECT to_regclass('meta.project_state') IS NOT NULL AS ready");
-    if (!stateSchema[0].ready) throw new Error("请先运行 cargo run -- migrate，将项目数据库迁移到 v6 后导出。");
+    if (!stateSchema[0].ready) throw new Error("请先运行 cargo run -- migrate，将项目数据库迁移到 v7 后导出。");
     const { rows: projects } = await sourceDb.query("SELECT id,project_uid,config_key,revision,schema_version,topology_config FROM meta.project_state");
     if (projects.length !== 1 || projects[0].id !== registry.id || projects[0].project_uid !== registry.project_uid || projects[0].config_key !== key) throw new Error("项目数据库与平台登记的身份不一致。");
     const project = projects[0];
-    if (project.schema_version !== 6) throw new Error("请先迁移项目数据库到 v6。");
+    if (project.schema_version !== 7) throw new Error("请先迁移项目数据库到 v7。");
     if (comparableTopology(manifest.topology) !== comparableTopology(project.topology_config)) {
       throw new Error("服务器 project.json 与已应用的项目拓扑不同，请先在网页检查并导入配置后再导出。");
     }
     const { rows: migrations } = await sourceDb.query("SELECT max(version)::int AS version FROM public._sqlx_migrations WHERE success");
     const payload = {
-      format: "protocol-studio-project", version: 1, key, schema_version: 6,
+      format: "protocol-studio-project", version: 1, key, schema_version: 7,
       migration_version: migrations[0].version, source_revision: project.revision,
       tables: {},
     };

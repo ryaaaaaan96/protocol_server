@@ -13,7 +13,7 @@ export type PointField = {
   multiline?: boolean;
 };
 export type PointDefinition = {
-  calculation?: { engine: "javascript"; script_file: string; script: string; parameters: Record<string, unknown> };
+  calculation?: { engine: "javascript" | "builtin"; script_file?: string; script?: string; parameters: Record<string, unknown> };
   label: string;
   description: string;
   columns: string[];

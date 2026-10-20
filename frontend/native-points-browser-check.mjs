@@ -40,7 +40,7 @@ const graph = {
   revision: 1,
   project_config: { root: { type: "UPM", quantity: 1 }, mounts: [{ parent: "UPM", child: "DSP", quantity: 8, connections: [{ protocol: "UPP", transport: "CAN" }] }], board_types: [
     { code: "UPM", name: "UPM 控制板" },
-    { code: "DSP", name: "DSP 功率板", point_storage: "native", point_groups: options.native_groups, point_endpoints: options.endpoints },
+    { code: "DSP", name: "DSP 功率板", point_storage: "native", point_rules: {sheet_layout: true}, point_groups: options.native_groups, point_endpoints: options.endpoints },
   ] },
   process_points: points, transmit_points: mappings,
 };
@@ -323,12 +323,12 @@ try {
     import { createApp, h } from '/node_modules/.vite/deps/vue.js';
     import ImportModal from '/src/components/ImportModal.vue';
     import '/src/style.css';
-    createApp({ render: () => h(ImportModal, { pid: 1, canWrite: true }) }).mount('#test');
+    createApp({ render: () => h(ImportModal, { pid: 1, canWrite: true, boards: [{code:"DSP",name:"DSP 功率板"},{code:"CUSTOM",name:"自定义板卡"}] }) }).mount('#test');
   </script></body></html>` }));
   await page.route("**/api/projects/1/imports/**", async route => {
     const path = new URL(route.request().url()).pathname;
     if (path.endsWith("/preview")) return route.fulfill({ json: {
-      id: 98, import_scope: "dsp", filename: "dsp.xlsx", sha256: "a".repeat(64), point_count: 552, dsp_count: 552,
+      id: 98, board_key: "DSP", board_name: "DSP 功率板", group_counts:[{name:"内部点",count:552}], import_scope: "dsp", filename: "dsp.xlsx", sha256: "a".repeat(64), point_count: 552, dsp_count: 552,
       transmit_count: 445, warnings: [], sample: points.slice(0, 1),
     } });
     assert.equal(route.request().postDataJSON().replace, true);
@@ -342,7 +342,7 @@ try {
   await expect(page.locator(".import-counts")).not.toContainText("平台映射");
   await expect(page.locator("dialog tbody tr")).toContainText("DSP");
   await expect(page.locator("dialog tbody tr")).toContainText("F32");
-  await expect(page.locator(".confirm-checkbox")).toContainText("保留项目拓扑、UPM 及其他板卡数据");
+  await expect(page.locator(".confirm-checkbox")).toContainText("保留项目拓扑和其他板卡数据");
   const importButton = page.getByRole("button", { name: "确认导入 552 个测点", exact: true });
   await expect(importButton).toBeDisabled();
   await page.locator(".confirm-checkbox input").check();

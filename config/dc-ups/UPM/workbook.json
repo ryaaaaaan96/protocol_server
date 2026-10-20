@@ -1,0 +1,409 @@
+{
+  "version": 1,
+  "lookups": [
+    {
+      "key": "sig_ids",
+      "sheet": "平台公共测点映射表",
+      "key_column": "A",
+      "value_column": "B"
+    }
+  ],
+  "process": [
+    {
+      "sheet": "UPM单板测点",
+      "group": "LOCAL",
+      "fields": {
+        "name": {
+          "column": "B",
+          "kind": "text"
+        },
+        "default_value": {
+          "column": "D",
+          "kind": "text"
+        },
+        "max_value": {
+          "column": "E",
+          "kind": "text"
+        },
+        "min_value": {
+          "column": "F",
+          "kind": "text"
+        },
+        "unit": {
+          "column": "G",
+          "kind": "text"
+        },
+        "internal_type": {
+          "column": "I",
+          "kind": "text"
+        },
+        "notes": {
+          "column": "U",
+          "kind": "text"
+        },
+        "enum_name": {
+          "column": "Q",
+          "kind": "text",
+          "transform": "enum"
+        },
+        "byte_length": {
+          "column": "K",
+          "kind": "integer"
+        },
+        "sig_id": {
+          "column": "P",
+          "kind": "integer",
+          "lookup": "sig_ids",
+          "null_values": [
+            "",
+            "※",
+            "0"
+          ]
+        },
+        "flags": {
+          "column": "L",
+          "kind": "text",
+          "default": "0"
+        },
+        "callback": {
+          "column": "M",
+          "kind": "text",
+          "default": "NULL"
+        }
+      },
+      "metadata": {
+        "source_variable": {
+          "column": "Q",
+          "kind": "text"
+        },
+        "source_sig_id": {
+          "column": "P",
+          "kind": "text"
+        }
+      },
+      "merge_equal": true,
+      "source_range_warnings": true
+    },
+    {
+      "sheet": "UPM-DSP采集数据",
+      "group": "DSP",
+      "fields": {
+        "name": {
+          "column": "A",
+          "kind": "text"
+        },
+        "internal_type": {
+          "column": "C",
+          "kind": "text"
+        },
+        "default_value": {
+          "column": "F",
+          "kind": "text"
+        },
+        "max_value": {
+          "column": "G",
+          "kind": "text"
+        },
+        "min_value": {
+          "column": "H",
+          "kind": "text"
+        },
+        "unit": {
+          "column": "I",
+          "kind": "text"
+        },
+        "notes": {
+          "column": "W",
+          "kind": "text"
+        },
+        "enum_name": {
+          "column": "B",
+          "kind": "text",
+          "transform": "enum"
+        },
+        "sig_id": {
+          "column": "U",
+          "kind": "integer",
+          "lookup": "sig_ids",
+          "null_values": [
+            "",
+            "※",
+            "0"
+          ]
+        },
+        "byte_length": {
+          "column": "E",
+          "kind": "integer"
+        },
+        "flags": {
+          "column": "P",
+          "kind": "text",
+          "default": "0",
+          "cases": [
+            {
+              "when": {
+                "column": "P",
+                "equals": "※"
+              },
+              "value": "0"
+            }
+          ]
+        },
+        "callback": {
+          "column": "T",
+          "kind": "text",
+          "default": "NULL",
+          "cases": [
+            {
+              "when": {
+                "column": "T",
+                "equals": "※"
+              },
+              "value": "NULL"
+            }
+          ]
+        }
+      },
+      "metadata": {
+        "source_variable": {
+          "column": "B",
+          "kind": "text"
+        },
+        "source_sig_id": {
+          "column": "U",
+          "kind": "text"
+        }
+      },
+      "clear_string_bounds": true,
+      "source_range_warnings": true
+    }
+  ],
+  "collect": [
+    {
+      "sheet": "UPM-DSP采集数据",
+      "group": "DSP",
+      "endpoint": "DSP_UPP",
+      "reference": {
+        "column": "B",
+        "kind": "text",
+        "transform": "enum"
+      },
+      "fields": {
+        "upp_model": {
+          "column": "N",
+          "kind": "integer"
+        },
+        "address": {
+          "column": "O",
+          "kind": "integer"
+        },
+        "scale": {
+          "column": "K",
+          "kind": "number",
+          "default": 1
+        },
+        "access": {
+          "column": "J",
+          "kind": "text"
+        },
+        "acquisition_mode": {
+          "value": "poll",
+          "cases": [
+            {
+              "when": {
+                "column": "L",
+                "starts_with": "1"
+              },
+              "value": "upload"
+            }
+          ]
+        },
+        "poll_interval": {
+          "column": "Q",
+          "kind": "integer",
+          "null_values": [
+            "",
+            "※"
+          ]
+        },
+        "set_priority": {
+          "column": "R",
+          "kind": "integer",
+          "null_values": [
+            "",
+            "※"
+          ]
+        },
+        "scan_priority": {
+          "column": "S",
+          "kind": "integer",
+          "null_values": [
+            "",
+            "※"
+          ]
+        }
+      }
+    }
+  ],
+  "transmit": [
+    {
+      "sheet": "UPM单板测点",
+      "group": "LOCAL",
+      "endpoint": "MODBUS_SERVICE",
+      "reference": {
+        "column": "Q",
+        "kind": "text",
+        "transform": "enum"
+      },
+      "conditions": [
+        {
+          "column": "O",
+          "not_empty": true
+        }
+      ],
+      "fields": {
+        "upp_model": {
+          "value": 0
+        },
+        "address": {
+          "column": "O",
+          "kind": "integer"
+        },
+        "scale": {
+          "column": "H",
+          "kind": "number",
+          "default": 1
+        },
+        "access": {
+          "column": "J",
+          "kind": "text",
+          "default": "RO"
+        },
+        "register_type": {
+          "value": "HOLDING",
+          "cases": [
+            {
+              "when": {
+                "column": "U",
+                "contains": "寄存器类型=0x04"
+              },
+              "value": "INPUT"
+            },
+            {
+              "when": {
+                "column": "U",
+                "contains": "寄存器类型=0x03"
+              },
+              "value": "HOLDING"
+            },
+            {
+              "when": {
+                "column": "J",
+                "equals": "RO"
+              },
+              "value": "INPUT"
+            }
+          ]
+        }
+      },
+      "metadata": {
+        "notes": {
+          "column": "U",
+          "kind": "text"
+        }
+      }
+    },
+    {
+      "sheet": "UPM-DSP采集数据",
+      "group": "DSP",
+      "endpoint": "MODBUS_SERVICE",
+      "reference": {
+        "column": "B",
+        "kind": "text",
+        "transform": "enum"
+      },
+      "conditions": [
+        {
+          "column": "V",
+          "not_empty": true
+        }
+      ],
+      "fields": {
+        "upp_model": {
+          "value": 0
+        },
+        "address": {
+          "column": "V",
+          "kind": "integer"
+        },
+        "scale": {
+          "column": "K",
+          "kind": "number",
+          "default": 1
+        },
+        "access": {
+          "column": "J",
+          "kind": "text"
+        },
+        "register_type": {
+          "value": "HOLDING"
+        }
+      }
+    },
+    {
+      "sheet": "CSU-UPM采集数据",
+      "group": "LOCAL",
+      "endpoint": "UPP_SERVICE",
+      "reference": {
+        "column": "C",
+        "kind": "text",
+        "transform": "enum"
+      },
+      "conditions": [
+        {
+          "column": "A",
+          "equals": "UPM"
+        }
+      ],
+      "fields": {
+        "wire_type": {
+          "column": "D",
+          "kind": "text"
+        },
+        "wire_length": {
+          "column": "F",
+          "kind": "integer"
+        },
+        "upp_model": {
+          "column": "O",
+          "kind": "integer"
+        },
+        "address": {
+          "column": "P",
+          "kind": "integer"
+        },
+        "scale": {
+          "column": "L",
+          "kind": "number",
+          "default": 1
+        },
+        "access": {
+          "column": "K",
+          "kind": "text"
+        }
+      },
+      "metadata": {
+        "receiver_sig_id": {
+          "column": "V",
+          "kind": "text"
+        }
+      },
+      "match_type_length": true
+    }
+  ],
+  "warnings": [
+    "重复本地枚举按相同内部定义合并，保留多条转发映射。",
+    "来源中缺失的 sigID 和轮询参数保留为空。",
+    "设备基址由项目 JSON 配置，字节序须与固件核对。"
+  ]
+}

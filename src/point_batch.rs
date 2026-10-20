@@ -225,13 +225,13 @@ fn check_fields(batch: &Batch, operation: &str, dsp: bool) -> Result<()> {
 
 pub async fn apply(tx: &mut PgConnection, pid: i64, c: &Change) -> Result<Value> {
     let batch = decode(c)?;
-    let board = crate::dsp_points::native_board(tx, pid, &batch.board_key)
+    let board = crate::native_points::native_board(tx, pid, &batch.board_key)
         .await?
         .ok_or(AppError::bad("此板卡尚未启用点表存储"))?;
     check_fields(
         &batch,
         &c.operation,
-        crate::dsp_sheet::is_dsp(&board) || board["code"] == "UPM",
+        crate::board_rules::inherited_name(&board),
     )?;
     let mut records = Vec::new();
     let mut errors = Vec::new();

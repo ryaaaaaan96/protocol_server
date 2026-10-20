@@ -19,7 +19,9 @@ use std::{
 #[serde(deny_unknown_fields)]
 struct Rule {
     engine: String,
+    #[serde(default)]
     script_file: String,
+    #[serde(default)]
     script: String,
     parameters: Value,
 }
@@ -64,6 +66,13 @@ fn engine() -> Result<Context> {
 
 fn parse(value: &Value) -> Result<Rule> {
     let rule: Rule = serde_json::from_value(value.clone()).map_err(fail)?;
+    if rule.engine == "builtin" {
+        builtin_parameters(&rule.parameters)?;
+        if !rule.script.is_empty() || !rule.script_file.is_empty() {
+            return Err(fail("builtin 不接受脚本"));
+        }
+        return Ok(rule);
+    }
     if rule.engine != "javascript" || !rule.parameters.is_object() {
         return Err(fail(
             "calculation.engine 必须为 javascript，parameters 必须为对象",
@@ -80,6 +89,9 @@ fn parse(value: &Value) -> Result<Rule> {
 
 pub fn validate(value: &Value) -> Result<()> {
     let rule = parse(value)?;
+    if rule.engine == "builtin" {
+        return Ok(());
+    }
     engine()?.with(|ctx| {
         // Parse only: loading configuration must not execute module-level code.
         Module::declare(ctx.clone(), rule.script_file, rule.script)
@@ -114,7 +126,13 @@ pub fn inputs(graph: &Value, board: &str) -> Result<Vec<Value>> {
             .filter(|point| point["board_key"] == board)
             .ok_or_else(|| fail("转发引用的内部点不存在"))?;
         let mut point = point.clone();
-        crate::dsp_sheet::project(&mut point);
+        if let Some(definition) = crate::board_rules::board(graph, board) {
+            if crate::sheet_layout::enabled(definition) {
+                crate::sheet_layout::project_for(definition, &mut point);
+            }
+        } else {
+            point["upload_level"] = point["metadata"]["upload_level"].clone();
+        }
         result.push(json!({
             "id":mapping["id"],"process_point_id":point["id"],
             "endpoint_key":mapping["endpoint_key"],"upp_model":mapping["upp_model"],
@@ -132,6 +150,109 @@ pub fn inputs(graph: &Value, board: &str) -> Result<Vec<Value>> {
     Ok(result)
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BuiltinParameters {
+    header_bytes: i64,
+    type_bytes: BTreeMap<String, i64>,
+    #[serde(default)]
+    fixed_offsets: BTreeMap<String, i64>,
+    fixed_offset_key: String,
+    group_by: Vec<String>,
+    sort_by: Vec<SortField>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SortField {
+    field: String,
+    #[serde(default)]
+    descending: bool,
+}
+fn builtin_parameters(value: &Value) -> Result<BuiltinParameters> {
+    let p: BuiltinParameters = serde_json::from_value(value.clone()).map_err(fail)?;
+    const FIELDS: &[&str] = &[
+        "id",
+        "process_point_id",
+        "source_order",
+        "endpoint_key",
+        "upp_model",
+        "upload_level",
+        "category",
+        "name",
+        "variable_name",
+    ];
+    if value.to_string().len() > 32768
+        || !(0..65536).contains(&p.header_bytes)
+        || p.type_bytes.is_empty()
+        || p.type_bytes.iter().any(|(t, n)| {
+            !["U8", "U16", "S16", "U32", "S32", "F32"].contains(&t.as_str())
+                || !(1..65536).contains(n)
+        })
+        || p.fixed_offsets.values().any(|a| !(0..65536).contains(a))
+        || !FIELDS.contains(&p.fixed_offset_key.as_str())
+        || p.group_by.is_empty()
+        || p.group_by.len() > 8
+        || p.sort_by.len() > 8
+        || p.group_by.iter().any(|f| !FIELDS.contains(&f.as_str()))
+        || p.sort_by
+            .iter()
+            .any(|f| !FIELDS.contains(&f.field.as_str()))
+    {
+        return Err(fail("builtin 分组、排序、字节数或地址参数无效"));
+    }
+    Ok(p)
+}
+fn builtin(parameters: &Value, input: &[Value]) -> Result<Vec<Layout>> {
+    let p = builtin_parameters(parameters)?;
+    let mut ordered: Vec<_> = input.iter().collect();
+    ordered.sort_by(|a, b| {
+        for field in &p.sort_by {
+            let av = &a[&field.field];
+            let bv = &b[&field.field];
+            let comparison = match (av.as_i64(), bv.as_i64()) {
+                (Some(a), Some(b)) => a.cmp(&b),
+                _ => av.as_str().unwrap_or("").cmp(bv.as_str().unwrap_or("")),
+            };
+            if !comparison.is_eq() {
+                return if field.descending {
+                    comparison.reverse()
+                } else {
+                    comparison
+                };
+            }
+        }
+        num(a, "id").cmp(&num(b, "id"))
+    });
+    let mut used: BTreeMap<String, i64> = BTreeMap::new();
+    ordered
+        .into_iter()
+        .map(|row| {
+            let length = if row["wire_type"] == "STRING" {
+                num(row, "byte_length")
+            } else {
+                *p.type_bytes
+                    .get(strv(row, "wire_type"))
+                    .ok_or_else(|| fail("通信类型缺少字节数配置"))?
+            };
+            let group = json!(p.group_by.iter().map(|f| &row[f]).collect::<Vec<_>>()).to_string();
+            let preceding = used.entry(group).or_default();
+            let address = p
+                .fixed_offsets
+                .get(strv(row, &p.fixed_offset_key))
+                .copied()
+                .unwrap_or(p.header_bytes + *preceding);
+            *preceding = preceding
+                .checked_add(length)
+                .ok_or_else(|| fail("累计字节数溢出"))?;
+            Ok(Layout {
+                id: num(row, "id"),
+                address,
+                wire_length: length,
+            })
+        })
+        .collect()
+}
+
 pub fn evaluate(rule: &Value, input: &[Value]) -> Result<Vec<Layout>> {
     let rule = parse(rule)?;
     if input.len() > 10_000
@@ -145,71 +266,75 @@ pub fn evaluate(rule: &Value, input: &[Value]) -> Result<Vec<Layout>> {
             "输入超过 10000 条或记录 ID 超出 JavaScript 安全整数范围",
         ));
     }
-    let layout = engine()?.with(|ctx| -> Result<Vec<Layout>> {
-        let points = ctx
-            .json_parse(serde_json::to_vec(input).map_err(fail)?)
-            .catch(&ctx)
-            .map_err(fail)?;
-        let parameters = ctx
-            .json_parse(rule.parameters.to_string())
-            .catch(&ctx)
-            .map_err(fail)?;
-        let (module, ready) = Module::declare(ctx.clone(), rule.script_file, rule.script)
-            .and_then(|module| module.eval())
-            .catch(&ctx)
-            .map_err(fail)?;
-        // No asynchronous jobs are driven: calculations must finish synchronously.
-        ready
-            .result::<()>()
-            .ok_or_else(|| fail("脚本不能使用异步模块或 await"))?
-            .catch(&ctx)
-            .map_err(fail)?;
-        let calculate: Function = module.get("default").catch(&ctx).map_err(fail)?;
-        let result: Array = calculate
-            .call((points, parameters))
-            .catch(&ctx)
-            .map_err(fail)?;
-        if result.len() != input.len() {
-            return Err(fail(
-                "脚本必须返回当前表的每条记录，不能增加、删除或遗漏记录",
-            ));
-        }
-        result
-            .iter::<Object>()
-            .map(|row| {
-                let row = row.catch(&ctx).map_err(fail)?;
-                let keys: Vec<String> = row
-                    .own_keys(rquickjs::object::Filter::new().string().symbol())
-                    .collect::<rquickjs::Result<_>>()
-                    .catch(&ctx)
-                    .map_err(fail)?;
-                if keys.len() != 3
-                    || keys
-                        .iter()
-                        .any(|key| !["id", "address", "wire_length"].contains(&key.as_str()))
-                {
-                    return Err(fail("每条计算结果只能包含 id、address、wire_length"));
-                }
-                let integer = |key| -> Result<i64> {
-                    let value: rquickjs::Value = row.get(key).catch(&ctx).map_err(fail)?;
-                    let value = value
-                        .as_number()
-                        .filter(|value| {
-                            value.is_finite()
-                                && value.fract() == 0.0
-                                && value.abs() <= 9_007_199_254_740_991.0
-                        })
-                        .ok_or_else(|| fail(format!("{key} 必须为安全整数")))?;
-                    Ok(value as i64)
-                };
-                Ok(Layout {
-                    id: integer("id")?,
-                    address: integer("address")?,
-                    wire_length: integer("wire_length")?,
+    let layout = if rule.engine == "builtin" {
+        builtin(&rule.parameters, input)?
+    } else {
+        engine()?.with(|ctx| -> Result<Vec<Layout>> {
+            let points = ctx
+                .json_parse(serde_json::to_vec(input).map_err(fail)?)
+                .catch(&ctx)
+                .map_err(fail)?;
+            let parameters = ctx
+                .json_parse(rule.parameters.to_string())
+                .catch(&ctx)
+                .map_err(fail)?;
+            let (module, ready) = Module::declare(ctx.clone(), rule.script_file, rule.script)
+                .and_then(|module| module.eval())
+                .catch(&ctx)
+                .map_err(fail)?;
+            // No asynchronous jobs are driven: calculations must finish synchronously.
+            ready
+                .result::<()>()
+                .ok_or_else(|| fail("脚本不能使用异步模块或 await"))?
+                .catch(&ctx)
+                .map_err(fail)?;
+            let calculate: Function = module.get("default").catch(&ctx).map_err(fail)?;
+            let result: Array = calculate
+                .call((points, parameters))
+                .catch(&ctx)
+                .map_err(fail)?;
+            if result.len() != input.len() {
+                return Err(fail(
+                    "脚本必须返回当前表的每条记录，不能增加、删除或遗漏记录",
+                ));
+            }
+            result
+                .iter::<Object>()
+                .map(|row| {
+                    let row = row.catch(&ctx).map_err(fail)?;
+                    let keys: Vec<String> = row
+                        .own_keys(rquickjs::object::Filter::new().string().symbol())
+                        .collect::<rquickjs::Result<_>>()
+                        .catch(&ctx)
+                        .map_err(fail)?;
+                    if keys.len() != 3
+                        || keys
+                            .iter()
+                            .any(|key| !["id", "address", "wire_length"].contains(&key.as_str()))
+                    {
+                        return Err(fail("每条计算结果只能包含 id、address、wire_length"));
+                    }
+                    let integer = |key| -> Result<i64> {
+                        let value: rquickjs::Value = row.get(key).catch(&ctx).map_err(fail)?;
+                        let value = value
+                            .as_number()
+                            .filter(|value| {
+                                value.is_finite()
+                                    && value.fract() == 0.0
+                                    && value.abs() <= 9_007_199_254_740_991.0
+                            })
+                            .ok_or_else(|| fail(format!("{key} 必须为安全整数")))?;
+                        Ok(value as i64)
+                    };
+                    Ok(Layout {
+                        id: integer("id")?,
+                        address: integer("address")?,
+                        wire_length: integer("wire_length")?,
+                    })
                 })
-            })
-            .collect()
-    })?;
+                .collect()
+        })?
+    };
     let records: BTreeMap<_, _> = input.iter().map(|row| (num(row, "id"), row)).collect();
     let mut seen = BTreeSet::new();
     let mut ranges: BTreeMap<(&str, i64), Vec<(i64, i64)>> = BTreeMap::new();
@@ -331,6 +456,8 @@ mod tests {
             serde_json::from_str::<Value>(include_str!("../config/dc-ups/DSP/transmit.json"))
                 .unwrap()["calculation"]
                 .clone();
+        rule["engine"] = json!("javascript");
+        rule["script_file"] = json!("transmit.js");
         rule["script"] = json!(include_str!("../config/dc-ups/DSP/transmit.js"));
         rule
     }
@@ -370,6 +497,11 @@ mod tests {
         let input = inputs(&graph, "DSP").unwrap();
         let output = evaluate(&rule(), &input).unwrap();
         assert_eq!(output.len(), 445);
+        let builtin_rule: Value =
+            serde_json::from_str::<Value>(include_str!("../config/dc-ups/DSP/transmit.json"))
+                .unwrap()["calculation"]
+                .clone();
+        assert_eq!(evaluate(&builtin_rule, &input).unwrap(), output);
         for row in &output {
             let original = graph["transmit_points"]
                 .as_array()

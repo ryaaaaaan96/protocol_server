@@ -487,7 +487,7 @@ function userCreated() {
                 项目拓扑配置
               </button>
               <button
-                v-if="['board', 'devices'].includes(tab) && canManageWrite && types.some(type => type.code === 'DSP' && type.point_storage === 'native')"
+                v-if="['board', 'devices'].includes(tab) && canManageWrite && types.some(type => type.point_storage === 'native' && type.workbook_import)"
                 class="button"
                 @click="modal = 'import'"
               >
@@ -620,6 +620,7 @@ function userCreated() {
       "
     />
     <ImportModal
+      :boards="types.filter(type => type.point_storage === 'native' && type.workbook_import)"
       v-if="modal === 'import'"
       :pid="pid"
       :can-write="canManageWrite"

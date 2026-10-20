@@ -10,19 +10,16 @@ import {
 import { api, type Row } from "../api";
 import Modal from "./Modal.vue";
 import Badge from "./Badge.vue";
-const props = defineProps<{ pid: number; canWrite: boolean }>();
+const props = defineProps<{ pid: number; canWrite: boolean; boards: Row[] }>();
 const emit = defineEmits<{ close: []; done: [] }>();
-const board = ref("DSP");
+const board = ref(props.boards[0]?.code || "");
 const preview = ref<Row | null>(null),
   busy = ref(false),
   error = ref(""),
   replace = ref(false);
-const counts = computed(() => !preview.value ? [] : preview.value.import_scope === "upm" ? [
-  ["LOCAL 内部点", preview.value.local_count], ["DSP 模板内部点", preview.value.dsp_count],
-  ["UPP 采集映射", preview.value.collect_count], ["对外转发映射", preview.value.transmit_count],
-] : [
-  ["DSP 内部点", preview.value.dsp_count ?? preview.value.point_count],
-  ["UPP 转发映射", preview.value.transmit_count],
+const counts = computed(() => !preview.value ? [] : [
+  ...(preview.value.group_counts || []).map((group: Row) => [group.name || group.code, group.count]),
+  ["采集映射", preview.value.collect_count], ["转发映射", preview.value.transmit_count],
 ]);
 async function upload(event: Event) {
   if (!props.canWrite || busy.value) return;
@@ -74,7 +71,7 @@ async function commit() {
           >02 核对预览</span
         ><ChevronRight :size="15" /><span>03 写入数据库</span>
       </div>
-      <label v-if="!preview" class="field">导入板卡<select v-model="board" aria-label="导入板卡" :disabled="busy"><option value="DSP">DSP 功率板</option><option value="UPM">UPM 控制板</option></select></label>
+      <label v-if="!preview" class="field">导入板卡<select v-model="board" aria-label="导入板卡" :disabled="busy"><option v-for="item in boards" :key="item.code" :value="item.code">{{ item.name || item.code }}</option></select></label>
       <template v-if="!preview"
         ><label class="upload-area"
           ><div><Upload :size="30" /></div>
@@ -89,8 +86,7 @@ async function commit() {
         /></label>
         <div class="notice">
           <strong>仅更新 {{ board }} 侧点表</strong>
-          <p v-if="board === 'DSP'">读取“DSP内部数据”和“UPM-DSP采集数据”，更新 DSP 内部点和转发映射。</p>
-          <p v-else>读取“UPM单板测点”“UPM-DSP采集数据”“CSU-UPM采集数据”及公共 sigID 映射表，更新 UPM 内部点、采集和两种转发映射。</p>
+          <p>按所选板卡的工作簿映射读取内部点、采集和转发表，上传后查看明细并确认。</p>
 
         </div></template
       ><template v-else
@@ -113,7 +109,7 @@ async function commit() {
             ><small>{{ label }}</small>
           </div>
         </div>
-        <p class="notice">本次替换 {{ preview.import_scope === 'upm' ? 'UPM' : 'DSP' }} 板卡点表，其他板卡不受影响。</p>
+        <p class="notice">本次替换 {{ preview.board_name || preview.board_key }} 板卡点表，其他板卡不受影响。</p>
         <div class="notice">
           <p v-for="w in preview.warnings" :key="w">{{ w }}</p>
         </div>
@@ -131,7 +127,7 @@ async function commit() {
             <tbody>
               <tr v-for="(p, i) in preview.sample" :key="i">
                 <td>{{ p.name }}</td>
-                <td>{{ p.board_key || 'DSP' }}</td>
+                <td>{{ p.board_key || board }}</td>
                 <td class="mono">{{ p.enum_name }}</td>
                 <td>{{ p.internal_type ?? p.data_type ?? '—' }}</td>
               </tr>
@@ -140,9 +136,7 @@ async function commit() {
         </div>
         <label class="confirm-checkbox"
           ><input type="checkbox" v-model="replace" /><span
-            >{{ preview.import_scope === 'upm'
-              ? '确认替换 UPM 内部点、UPP 采集表及两种对外转发表，保留项目拓扑、DSP 及其他板卡数据。'
-              : '确认替换 DSP 内部数据和 DSP UPP 转发表，保留项目拓扑、UPM 及其他板卡数据。' }}修改前后内容保留在历史记录中。</span
+            >确认替换 {{ preview.board_name || preview.board_key }} 板卡的点表，保留项目拓扑和其他板卡数据。修改前后内容保留在历史记录中。</span
           ></label
         ></template
       >

@@ -510,7 +510,7 @@ pub async fn commit(
     .await?;
     db::touch(&mut tx, pid).await?;
     let history_after = topology::snapshot(&mut tx, pid, true).await?;
-    crate::dsp_points::history(
+    crate::native_points::history(
         &mut tx,
         pid,
         user.id,

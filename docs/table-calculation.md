@@ -1,8 +1,32 @@
-# 点表计算脚本
+# 点表计算规则
 
-每张转发表在自己的 `transmit.json` 中用 `calculation.script_file` 指向一个独立 JavaScript 文件。当前 DSP 使用同目录的 `transmit.js`；UPM 暂不配置。服务端嵌入 [QuickJS](https://github.com/DelSkayn/rquickjs)，运行计算无需另启 Node.js 进程。修改已有输入范围内的计算逻辑只需修改 JS 文件，调整参数只需修改 JSON，不需要重新编译后端。
+DSP 当前使用 Rust 内置 `builtin` 引擎，修改 `transmit.json` 的 JSON 参数即可调整计算，无需 JS 或重新编译后端。UPM 保留 Excel 导入地址，暂不自动计算。
 
-借鉴 [WPS AirScript](https://developer.kdocs.cn/server/server-script/summary.html) 的服务端 JavaScript 脚本方式，使用本项目的点表接口。没有 WPS 的 `Application.Range` 对象，也无需连接 WPS 服务。
+## JSON 内置规则
+
+```json
+{
+  "calculation": {
+    "engine": "builtin",
+    "parameters": {
+      "header_bytes": 6,
+      "type_bytes": {"U8": 1, "U16": 2, "S16": 2, "U32": 4, "S32": 4, "F32": 4},
+      "group_by": ["endpoint_key", "upp_model"],
+      "sort_by": [{"field": "upp_model"}, {"field": "upload_level", "descending": true}, {"field": "source_order"}],
+      "fixed_offset_key": "name",
+      "fixed_offsets": {}
+    }
+  }
+}
+```
+
+按 `sort_by` 排序，每个 `group_by` 分组独立累计字节数。普通地址为 `header_bytes + 前面各行字节数`，固定地址行仍参与累计。`STRING` 取内部总字节数，其他类型读取 `type_bytes`。分组、排序和固定地址键可选 `id`、`process_point_id`、`source_order`、`endpoint_key`、`upp_model`、`upload_level`、`category`、`name`、`variable_name`。地址规则当前按 UPP 字节计数；Modbus 保留手动配置。
+
+实际 DSP 配置还包含六个 Excel 固定偏移，见 `config/dc-ups/DSP/transmit.json`。参数和计算结果仍通过预览、地址冲突检查、权限与历史事务；读取配置不会自动改写数据库。修改规则后点击“重算协议布局”预览并保存。内置规则最多 10000 条输入，参数最多 32 KiB。
+
+## 兼容 JavaScript 规则
+
+已有项目仍可使用 `javascript` 和板卡目录内的 `script_file`。新板卡复用内置能力时只需要 JSON。以下说明适用于可选脚本模式。
 
 ## 配置与操作
 
@@ -29,7 +53,7 @@ export default function calculate(points, parameters) {
 }
 ```
 
-以上仅演示输入输出；项目默认脚本还处理端点/模型分组、上传等级、协议类型和固定地址，请参考 `config/dc-ups/DSP/transmit.js`，不要用简单示例替换完整协议规则。
+以上仅演示输入输出；原脚本示例还处理端点/模型分组、上传等级、协议类型和固定地址，请参考 `config/dc-ups/DSP/transmit.js`，不要用简单示例替换完整协议规则。
 
 路径相对于所属表格 JSON 的目录，必须指向板卡目录内的 `.js` 普通文件；不能使用绝对路径、`..` 或链接到其他目录。项目文件夹导入、导出会携带 JS 文件。缺失文件、语法错误或非法路径会阻止配置加载。
 

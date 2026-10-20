@@ -7,7 +7,7 @@ pub fn generate(graph: &Value) -> Result<Value> {
     let mut files = if blocked {
         Default::default()
     } else {
-        crate::dsp_points::generate(graph)
+        crate::native_points::generate(graph)
     };
     if !blocked {
         files.insert(

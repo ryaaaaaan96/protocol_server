@@ -114,11 +114,19 @@ for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
     if (!Array.isArray(manifest.topology?.board_types)) throw new Error('缺少 topology.board_types');
     for (const board of manifest.topology.board_types) {
       if (typeof board.directory !== 'string' || !board.directory) throw new Error(`板卡 ${board.code} 缺少 directory`);
+      if (board.workbook_import != null) {
+        const reference = board.workbook_import;
+        if (typeof reference !== 'string' || path.isAbsolute(reference) || reference.includes('\\') || reference.split('/').includes('..')) throw new Error(`板卡 ${board.code} 的 workbook_import 路径无效`);
+        const boardPath = fs.realpathSync(path.resolve(directory, board.directory));
+        const mappingFile = path.resolve(boardPath, reference);
+        requireFile(mappingFile, boardPath);
+        JSON.parse(fs.readFileSync(mappingFile, 'utf8'));
+      }
       for (const table of ['process', 'collect', 'transmit']) {
         const tableFile = path.resolve(directory, board.directory, `${table}.json`);
         requireFile(tableFile, project);
         const definition = JSON.parse(fs.readFileSync(tableFile, 'utf8'));
-        if (definition.calculation) {
+        if (definition.calculation?.engine === "javascript") {
           const reference = definition.calculation.script_file;
           if (typeof reference !== 'string' || path.isAbsolute(reference) || reference.includes('\\')
               || reference.split('/').includes('..') || !reference.endsWith('.js')) {

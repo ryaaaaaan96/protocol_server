@@ -28,6 +28,10 @@ pub struct BoardType {
     pub point_groups: Vec<PointGroup>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub point_endpoints: Vec<PointEndpoint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub point_rules: Option<crate::board_rules::Rules>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workbook_import: Option<String>,
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -36,6 +40,8 @@ pub struct PointGroup {
     pub name: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub devices: Vec<PointDevice>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collect_enabled: Option<bool>,
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -136,12 +142,21 @@ impl Config {
         let mut codes = BTreeSet::new();
         let mut models = BTreeSet::new();
         for t in &self.board_types {
+            if let Some(rules) = &t.point_rules {
+                crate::board_rules::validate(rules)?;
+            }
             if t.point_storage
                 .as_deref()
                 .is_some_and(|storage| storage != "native")
             {
                 return Err(AppError::bad(
                     "point_storage 仅支持 native，省略时板卡仅用于拓扑预览",
+                ));
+            }
+            if t.point_storage.is_none() && (t.point_rules.is_some() || t.workbook_import.is_some())
+            {
+                return Err(AppError::bad(
+                    "point_rules 和 workbook_import 需要 native 存储",
                 ));
             }
             let mut groups = BTreeSet::new();
@@ -167,12 +182,11 @@ impl Config {
                     || !["UPP", "MODBUS"].contains(&e.protocol.as_str())
                     || !["collect", "transmit"].contains(&e.direction.as_str())
                     || (e.direction == "collect" && e.protocol != "UPP")
-                    || (t.code != "UPM" && (e.protocol != "UPP" || e.direction != "transmit"))
                     || !endpoints.insert(&e.code)
             }) || (t.point_storage.is_none() && !t.point_endpoints.is_empty())
             {
                 return Err(AppError::bad(
-                    "point_endpoints 须为 native 板卡定义有效的协议与方向；当前仅 UPM 支持采集和 Modbus",
+                    "point_endpoints 须为 native 板卡定义有效的协议与方向；采集当前支持 UPP",
                 ));
             }
             let mut devices = BTreeSet::new();
@@ -453,7 +467,7 @@ mod tests {
         assert!(Config::parse(legacy).is_err());
     }
     #[test]
-    fn endpoint_keys_are_unique_and_upp_only() {
+    fn endpoint_keys_are_unique_and_protocol_driven() {
         let mut config = example();
         config["board_types"][2]["point_endpoints"] = json!([
             {"code":"UPP_SERVICE","name":"DSP 转发","protocol":"UPP"}
@@ -470,7 +484,7 @@ mod tests {
             .unwrap()
             .pop();
         config["board_types"][2]["point_endpoints"][0]["protocol"] = json!("MODBUS");
-        assert!(Config::parse(config).is_err());
+        assert!(Config::parse(config).is_ok());
     }
     #[test]
     fn keeps_referenced_board_group_and_endpoint_keys() {

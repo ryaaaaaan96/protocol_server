@@ -1,0 +1,145 @@
+{
+  "version": 1,
+  "process": [
+    {
+      "sheet": "DSP内部数据",
+      "group": "LOCAL",
+      "element_width_column": "F",
+      "fields": {
+        "name": {
+          "column": "A",
+          "kind": "text"
+        },
+        "unit": {
+          "column": "L",
+          "kind": "text"
+        },
+        "default_value": {
+          "column": "I",
+          "kind": "text"
+        },
+        "max_value": {
+          "column": "J",
+          "kind": "text"
+        },
+        "min_value": {
+          "column": "K",
+          "kind": "text"
+        },
+        "notes": {
+          "column": "Y",
+          "kind": "text"
+        },
+        "enum_name": {
+          "column": "B",
+          "kind": "text",
+          "transform": "enum"
+        },
+        "internal_type": {
+          "column": "C",
+          "kind": "text",
+          "strip_prefix": "Sys_",
+          "transform": "upper"
+        },
+        "element_count": {
+          "column": "G",
+          "kind": "integer"
+        }
+      },
+      "metadata": {
+        "source_variable": {
+          "column": "B",
+          "kind": "text"
+        },
+        "source_type": {
+          "column": "C",
+          "kind": "text"
+        },
+        "enum_table": {
+          "column": "D",
+          "kind": "text"
+        },
+        "display_digits": {
+          "column": "E",
+          "kind": "text"
+        },
+        "access": {
+          "column": "M",
+          "kind": "text"
+        },
+        "ram": {
+          "column": "N",
+          "kind": "text"
+        },
+        "flash": {
+          "column": "O",
+          "kind": "text"
+        },
+        "eeprom": {
+          "column": "P",
+          "kind": "text"
+        },
+        "calibration": {
+          "column": "Q",
+          "kind": "text"
+        },
+        "structure": {
+          "column": "R",
+          "kind": "text"
+        },
+        "cpu": {
+          "column": "S",
+          "kind": "text"
+        },
+        "upload_level": {
+          "column": "V",
+          "kind": "text"
+        },
+        "category": {
+          "column": "W",
+          "kind": "text"
+        }
+      }
+    }
+  ],
+  "transmit": [
+    {
+      "sheet": "UPM-DSP采集数据",
+      "group": "LOCAL",
+      "endpoint": "UPP_SERVICE",
+      "reference": {
+        "column": "B",
+        "kind": "text",
+        "transform": "enum"
+      },
+      "fields": {
+        "upp_model": {
+          "column": "N",
+          "kind": "integer"
+        },
+        "address": {
+          "column": "O",
+          "kind": "integer"
+        },
+        "wire_type": {
+          "column": "C",
+          "kind": "text",
+          "transform": "upper"
+        },
+        "wire_length": {
+          "column": "E",
+          "kind": "integer"
+        },
+        "scale": {
+          "column": "K",
+          "kind": "number",
+          "default": 1
+        },
+        "access": {
+          "column": "J",
+          "kind": "text"
+        }
+      }
+    }
+  ]
+}

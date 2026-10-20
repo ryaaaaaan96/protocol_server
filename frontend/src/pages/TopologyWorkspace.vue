@@ -61,15 +61,15 @@ watch([groups, () => board.value?.code], ([available, code]) => {
   }
 }, { immediate: true });
 const sheets = computed(() => enabled.value && schema.value
-  ? configuredBoardSheets(schema.value, props.boardKey, board.value?.point_endpoints).filter(sheet => !(props.boardKey === "UPM" && groupKey.value === "LOCAL" && sheet.pointKind === "collect")) : []);
-const hasOverview = computed(() => props.boardKey === "DSP" &&
+  ? configuredBoardSheets(schema.value, props.boardKey, board.value?.point_endpoints).filter(sheet => !(groups.value.find(group => group.code === groupKey.value)?.collect_enabled === false && sheet.pointKind === "collect")) : []);
+const hasOverview = computed(() => board.value?.point_rules?.sheet_layout === true &&
   ["process", "forward"].every(kind => sheets.value.some(sheet => sheet.key === kind)));
 const sheet = computed(() => sheets.value.find(item => item.key === sheetKey.value) || sheets.value[0]);
 watch([sheets, hasOverview], ([available, overview]) => {
   if (sheetKey.value === "overview" && overview) return;
   if (available.length && !available.some(item => item.key === sheetKey.value)) sheetKey.value = available[0].key;
 }, { immediate: true });
-watch(() => sheetKey.value === "overview" ? "DSP 总体视图" : sheet.value?.label || "", label => emit("sheet", label), { immediate: true });
+watch(() => sheetKey.value === "overview" ? `${board.value?.name || props.boardKey} 总体视图` : sheet.value?.label || "", label => emit("sheet", label), { immediate: true });
 const points = computed(() => rows(props.graph || {}, "process_points").filter(point => point.board_key === props.boardKey));
 function count(kind: PointKind, endpointKey?: string) {
   const selected = points.value.filter(point => groupKey.value == null || point.group_key === groupKey.value);
@@ -140,7 +140,7 @@ function done(merged = false) {
           @click="selectGroup(group.code)">{{ group.code }} · {{ group.name }}</button>
         <button v-if="groups.length > 1" class="button small" :aria-pressed="groupKey == null" @click="selectGroup()">全部分组</button>
       </div>
-      <p v-if="boardKey === 'UPM'" class="notice">LOCAL 为本地设备；DSP 组共用点表模板，{{ groups.find(group => group.code === 'DSP')?.devices?.length || 0 }} 个设备的地址独立配置。Modbus 实际地址在“设备地址”列显示。</p>
+      <p v-if="groups.some(group => group.devices?.length)" class="notice">同组设备共用点表模板，每个设备的地址独立配置。Modbus 实际地址在“设备地址”列显示。</p>
       <div class="entity-tabs" role="tablist" aria-label="板卡内表格">
         <button v-if="hasOverview" role="tab" :aria-selected="sheetKey === 'overview'" :class="{ selected: sheetKey === 'overview' }"
           @click="selectSheet('overview')">总体视图</button>
@@ -154,7 +154,7 @@ function done(merged = false) {
       <PointTable v-else :key="`${boardKey}:${sheet.key}:${groupKey ?? 'all'}`" :pid="pid" :board-key="boardKey"
         :kind="sheet.pointKind" :endpoint-key="sheet.endpointKey" :label="sheet.label" :revision="graph.revision" :can-write="canWrite"
         :focus-id="pointFocus" :group-key="groupKey" :allow-forward="sheets.some(item => item.pointKind === 'forward')"
-        :forward-label="boardKey === 'UPM' ? '对外转发表' : sheets.find(item => item.pointKind === 'forward')?.label"
+        :forward-label="sheets.filter(item => item.pointKind === 'forward').length > 1 ? '对外转发表' : sheets.find(item => item.pointKind === 'forward')?.label"
         @done="done" @conflict="emit('conflict')" @process="openProcess" @error="emit('error', $event)" @dirty="pointDirty = $event" />
     </section>
   </template>

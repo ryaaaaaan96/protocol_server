@@ -25,13 +25,14 @@ fn supported_archive(payload: &Value) -> bool {
     (payload["schema_version"] == 4 && payload["migration_version"] == 1)
         || (payload["schema_version"] == 5 && payload["migration_version"] == 2)
         || (payload["schema_version"] == 6 && payload["migration_version"] == 3)
+        || (payload["schema_version"] == 7 && payload["migration_version"] == 4)
 }
 
 fn columns(table: &str) -> String {
     let fields = match table {
-        "process_points" => crate::dsp_points::PROCESS_COLUMNS,
-        "transmit_points" => crate::dsp_points::TRANSMIT_COLUMNS,
-        "collect_points" => crate::upm_points::COLLECT_COLUMNS,
+        "process_points" => crate::native_points::PROCESS_COLUMNS,
+        "transmit_points" => crate::native_points::TRANSMIT_COLUMNS,
+        "collect_points" => crate::native_protocol::COLLECT_COLUMNS,
         _ => unreachable!("dump table allowlist"),
     };
     format!("id,project_id,board_key,{fields}")
@@ -60,7 +61,7 @@ pub fn validate(payload: &Value, expected_key: &str) -> Result<()> {
     }
     if !supported_archive(payload) {
         return Err(AppError::bad(
-            "Dump 结构或迁移版本不兼容；仅接受 4/1、5/2、6/3 的项目归档",
+            "Dump 结构或迁移版本不兼容；仅接受 4/1、5/2、6/3、7/4 的项目归档",
         ));
     }
     let tables = payload["tables"]
@@ -69,7 +70,9 @@ pub fn validate(payload: &Value, expected_key: &str) -> Result<()> {
     let expected: BTreeSet<_> = topology::TABLES
         .iter()
         .copied()
-        .filter(|t| *t != "collect_points" || payload["schema_version"] == 6)
+        .filter(|t| {
+            *t != "collect_points" || payload["schema_version"].as_i64().is_some_and(|v| v >= 6)
+        })
         .collect();
     if tables.keys().map(String::as_str).collect::<BTreeSet<_>>() != expected {
         return Err(AppError::bad("Dump 业务表清单不完整或包含不支持的表"));
@@ -78,7 +81,7 @@ pub fn validate(payload: &Value, expected_key: &str) -> Result<()> {
     let mut source_project = None;
     let mut count = 0;
     for &table in INSERT_ORDER {
-        if table == "collect_points" && payload["schema_version"] != 6 {
+        if table == "collect_points" && payload["schema_version"].as_i64().is_some_and(|v| v < 6) {
             continue;
         }
         let rows = tables[table]
@@ -261,8 +264,8 @@ pub async fn replace(tx: &mut PgConnection, pid: i64, payload: &Value) -> Result
             .fetch_one(&mut *tx)
             .await?;
     validate(payload, key.as_deref().unwrap_or_default())?;
-    if schema_version != 6 {
-        return Err(AppError::bad("请先将目标项目迁移到 v6，再导入 Dump"));
+    if schema_version != 7 {
+        return Err(AppError::bad("请先将目标项目迁移到 v7，再导入 Dump"));
     }
     for table in INSERT_ORDER.iter().rev() {
         sqlx::query(&format!("DELETE FROM points.{table} WHERE project_id=$1"))
@@ -289,7 +292,9 @@ pub async fn replace(tx: &mut PgConnection, pid: i64, payload: &Value) -> Result
         let mut remapped = Vec::with_capacity(rows.len());
         for row in rows {
             let mut next = row.clone();
-            if table == "transmit_points" && payload["schema_version"] != 6 {
+            if table == "transmit_points"
+                && payload["schema_version"].as_i64().is_some_and(|v| v < 6)
+            {
                 next["register_type"] = json!("HOLDING");
                 next["metadata"] = json!({});
             }

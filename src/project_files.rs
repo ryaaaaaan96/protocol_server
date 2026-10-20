@@ -282,9 +282,24 @@ fn load_table_directory(project_path: &Path, manifest: &Manifest) -> Result<Valu
         );
         directories.insert(code, path);
     }
-    let mut result = json!({"version":1,"boards":{},"workspace":{"boards":{}}});
+    let mut result = json!({"version":1,"boards":{},"workspace":{"boards":{}},"imports":{}});
     for code in codes {
         let board_path = &directories[code];
+        let board = manifest.topology["board_types"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["code"] == code)
+            .unwrap();
+        let import_path = board["workbook_import"]
+            .as_str()
+            .map(|reference| project_relative_path(board_path, reference, "workbook_import", false))
+            .transpose()?;
+        if let Some(path) = &import_path {
+            let definition = read_json(path)?;
+            crate::workbook_import::validate_for(board, &definition).map_err(|e| anyhow!(e.1))?;
+            result["imports"][code] = definition;
+        }
         let workspace = board_workspace[code].as_object().with_context(|| {
             format!(
                 "{}: workspace.boards.{code} 必须为对象",
@@ -350,7 +365,7 @@ fn load_table_directory(project_path: &Path, manifest: &Manifest) -> Result<Valu
                 matches!(
                     path.file_name().and_then(|name| name.to_str()),
                     Some("process.json" | "collect.json" | "transmit.json")
-                ),
+                ) || import_path.as_ref().is_some_and(|p| p == &path),
                 "{}: 未知点表文件名，只支持 process.json、collect.json、transmit.json",
                 path.display()
             );
@@ -395,7 +410,10 @@ fn load_table_directory(project_path: &Path, manifest: &Manifest) -> Result<Valu
                 .remove("enabled")
                 .and_then(|value| value.as_bool())
                 .with_context(|| format!("{}: enabled 必须为布尔值", path.display()))?;
-            if let Some(calculation) = object.get_mut("calculation") {
+            if let Some(calculation) = object
+                .get_mut("calculation")
+                .filter(|c| c["engine"] != "builtin")
+            {
                 let rule = calculation
                     .as_object_mut()
                     .with_context(|| format!("{}: calculation 必须为对象", path.display()))?;
@@ -521,32 +539,27 @@ impl ProjectFiles {
                     .collect::<std::collections::BTreeSet<_>>()
                     .len()
                     == manifest.workbook_boards.len()
-                    && manifest.workbook_boards.iter().all(|code| ["DSP", "UPM"]
-                        .contains(&code.as_str())
-                        && manifest.topology["board_types"]
-                            .as_array()
-                            .is_some_and(|types| types
-                                .iter()
-                                .any(|t| t["code"] == *code && t["point_storage"] == "native"))),
-                "workbook_boards 当前只支持已配置 native 存储的 DSP/UPM 板卡且不能重复"
-            );
-        }
-        if manifest.workbook.is_some()
-            && manifest.topology["board_types"]
-                .as_array()
-                .is_some_and(|types| {
-                    types
+                    && manifest
+                        .workbook_boards
                         .iter()
-                        .any(|t| t["model_code"] == "DSP" && t["point_storage"] == "native")
-                })
-        {
-            ensure!(
-                manifest.workbook_boards.iter().any(|code| code == "DSP"),
-                "原生 DSP 工作簿必须配置 workbook_boards: [\"DSP\"]，避免导入其他板卡的旧格式数据"
+                        .all(
+                            |code| manifest.topology["board_types"].as_array().is_some_and(
+                                |types| types.iter().any(|t| t["code"] == *code
+                                    && t["point_storage"] == "native"
+                                    && t["workbook_import"].is_string())
+                            )
+                        ),
+                "workbook_boards 必须引用配置了 native 存储和 workbook_import 的板卡且不能重复"
             );
         }
         if let Some(workbook) = &manifest.workbook {
             workbook_path(&path, workbook)?;
+        }
+        if manifest.workbook.is_some() {
+            ensure!(
+                !manifest.workbook_boards.is_empty(),
+                "配置 workbook 时必须明确指定 workbook_boards"
+            );
         }
         let dump = find_dump(&path, manifest.dump.as_deref())?;
         let point_tables = load_table_directory(&path, &manifest)?;
@@ -625,7 +638,7 @@ impl ProjectFiles {
             if report["errors"].as_u64().unwrap_or(0) != 0 {
                 return Err(AppError::bad("项目 Dump 数据校验失败，未创建项目"));
             }
-            crate::dsp_points::history(tx, pid, user.id, "project.dump.import", &before, &graph)
+            crate::native_points::history(tx, pid, user.id, "project.dump.import", &before, &graph)
                 .await?;
             let bytes = std::fs::read(&path).map_err(|_| AppError::bad("读取项目 Dump 失败"))?;
             let hash = hex::encode(Sha256::digest(bytes));
@@ -651,23 +664,22 @@ impl ProjectFiles {
         let hash = hex::encode(Sha256::digest(&bytes));
         if !project.manifest.workbook_boards.is_empty() {
             let before = crate::topology::snapshot(tx, pid, true).await?;
-            for board in &project.manifest.workbook_boards {
+            for code in &project.manifest.workbook_boards {
                 let bytes = bytes.clone();
-                if board == "DSP" {
-                    let data = tokio::task::spawn_blocking(move || {
-                        crate::dsp_workbook::parse_workbook(bytes)
-                    })
-                    .await
-                    .map_err(|_| AppError::bad("DSP 工作簿解析失败"))??;
-                    crate::dsp_points::import(tx, pid, &data).await?;
-                } else {
-                    let data = tokio::task::spawn_blocking(move || {
-                        crate::upm_workbook::parse_workbook(bytes)
-                    })
-                    .await
-                    .map_err(|_| AppError::bad("UPM 工作簿解析失败"))??;
-                    crate::upm_points::import(tx, pid, &data).await?;
-                }
+                let board = project.manifest.topology["board_types"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|b| b["code"] == *code)
+                    .unwrap()
+                    .clone();
+                let definition = project.point_tables["imports"][code].clone();
+                let data = tokio::task::spawn_blocking(move || {
+                    crate::workbook_import::parse_workbook(bytes, &board, &definition)
+                })
+                .await
+                .map_err(|_| AppError::bad("工作簿解析失败"))??;
+                crate::native_protocol::import(tx, pid, code, &data).await?;
             }
             let after = crate::topology::snapshot(tx, pid, true).await?;
             let report = crate::topology_validation::validate(&after);
@@ -676,7 +688,7 @@ impl ProjectFiles {
                 error.2 = Some(json!({"validation":report}));
                 return Err(error);
             }
-            crate::dsp_points::history(tx, pid, user.id, "workbook.import", &before, &after)
+            crate::native_points::history(tx, pid, user.id, "workbook.import", &before, &after)
                 .await?;
             let filename = path
                 .file_name()
@@ -690,9 +702,7 @@ impl ProjectFiles {
                     "transmit_count":crate::topology::rows(&after,"transmit_points").len(),"validation":report}),
             );
         }
-        Err(AppError::bad(
-            "工作簿导入仅支持 workbook_boards: [\"DSP\"]；其他板卡暂未启用点表",
-        ))
+        Err(AppError::bad("工作簿导入必须配置 workbook_boards"))
     }
 
     /// Reserve a private project database, then publish it only after its business
@@ -759,9 +769,13 @@ impl ProjectFiles {
         Ok(project)
     }
 
-    /// Explicit, additive first-time UPM initialization. Repeated runs do not
-    /// replace edited UPM points, and DSP rows are never touched.
-    pub async fn initialize_upm(&self, router: &DatabaseRouter, key: &str) -> Result<()> {
+    /// Explicit, additive board initialization; existing points are preserved.
+    pub async fn initialize_board(
+        &self,
+        router: &DatabaseRouter,
+        key: &str,
+        board_key: &str,
+    ) -> Result<()> {
         let project = self.project(key)?;
         let username = std::env::var("ADMIN_USERNAME").unwrap_or("admin".into());
         let user:User=sqlx::query_as("SELECT id,username,display_name,is_admin FROM auth.users WHERE username=$1 AND active AND is_admin")
@@ -784,30 +798,40 @@ impl ProjectFiles {
         let bytes = std::fs::read(workbook_path(&project.directory, workbook)?)?;
         ensure!(bytes.len() <= 15 * 1024 * 1024, "工作簿不能超过 15 MiB");
         let hash = hex::encode(Sha256::digest(&bytes));
-        let data = tokio::task::spawn_blocking(move || crate::upm_workbook::parse_workbook(bytes))
-            .await?
-            .map_err(|e| anyhow!(e.1))?;
+        let board = project.manifest.topology["board_types"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["code"] == board_key && b["point_storage"] == "native")
+            .context("板卡未配置 native 存储")?
+            .clone();
+        let definition = project.point_tables["imports"][board_key].clone();
+        let data = tokio::task::spawn_blocking(move || {
+            crate::workbook_import::parse_workbook(bytes, &board, &definition)
+        })
+        .await?
+        .map_err(|e| anyhow!(e.1))?;
         let result:crate::error::Result<()> = async {
             let mut tx=db::unlocked_write_context(router,&user,pid).await?;
             crate::permissions::require_all(&mut tx,pid).await?;
             crate::edit_lock::require_available(&mut tx,pid,user.id).await?;
-            let exists:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM points.process_points WHERE project_id=$1 AND board_key='UPM')")
-                .bind(pid).fetch_one(&mut *tx).await?;
-            if exists { println!("UPM 已有内部点，未覆盖任何数据。"); return Ok(()); }
+            let exists:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM points.process_points WHERE project_id=$1 AND board_key=$2)")
+                .bind(pid).bind(board_key).fetch_one(&mut *tx).await?;
+            if exists { println!("{board_key} 已有内部点，未覆盖任何数据。"); return Ok(()); }
             let before=crate::topology::snapshot(&mut tx,pid,true).await?;
             project_config::apply(&mut tx,pid,&project.manifest.topology).await?;
-            crate::upm_points::import(&mut tx,pid,&data).await?;
+            crate::native_protocol::import(&mut tx,pid,board_key,&data).await?;
             let after=crate::topology::snapshot(&mut tx,pid,true).await?;
             let report=crate::topology_validation::validate(&after);
             let errors=crate::topology::new_errors(&crate::topology_validation::validate(&before),&report);
-            if !errors.is_empty() { return Err(AppError::bad(format!("UPM 导入校验失败：{}",json!(errors)))); }
+            if !errors.is_empty() { return Err(AppError::bad(format!("{board_key} 导入校验失败：{}",json!(errors)))); }
             db::touch(&mut tx,pid).await?;
-            crate::dsp_points::history(&mut tx,pid,user.id,"upm.initialize",&before,&after).await?;
+            crate::native_points::history(&mut tx,pid,user.id,"board.initialize",&before,&after).await?;
             db::record_import(&mut tx,pid,user.id,workbook,&hash,&report).await?;
-            db::audit(&mut tx,user.id,Some(pid),"upm.initialize","UPM",
+            db::audit(&mut tx,user.id,Some(pid),"board.initialize",board_key,
                 Some(before["project_config"].clone()),Some(after["project_config"].clone())).await?;
             tx.commit().await?;
-            println!("已导入 UPM：{} 个内部点、{} 条采集、{} 条转发；DSP 数据未改动。",
+            println!("已导入 {board_key}：{} 个内部点、{} 条采集、{} 条转发。",
                 data.process.len(),data.collect.len(),data.transmit.len());
             Ok(())
         }.await;
@@ -1085,7 +1109,7 @@ mod tests {
         assert!(
             fixture
                 .error()
-                .contains("原生 DSP 工作簿必须配置 workbook_boards")
+                .contains("配置 workbook 时必须明确指定 workbook_boards")
         );
 
         manifest["workbook_boards"] = json!([]);
@@ -1093,10 +1117,15 @@ mod tests {
         assert!(
             fixture
                 .error()
-                .contains("原生 DSP 工作簿必须配置 workbook_boards")
+                .contains("配置 workbook 时必须明确指定 workbook_boards")
         );
 
         manifest["workbook_boards"] = json!(["DSP"]);
+        manifest["topology"]["board_types"][0]["workbook_import"] = json!("workbook.json");
+        fixture.write(
+            "alpha/DSP/workbook.json",
+            &json!({"version":1,"process":[{"sheet":"test","group":"LOCAL"}]}),
+        );
         fixture.write("alpha/project.json", &manifest);
         let files = fixture.load().unwrap();
         let loaded = files.manifest("alpha").unwrap().unwrap();
@@ -1118,7 +1147,7 @@ mod tests {
         for selection in [json!(["UPM"]), json!(["DSP", "UPM"]), json!(["DSP", "DSP"])] {
             manifest["workbook_boards"] = selection;
             fixture.write("alpha/project.json", &manifest);
-            assert!(fixture.error().contains("workbook_boards 当前只支持"));
+            assert!(fixture.error().contains("workbook_boards 必须引用"));
         }
         manifest["workbook_boards"] = json!(["DSP"]);
         let board = manifest["topology"]["board_types"][0]
@@ -1130,7 +1159,7 @@ mod tests {
         assert!(
             fixture
                 .error()
-                .contains("workbook_boards 当前只支持已配置 native")
+                .contains("workbook_boards 必须引用配置了 native")
         );
     }
 
@@ -1381,6 +1410,15 @@ mod tests {
         fixture.write("alpha/sources/points.xlsx", &json!({}));
         let mut manifest = fixture.read("alpha/project.json");
         manifest["workbook"] = json!("sources/points.xlsx");
+        manifest["workbook_boards"] = json!(["DSP"]);
+        manifest["topology"]["board_types"][0]["point_storage"] = json!("native");
+        manifest["topology"]["board_types"][0]["point_groups"] =
+            json!([{"code":"LOCAL","name":"本地"}]);
+        manifest["topology"]["board_types"][0]["workbook_import"] = json!("workbook.json");
+        fixture.write(
+            "alpha/DSP/workbook.json",
+            &json!({"version":1,"process":[{"sheet":"test","group":"LOCAL"}]}),
+        );
         fixture.write("alpha/project.json", &manifest);
         assert!(fixture.load().is_ok());
         manifest["workbook"] = json!("sources/missing.xlsx");

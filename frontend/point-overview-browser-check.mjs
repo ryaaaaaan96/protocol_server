@@ -17,7 +17,7 @@ const mappings = [1, 2, 3].map(id => ({
   id, board_key: "DSP", process_point_id: id === 3 ? 2 : 1, endpoint_key: "UPP_SERVICE",
   wire_type: "U16", wire_length: 2, address: 6 + 2 * (id - 1), scale: 1, access: "RO", upp_model: 1,
 }));
-const board = { code: "DSP", name: "DSP 功率板", point_storage: "native",
+const board = { code: "DSP", name: "DSP 功率板", point_storage: "native", point_rules: {sheet_layout: true},
   point_groups: [{ code: "LOCAL", name: "DSP 内部数据" }], point_endpoints: [{ code: "UPP_SERVICE", name: "UPP 转发", protocol: "UPP" }] };
 let revision = 1, lastPreview, conflict = false;
 const snapshot = () => {

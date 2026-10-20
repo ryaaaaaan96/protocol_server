@@ -123,11 +123,8 @@ pub async fn validate(
 }
 #[derive(Deserialize)]
 pub struct ImportScope {
-    #[serde(default = "dsp_import_scope")]
+    #[serde(default)]
     board: String,
-}
-fn dsp_import_scope() -> String {
-    "DSP".into()
 }
 pub async fn preview_import(
     State(s): State<AppState>,
@@ -138,10 +135,28 @@ pub async fn preview_import(
 ) -> Result<Json<Value>> {
     let mut tx = db::context(&s.pool, &u, Some(pid), true).await?;
     crate::permissions::require_all(&mut tx, pid).await?;
-    if !["DSP", "UPM"].contains(&scope.board.as_str()) {
-        return Err(AppError::bad("工作簿板卡范围只支持 DSP 或 UPM"));
-    }
-    let configured = crate::dsp_points::native_board(&mut tx, pid, &scope.board).await?;
+    let key: String = sqlx::query_scalar("SELECT config_key FROM meta.project_state WHERE id=$1")
+        .bind(pid)
+        .fetch_one(&mut *tx)
+        .await?;
+    let definitions = s
+        .project_files
+        .definition(Some(&key))
+        .map_err(|e| AppError::bad(format!("{e:#}")))?;
+    let board_key = if scope.board.is_empty() {
+        definitions["imports"]
+            .as_object()
+            .and_then(|v| v.keys().next())
+            .cloned()
+            .ok_or(AppError::bad("项目未配置工作簿映射"))?
+    } else {
+        scope.board
+    };
+    let configured = crate::native_points::native_board(&mut tx, pid, &board_key)
+        .await?
+        .ok_or(AppError::bad("请先应用所选板卡的原生点表配置"))?;
+    let definition = definitions["imports"][&board_key].clone();
+    crate::workbook_import::validate_for(&configured, &definition)?;
     tx.rollback().await?;
     let field = multipart
         .next_field()
@@ -158,7 +173,6 @@ pub async fn preview_import(
         .map_err(|_| AppError::bad("文件过大或上传失败"))?
         .to_vec();
     let hash = hex::encode(Sha256::digest(&bytes));
-    let configured = configured.ok_or(AppError::bad("请先应用所选板卡的原生点表配置"))?;
     let device_count = configured["point_groups"]
         .as_array()
         .into_iter()
@@ -166,20 +180,14 @@ pub async fn preview_import(
         .map(|g| g["devices"].as_array().map_or(0, Vec::len))
         .sum::<usize>()
         .max(1);
-    let board = scope.board.clone();
-    let data = tokio::task::spawn_blocking(move || -> Result<Value> {
-        if board == "UPM" {
-            Ok(serde_json::to_value(crate::upm_workbook::parse_workbook(
-                bytes,
-            )?)?)
-        } else {
-            Ok(serde_json::to_value(crate::dsp_workbook::parse_workbook(
-                bytes,
-            )?)?)
-        }
+    let board = configured.clone();
+    let import_definition = definition.clone();
+    let data = tokio::task::spawn_blocking(move || {
+        crate::workbook_import::parse_workbook(bytes, &board, &import_definition)
     })
     .await
     .map_err(|_| AppError::bad("Excel 解析失败"))??;
+    let data = serde_json::to_value(data)?;
     let mut tx = db::context(&s.pool, &u, Some(pid), true).await?;
     crate::permissions::require_all(&mut tx, pid).await?;
     let revision = db::lock_project(&mut tx, pid).await?;
@@ -192,25 +200,18 @@ pub async fn preview_import(
     .await?;
     let id: i64 = sqlx::query_scalar("INSERT INTO meta.previews(kind,project_id,created_by,filename,sha256,revision,payload,expires_at) VALUES('import',$1,$2,$3,$4,$5,$6,now()+interval '1 hour') RETURNING id")
         .bind(pid).bind(u.id).bind(&filename).bind(&hash).bind(revision)
-        .bind(json!({"kind":if scope.board=="UPM" {"upm_native"} else {"dsp_native"},"data":data})).fetch_one(&mut *tx).await?;
+        .bind(json!({"kind":"board_native","board_key":board_key,"board":configured,"definition":definition,"data":data})).fetch_one(&mut *tx).await?;
     tx.commit().await?;
-    let upm = scope.board == "UPM";
     let process = data["process"].as_array().unwrap();
-    let warnings = if upm {
-        data["warnings"].clone()
-    } else {
-        json!(["本次仅替换 DSP 内部数据与 UPP 转发表；UPM 数据保持原样。"])
-    };
+    let group_counts:Vec<Value> = crate::topology::rows(&configured,"point_groups").iter().map(|g|json!({"code":g["code"],"name":g["name"],"count":process.iter().filter(|p|p["group_key"]==g["code"]).count()})).collect();
     Ok(Json(
         json!({"id":id,"filename":filename,"sha256":hash,"revision":revision,
-        "import_scope":if upm {"upm"} else {"dsp"},"point_count":process.len(),
-        "dsp_count":process.iter().filter(|p|p["group_key"]=="DSP" || !upm).count(),
-        "local_count":process.iter().filter(|p|p["group_key"]=="LOCAL" && upm).count(),
-        "collect_count":data["collect"].as_array().map_or(0,Vec::len),
+        "import_scope":board_key.to_lowercase(),"board_key":board_key,"board_name":configured["name"],
+        "point_count":process.len(),"group_counts":group_counts,
+        "collect_count":data["collect"].as_array().unwrap().len(),
         "transmit_count":data["transmit"].as_array().unwrap().len(),
         "mapping_count":data["transmit"].as_array().unwrap().len(),
-        "device_count":device_count,"warnings":warnings,
-        "sheets":if upm {json!(["UPM单板测点","UPM-DSP采集数据","CSU-UPM采集数据","平台公共测点映射表"])} else {json!(["DSP内部数据","UPM-DSP采集数据"])},
+        "device_count":device_count,"warnings":data["warnings"],"sheets":crate::workbook_import::sheets(&definition),
         "sample":process.iter().take(6).collect::<Vec<_>>()}),
     ))
 }
@@ -236,16 +237,27 @@ pub async fn commit_import(
         ));
     }
     let before = db::snapshot(&mut tx, pid).await?;
-    let scope = match row["payload"]["kind"].as_str() {
-        Some("dsp_native") => "DSP",
-        Some("upm_native") => "UPM",
-        _ => return Err(AppError::bad("旧导入预览已失效，请重新上传")),
-    };
-    if crate::dsp_points::native_board(&mut tx, pid, scope)
-        .await?
-        .is_none()
+    if row["payload"]["kind"] != "board_native" {
+        return Err(AppError::bad("旧导入预览已失效，请重新上传"));
+    }
+    let scope = row["payload"]["board_key"]
+        .as_str()
+        .ok_or(AppError::bad("预览缺少板卡"))?;
+    let board = crate::native_points::native_board(&mut tx, pid, scope).await?;
+    let key: String = sqlx::query_scalar("SELECT config_key FROM meta.project_state WHERE id=$1")
+        .bind(pid)
+        .fetch_one(&mut *tx)
+        .await?;
+    let definitions = s
+        .project_files
+        .definition(Some(&key))
+        .map_err(|e| AppError::bad(format!("{e:#}")))?;
+    if board.as_ref() != Some(&row["payload"]["board"])
+        || definitions["imports"][scope] != row["payload"]["definition"]
     {
-        return Err(AppError::conflict("板卡存储配置已变化，请重新上传并预览"));
+        return Err(AppError::conflict(
+            "板卡或工作簿映射配置已变化，请重新上传并预览",
+        ));
     }
     if !input.replace
         && topology::TABLES
@@ -254,15 +266,9 @@ pub async fn commit_import(
     {
         return Err(AppError::conflict("项目已有配置，必须明确确认替换"));
     }
-    if scope == "UPM" {
-        let data: crate::upm_workbook::UpmImport =
-            serde_json::from_value(row["payload"]["data"].clone())?;
-        crate::upm_points::import(&mut tx, pid, &data).await?;
-    } else {
-        let data: crate::dsp_workbook::DspImport =
-            serde_json::from_value(row["payload"]["data"].clone())?;
-        crate::dsp_points::import(&mut tx, pid, &data).await?;
-    }
+    let data: crate::workbook_import::ImportData =
+        serde_json::from_value(row["payload"]["data"].clone())?;
+    crate::native_protocol::import(&mut tx, pid, scope, &data).await?;
     let graph = topology::snapshot(&mut tx, pid, true).await?;
     let report = topology_validation::validate(&graph);
     let errors = topology::new_errors(&topology_validation::validate(&before), &report);
@@ -295,7 +301,7 @@ pub async fn commit_import(
         .execute(&mut *tx)
         .await?;
     let after = topology::snapshot(&mut tx, pid, true).await?;
-    crate::dsp_points::history(&mut tx, pid, u.id, "workbook.import", &before, &after).await?;
+    crate::native_points::history(&mut tx, pid, u.id, "workbook.import", &before, &after).await?;
     db::audit(&mut tx,u.id,Some(pid),"import.commit","workbook",Some(before),Some(json!({"filename":row["filename"],"sha256":row["sha256"],"point_count":point_count,"validation":report}))).await?;
     crate::edit_lock::release_owned(&mut tx, pid, u.id).await?;
     tx.commit().await?;

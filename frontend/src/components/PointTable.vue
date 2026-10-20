@@ -170,7 +170,7 @@ const scopedData = computed<PointTableData | null>(() => {
     options.process_points = (options.process_points || []).filter(signal => signal.group_key === props.groupKey);
   }
   if (props.endpointKey) options.endpoints = (options.endpoints || []).filter(endpoint => endpoint.code === props.endpointKey);
-  if (props.kind === "collect") options.process_points = options.process_points.filter(point => point.group_key !== "LOCAL");
+  if (props.kind === "collect") options.process_points = options.process_points.filter(point => (options.native_groups || []).some(group => group.code === point.group_key && group.collect_enabled !== false));
   if (props.processPointId != null) options.process_points = options.process_points.filter(s => s.id === props.processPointId);
   return { ...data.value, options };
 });

@@ -123,7 +123,7 @@
     }
   },
   "calculation": {
-    "engine": "javascript",
+    "engine": "builtin",
     "parameters": {
       "header_bytes": 6,
       "type_bytes": {
@@ -141,8 +141,30 @@
         "序列号": 62,
         "机器型号编码": 94,
         "设备类型编码": 96
-      }
-    },
-    "script_file": "transmit.js"
+      },
+      "fixed_offset_key": "name",
+      "group_by": [
+        "endpoint_key",
+        "upp_model"
+      ],
+      "sort_by": [
+        {
+          "field": "upp_model"
+        },
+        {
+          "field": "upload_level",
+          "descending": true
+        },
+        {
+          "field": "source_order"
+        },
+        {
+          "field": "process_point_id"
+        },
+        {
+          "field": "id"
+        }
+      ]
+    }
   }
 }

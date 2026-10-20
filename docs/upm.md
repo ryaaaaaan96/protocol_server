@@ -32,13 +32,13 @@ Modbus 优先采用备注中的 `0x03`（HOLDING）或 `0x04`（INPUT）；缺�
 
 ```bash
 cargo run -- migrate
-cargo run -- import-upm dc-ups
+cargo run -- import-board dc-ups UPM
 ./scripts/dev.sh
 ```
 
-`import-upm` 验证并应用项目 JSON，仅在 UPM 无内部点时导入，重复运行保留已有点表，DSP 点数据不会被改写。与他人的编辑租约冲突时拒绝执行。新项目通过 `./scripts/create-project.sh dc-ups` 同时导入 DSP 与 UPM。
+`import-board`（兼容旧 `import-upm`）验证并应用项目 JSON，仅在 UPM 无内部点时导入，重复运行保留已有点表，DSP 点数据不会被改写。与他人的编辑租约冲突时拒绝执行。新项目通过 `./scripts/create-project.sh dc-ups` 同时导入 DSP 与 UPM。
 
-网页 Excel 导入可选择 DSP 或 UPM；确认替换只影响所选板卡。文件夹导入不带 Dump 仍然不替换点表。新版 Dump 为 `(schema_version, migration_version) = (6, 3)`，包含三张业务表，兼容旧 `(4, 1)`、`(5, 2)` 两表归档；旧归档导入后的采集表为空。
+网页 Excel 导入按 JSON 列出已配置 workbook_import 的板卡；确认替换只影响所选板卡。文件夹导入不带 Dump 仍然不替换点表。新版 Dump 为 `(schema_version, migration_version) = (7, 4)`，包含三张业务表，兼容 `(6, 3)` 和旧 `(4, 1)`、`(5, 2)` 两表归档；旧归档导入后的采集表为空。
 
 ## 校验与来源差异
 
@@ -51,3 +51,5 @@ cargo run -- import-upm dc-ups
 - UPM 本轮保留 Excel 地址，不启用自动重排脚本，也不自动跟随 DSP 侧后续编辑。两端协议修改需分别核对。
 
 生成产物包括 UPM 的三类点表 JSON 和按设备展开的转发地址 JSON，仍需固件侧验证。
+
+UPM 工作簿映射位于 `config/dc-ups/UPM/workbook.json`，解析、校验及生成使用通用 Rust 引擎。新增同类板卡参见 [JSON 板卡配置](board-configuration.md)。

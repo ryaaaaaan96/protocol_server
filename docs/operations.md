@@ -49,7 +49,7 @@ cargo run -- migrate
 ./scripts/dev.sh
 ```
 
-平台原记录、ID、序列、约束和登录会话保留，权限检查及审计只追加限制保持有效。平台迁移版本记录在自己的 `public._sqlx_migrations`，升级后为 2；平台迁移本身不改变业务结构；同一次 migrate 会继续应用项目库尚未执行的迁移，当前项目库版本为 v6（迁移 0003）。
+平台原记录、ID、序列、约束和登录会话保留，权限检查及审计只追加限制保持有效。平台迁移版本记录在自己的 `public._sqlx_migrations`，升级后为 2；平台迁移本身不改变业务结构；同一次 migrate 会继续应用项目库尚未执行的迁移，当前项目库版本为 v7（迁移 0004）。
 
 DBeaver 刷新 `protocol_platform`，展开 `auth`、`meta` 和 `history` 查看。旧 `public.users`、`public.projects` 等自有 SQL 改用新限定名，不依赖当前默认 Schema。连接平台库后可核对：
 
@@ -137,7 +137,7 @@ node scripts/export-project.mjs dc-ups
 node scripts/export-project.mjs dc-ups /tmp/project-export
 ```
 
-默认输出 `.runtime/exports/<时间>/dc-ups/`，不覆盖已有目录。脚本从平台登记定位项目库并验证 UUID，需要 Node `pg`、管理员连接及 `pg_dump`；来源库只读。归档是含白名单数据的专用 custom Dump，携带内部、采集和转发三类点表，新导出使用 `(schema_version, migration_version)=(6,3)`。兼容旧 `(4,1)`、`(5,2)` 两表归档，旧归档的采集数据视为空；其他版本组合拒绝，不恢复历史、锁或预览。
+默认输出 `.runtime/exports/<时间>/dc-ups/`，不覆盖已有目录。脚本从平台登记定位项目库并验证 UUID，需要 Node `pg`、管理员连接及 `pg_dump`；来源库只读。归档是含白名单数据的专用 custom Dump，携带内部、采集和转发三类点表，新导出使用 `(schema_version, migration_version)=(7,4)`。兼容 `(6,3)` 和旧 `(4,1)`、`(5,2)` 两表归档，旧归档的采集数据视为空；其他版本组合拒绝，不恢复历史、锁或预览。
 
 管理员在网页选择完整文件夹，预览后导入。预览不会创建项目数据库；提交相同 key 覆盖配置，新 key 才创建项目库。
 

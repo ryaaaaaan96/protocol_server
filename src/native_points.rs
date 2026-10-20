@@ -1,6 +1,5 @@
-//! Native DSP point storage. Organization is read from the applied JSON config.
+//! Shared native point storage. Organization is read from the applied JSON config.
 use crate::{
-    dsp_workbook::DspImport,
     error::{AppError, Result},
     model::{flag_expression, identifier},
     topology::{Change, num, rows, strv},
@@ -59,7 +58,7 @@ fn table(kind: &str) -> Result<&'static str> {
 
 pub(crate) fn defaults(kind: &str) -> Value {
     if kind == "collect" {
-        return crate::upm_points::collect_defaults();
+        return crate::native_protocol::collect_defaults();
     }
     if kind == "process" {
         json!({"group_key":"LOCAL","name":"","enum_name":"","sig_id":null,
@@ -78,7 +77,7 @@ fn columns(kind: &str) -> &'static str {
     if kind == "process" {
         PROCESS_COLUMNS
     } else if kind == "collect" {
-        crate::upm_points::COLLECT_COLUMNS
+        crate::native_protocol::COLLECT_COLUMNS
     } else {
         TRANSMIT_COLUMNS
     }
@@ -152,10 +151,10 @@ pub async fn apply(
     }
     .split(',')
     .collect();
-    let dsp = crate::dsp_sheet::is_dsp(&board);
+    let dsp = crate::sheet_layout::enabled(&board);
     let worksheet = kind == "process" && dsp;
     if worksheet {
-        allowed.extend(crate::dsp_sheet::EDIT_FIELDS.split(','));
+        allowed.extend(crate::sheet_layout::EDIT_FIELDS.split(','));
     }
     for key in fields.keys() {
         if !allowed.contains(key.as_str()) {
@@ -163,7 +162,19 @@ pub async fn apply(
         }
     }
     let old = if c.operation == "create" {
-        defaults(kind)
+        let mut value = defaults(kind);
+        if kind == "process" {
+            value["group_key"] = board["point_groups"][0]["code"].clone();
+        } else if let Some(ep) = rows(&board, "point_endpoints").iter().find(|e| {
+            if kind == "collect" {
+                e["direction"] == "collect"
+            } else {
+                e["direction"] != "collect"
+            }
+        }) {
+            value["endpoint_key"] = ep["code"].clone();
+        }
+        value
     } else {
         sqlx::query_scalar::<_, Value>(&format!(
             "SELECT to_jsonb(t) FROM {table} t WHERE project_id=$1 AND board_key=$2 AND id=$3"
@@ -190,11 +201,11 @@ pub async fn apply(
         return Err(AppError::bad("未提供修改字段"));
     }
     let mut updates = if worksheet {
-        crate::dsp_sheet::normalize(fields, &old)?
+        crate::sheet_layout::normalize_for(&board, fields, &old)?
     } else {
         fields.clone()
     };
-    let old_category = crate::dsp_sheet::category(&old).to_owned();
+    let old_category = crate::sheet_layout::category(&old).to_owned();
     let mut merged = old;
     if kind == "process" {
         for key in ["unit", "default_value", "min_value", "max_value", "notes"] {
@@ -232,10 +243,10 @@ pub async fn apply(
         let point: Value = sqlx::query_scalar("SELECT to_jsonb(p) FROM points.process_points p WHERE project_id=$1 AND board_key=$2 AND id=$3")
             .bind(pid).bind(board_key).bind(merged["process_point_id"].as_i64()).fetch_optional(&mut *tx).await?
             .ok_or(AppError::bad("转发必须关联当前板卡的内部数据点"))?;
-        if kind == "collect" && point["group_key"] == "LOCAL" {
-            return Err(AppError::bad("LOCAL 为本地设备，不建立采集记录"));
+        if kind == "collect" && !crate::board_rules::can_collect(&board, &point["group_key"]) {
+            return Err(AppError::bad("当前分组不允许建立采集记录"));
         }
-        if board_key == "UPM" && kind == "forward" {
+        if crate::board_rules::inherited_name(&board) && kind == "forward" {
             updates.insert("name".into(), point["name"].clone());
             merged["name"] = point["name"].clone();
         }
@@ -245,7 +256,7 @@ pub async fn apply(
                 .is_some_and(|value| value != &json!(true))
             {
                 return Err(AppError::bad(
-                    "DSP 转发表中的记录全部参与转发，不再支持停用；不需要转发时请删除映射",
+                    "此板卡的转发表记录全部参与转发，不再支持停用；不需要转发时请删除映射",
                 ));
             }
             // Retain compatible storage columns without independent DSP meaning.
@@ -254,20 +265,20 @@ pub async fn apply(
                 updates.insert(key.into(), value.clone());
                 merged[key] = value;
             }
-            let model = require_upp_model(&point)?;
+            let model = require_upp_model(&board, &point)?;
             if fields
                 .get("upp_model")
                 .is_some_and(|value| value.as_i64() != Some(model))
             {
                 return Err(AppError::bad(format!(
                     "UPP 模型号由内部数据分类「{}」固定推导为 {model}，不能手动修改",
-                    crate::dsp_sheet::category(&point)
+                    crate::sheet_layout::category(&point)
                 )));
             }
             updates.insert("upp_model".into(), json!(model));
             merged["upp_model"] = json!(model);
             if c.operation == "create" {
-                let suggested = crate::dsp_sheet::wire_defaults(
+                let suggested = crate::sheet_layout::wire_defaults(
                     &point,
                     fields.get("wire_type").and_then(Value::as_str),
                 );
@@ -280,7 +291,7 @@ pub async fn apply(
             // DSP representation determines conversion; byte order belongs to
             // the receiving board. Retain normalized compatibility columns.
             for (key, value) in [
-                ("conversion", crate::dsp_sheet::wire_defaults(&point, merged["wire_type"].as_str())["conversion"].clone()),
+                ("conversion", crate::sheet_layout::wire_defaults(&point, merged["wire_type"].as_str())["conversion"].clone()),
                 ("byte_order", json!(0)),
             ] {
                 updates.insert(key.into(), value.clone());
@@ -304,11 +315,11 @@ pub async fn apply(
     if c.operation == "create" {
         return insert(tx, pid, board_key, kind, &merged).await;
     }
-    if worksheet && old_category != crate::dsp_sheet::category(&merged) {
+    if worksheet && old_category != crate::sheet_layout::category(&merged) {
         let linked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM points.transmit_points WHERE project_id=$1 AND board_key=$2 AND process_point_id=$3)")
             .bind(pid).bind(board_key).bind(c.id).fetch_one(&mut *tx).await?;
         if linked {
-            let model = require_upp_model(&merged)?;
+            let model = require_upp_model(&board, &merged)?;
             // Keep offsets and all manually configured wire parameters unchanged.
             // Normal preview, authorization, validation and history see this update.
             sqlx::query("UPDATE points.transmit_points SET upp_model=$4 WHERE project_id=$1 AND board_key=$2 AND process_point_id=$3 AND upp_model<>$4")
@@ -327,9 +338,9 @@ pub async fn apply(
     )).bind(pid).bind(board_key).bind(c.id).bind(Value::Object(updates)).fetch_one(&mut *tx).await?)
 }
 
-fn require_upp_model(point: &Value) -> Result<i64> {
-    crate::dsp_sheet::upp_model(point).ok_or(AppError::bad(
-        "DSP 转发需要内部点具有有效的数据分类，请先设置数据分类",
+fn require_upp_model(board: &Value, point: &Value) -> Result<i64> {
+    crate::sheet_layout::upp_model_for(board, point).ok_or(AppError::bad(
+        "此板卡转发需要内部点具有有效的数据分类，请先设置数据分类",
     ))
 }
 
@@ -353,7 +364,7 @@ pub async fn table_rows(
             FROM points.process_points p WHERE p.project_id=$1 AND p.board_key=$2 ORDER BY p.display_order,p.id"#)
             .bind(pid).bind(board_key).fetch_all(&mut *tx).await?
     } else if kind == "collect" {
-        crate::upm_points::collect_rows(tx, pid, board_key).await?
+        crate::native_protocol::collect_rows(tx, pid, board_key).await?
     } else {
         sqlx::query_scalar(r#"SELECT to_jsonb(t) || jsonb_build_object(
             'edit_values',to_jsonb(t),'signal_name',p.name,'source_point',to_jsonb(p),
@@ -369,13 +380,13 @@ pub async fn table_rows(
     };
     let groups = groups(&board);
     for row in &mut result {
-        if kind == "process" && crate::dsp_sheet::is_dsp(&board) {
-            crate::dsp_sheet::project(row);
+        if kind == "process" && crate::sheet_layout::enabled(&board) {
+            crate::sheet_layout::project_for(&board, row);
         }
         if kind != "process" {
             if let Some(point) = row.as_object_mut().unwrap().remove("source_point") {
-                if crate::dsp_sheet::is_dsp(&board) {
-                    crate::dsp_sheet::project_forward(row, &point);
+                if crate::sheet_layout::enabled(&board) {
+                    crate::sheet_layout::project_forward_for(&board, row, &point);
                 }
             }
             if let Some(endpoint) = board["point_endpoints"].as_array().and_then(|endpoints| {
@@ -387,8 +398,8 @@ pub async fn table_rows(
                 row["protocol"] = endpoint["protocol"].clone();
             }
         }
-        if board_key == "UPM" {
-            crate::upm_points::project_row(row, &board, kind);
+        if !crate::sheet_layout::enabled(&board) {
+            crate::native_protocol::project_row(row, &board, kind);
         }
         row["group_name"] = groups
             .iter()
@@ -397,97 +408,6 @@ pub async fn table_rows(
             .unwrap_or_else(|| row["group_key"].clone());
     }
     Ok(result)
-}
-
-pub async fn import(tx: &mut PgConnection, pid: i64, data: &DspImport) -> Result<()> {
-    let config: Option<Value> =
-        sqlx::query_scalar("SELECT topology_config FROM meta.project_state WHERE id=$1")
-            .bind(pid)
-            .fetch_one(&mut *tx)
-            .await?;
-    let Some(board) = config
-        .as_ref()
-        .and_then(|v| v["board_types"].as_array())
-        .and_then(|bs| {
-            bs.iter()
-                .find(|b| b["point_storage"] == "native" && b["code"] == "DSP")
-        })
-    else {
-        return Err(AppError::bad("DSP 工作簿导入需要已应用的 DSP 原生板卡配置"));
-    };
-    if data.process.is_empty() {
-        return Err(AppError::bad("DSP 工作簿没有可导入的内部数据"));
-    }
-    // Import previews may have been created by an older server version.
-    // Recheck fixed model rules before replacing any current rows.
-    for mapping in &data.transmit {
-        let point = data
-            .process
-            .iter()
-            .find(|point| point["enum_name"] == mapping["process_enum"])
-            .ok_or(AppError::bad("DSP 转发记录找不到对应内部点"))?;
-        if mapping["upp_model"].as_i64() != Some(require_upp_model(point)?) {
-            return Err(AppError::bad(format!(
-                "转发字段 {} 的 UPP 模型号与内部数据分类不一致",
-                strv(mapping, "name")
-            )));
-        }
-    }
-    let board_key = strv(board, "code");
-    sqlx::query("DELETE FROM points.transmit_points WHERE project_id=$1 AND board_key=$2")
-        .bind(pid)
-        .bind(board_key)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query("DELETE FROM points.process_points WHERE project_id=$1 AND board_key=$2")
-        .bind(pid)
-        .bind(board_key)
-        .execute(&mut *tx)
-        .await?;
-    let mut ids = BTreeMap::new();
-    for point in &data.process {
-        let mut values = defaults("process");
-        for key in PROCESS_COLUMNS.split(',') {
-            if let Some(value) = point.get(key) {
-                values[key] = value.clone();
-            }
-        }
-        if !groups(board)
-            .iter()
-            .any(|g| g["code"] == values["group_key"])
-        {
-            return Err(AppError::bad("工作簿内部数据的分组不在已应用配置中"));
-        }
-        let created = insert(tx, pid, board_key, "process", &values).await?;
-        if ids
-            .insert(
-                strv(&created, "enum_name").to_owned(),
-                (num(&created, "id"), created["name"].clone()),
-            )
-            .is_some()
-        {
-            return Err(AppError::bad("DSP 内部数据枚举重复，无法唯一匹配转发来源"));
-        }
-    }
-    for point in &data.transmit {
-        let mut values = defaults("forward");
-        for key in TRANSMIT_COLUMNS.split(',') {
-            if let Some(value) = point.get(key) {
-                values[key] = value.clone();
-            }
-        }
-        let (id, name) = ids.get(strv(point, "process_enum")).ok_or_else(|| {
-            AppError::bad(format!(
-                "转发字段 {} 找不到对应的 DSP 内部枚举",
-                strv(point, "name")
-            ))
-        })?;
-        values["process_point_id"] = json!(id);
-        values["name"] = name.clone();
-        values["enabled"] = json!(true);
-        insert(tx, pid, board_key, "forward", &values).await?;
-    }
-    Ok(())
 }
 
 fn issue(out: &mut Vec<Value>, entity: &str, row: &Value, code: &str, message: &str, related: i64) {
@@ -674,7 +594,11 @@ pub fn validate(g: &Value) -> Vec<Value> {
         }
         if !flag_expression(strv(point, "flags"))
             || !(identifier(strv(point, "callback"))
-                || (point["board_key"] == "UPM" && point["callback"] == "0"))
+                || board_definition(g, strv(point, "board_key")).is_some_and(|b| {
+                    b["point_rules"]["null_callbacks"]
+                        .as_array()
+                        .is_some_and(|v| v.contains(&point["callback"]))
+                }))
         {
             issue(
                 &mut out,
@@ -687,21 +611,28 @@ pub fn validate(g: &Value) -> Vec<Value> {
         }
         // The workbook has no confirmed DSP numeric sigIDs. Native definitions
         // and protocol JSON remain useful without inventing a firmware ABI.
-        if point["board_key"] != "UPM" {
+        if !crate::board_rules::raw_row(g, point) {
             numeric_range(&mut out, point);
         }
     }
-    for t in rows(g, "transmit_points")
-        .iter()
-        .filter(|t| t["board_key"] != "UPM")
-    {
+    for t in rows(g, "transmit_points").iter().filter(|t| {
+        !crate::board_rules::raw_row(g, t)
+            && !board_definition(g, strv(t, "board_key")).is_some_and(|b| {
+                rows(b, "point_endpoints")
+                    .iter()
+                    .any(|e| e["code"] == t["endpoint_key"] && e["protocol"] == "MODBUS")
+            })
+    }) {
         let entity = "transmit_points";
-        let dsp = board_definition(g, strv(t, "board_key")).is_some_and(crate::dsp_sheet::is_dsp);
+        let dsp =
+            board_definition(g, strv(t, "board_key")).is_some_and(crate::sheet_layout::enabled);
         if !board_definition(g, strv(t, "board_key"))
             .and_then(|board| board["point_endpoints"].as_array())
             .is_some_and(|endpoints| {
                 endpoints.iter().any(|endpoint| {
-                    endpoint["code"] == t["endpoint_key"] && endpoint["protocol"] == "UPP"
+                    endpoint["code"] == t["endpoint_key"]
+                        && endpoint["protocol"] == "UPP"
+                        && endpoint["direction"] != "collect"
                 })
             })
         {
@@ -730,18 +661,21 @@ pub fn validate(g: &Value) -> Vec<Value> {
             continue;
         };
         if dsp {
-            let model = crate::dsp_sheet::upp_model(p);
+            let model = crate::sheet_layout::upp_model_for(
+                board_definition(g, strv(t, "board_key")).unwrap(),
+                p,
+            );
             if model.is_none() || model != t["upp_model"].as_i64() {
                 issue(
                     &mut out,
                     entity,
                     t,
                     "upp_model_category",
-                    "DSP UPP 模型号必须由所关联内部点的有效数据分类固定推导",
+                    "UPP 模型号必须由所关联内部点的有效数据分类固定推导",
                     num(p, "id"),
                 );
             }
-            let suggested = crate::dsp_sheet::wire_defaults(p, None);
+            let suggested = crate::sheet_layout::wire_defaults(p, None);
             if t["wire_type"] != suggested["wire_type"] {
                 issue(
                     &mut out,
@@ -778,7 +712,7 @@ pub fn validate(g: &Value) -> Vec<Value> {
         if !scale.is_finite() || scale <= 0. {
             issue(&mut out, entity, t, "scale", "协议系数必须是有限正数", 0);
         }
-        let automatic = crate::dsp_sheet::wire_defaults(p, Some(wire));
+        let automatic = crate::sheet_layout::wire_defaults(p, Some(wire));
         let conversion = if dsp {
             strv(&automatic, "conversion")
         } else {
@@ -851,7 +785,7 @@ pub fn validate(g: &Value) -> Vec<Value> {
             }
         }
     }
-    out.extend(crate::upm_points::validate(g));
+    out.extend(crate::native_protocol::validate(g));
     out
 }
 
@@ -923,8 +857,13 @@ pub fn generate(g: &Value) -> BTreeMap<String, String> {
         return files;
     };
     for board in boards.iter().filter(|b| b["point_storage"] == "native") {
-        if board["code"] == "UPM" {
-            files.extend(crate::upm_points::generate(g, board));
+        if !crate::sheet_layout::enabled(board)
+            && (crate::board_rules::raw(board)
+                || rows(board, "point_endpoints")
+                    .iter()
+                    .any(|e| e["direction"] == "collect" || e["protocol"] == "MODBUS"))
+        {
+            files.extend(crate::native_protocol::generate(g, board));
             continue;
         }
         let code = strv(board, "code");
@@ -945,7 +884,7 @@ pub fn generate(g: &Value) -> BTreeMap<String, String> {
             .filter(|p| p["board_key"] == code)
             .cloned()
             .collect();
-        if crate::dsp_sheet::is_dsp(board) {
+        if crate::sheet_layout::enabled(board) {
             for mapping in &mut transmit {
                 mapping["enabled"] = json!(true);
                 if let Some(point) = process.iter().find(|point| {
@@ -953,7 +892,7 @@ pub fn generate(g: &Value) -> BTreeMap<String, String> {
                         && point["project_id"] == mapping["project_id"]
                 }) {
                     mapping["name"] = point["name"].clone();
-                    mapping["conversion"] = crate::dsp_sheet::wire_defaults(
+                    mapping["conversion"] = crate::sheet_layout::wire_defaults(
                         point,
                         mapping["wire_type"].as_str(),
                     )["conversion"]
@@ -1052,7 +991,7 @@ mod tests {
             .unwrap()
             .clone(),
         );
-        json!({"project_config":{"board_types":[{"code":"DSP","point_storage":"native",
+        json!({"project_config":{"board_types":[{"code":"DSP","point_storage":"native","point_rules":crate::sheet_layout::test_board()["point_rules"],
             "point_groups":[{"code":"LOCAL","name":"本地数据"}],
             "point_endpoints":[{"code":"UPP_SERVICE","name":"DSP UPP服务","protocol":"UPP"}]}]},"process_points":[point],"transmit_points":[transmit]})
     }
@@ -1103,7 +1042,8 @@ mod tests {
         g["transmit_points"][0]["endpoint_key"] = json!("MISSING");
         assert!(validate(&g).iter().any(|issue| issue["code"] == "endpoint"));
         g["transmit_points"][0]["endpoint_key"] = json!("UPP_SERVICE");
-        g["project_config"]["board_types"][0]["point_endpoints"][0]["protocol"] = json!("MODBUS");
+        g["project_config"]["board_types"][0]["point_endpoints"][0]["protocol"] =
+            json!("UNSUPPORTED");
         assert!(validate(&g).iter().any(|issue| issue["code"] == "endpoint"));
     }
 
@@ -1161,7 +1101,9 @@ mod tests {
                 .any(|issue| issue["code"] == "upp_model_category")
         );
         g["process_points"][0]["metadata"]["category"] = json!("");
-        assert!(require_upp_model(&g["process_points"][0]).is_err());
+        assert!(
+            require_upp_model(&crate::sheet_layout::test_board(), &g["process_points"][0]).is_err()
+        );
         g["transmit_points"] = json!([]);
         assert!(
             validate(&g).is_empty(),
@@ -1173,6 +1115,10 @@ mod tests {
     fn other_board_wire_configuration_is_independent_of_dsp_categories() {
         let mut g = graph();
         g["project_config"]["board_types"][0]["code"] = json!("OTHER");
+        g["project_config"]["board_types"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("point_rules");
         g["process_points"][0]["board_key"] = json!("OTHER");
         g["transmit_points"][0]["board_key"] = json!("OTHER");
         g["process_points"][0]["metadata"] = json!({});
@@ -1187,6 +1133,10 @@ mod tests {
     fn other_boards_retain_independent_names_and_enabled_mappings() {
         let mut g = graph();
         g["project_config"]["board_types"][0]["code"] = json!("OTHER");
+        g["project_config"]["board_types"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("point_rules");
         g["process_points"][0]["board_key"] = json!("OTHER");
         g["transmit_points"][0]["board_key"] = json!("OTHER");
         let mut disabled = g["transmit_points"][0].clone();

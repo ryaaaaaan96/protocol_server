@@ -34,8 +34,8 @@ export async function checkGroupedSchema({ first, second, runtimeUrl, runtimeRol
     const names = (await db.query("SELECT table_schema||'.'||table_name AS name FROM information_schema.tables WHERE table_schema IN ('public','points','history','meta') AND table_type='BASE TABLE' ORDER BY 1")).rows.map(row => row.name);
     assert.deepEqual(names, expectedTables, "project databases contain precisely eight grouped tables");
     assert.equal((await db.query("SELECT count(*)::int AS n FROM meta.previews")).rows[0].n, 0, "old previews are invalidated");
-    assert.equal((await db.query("SELECT schema_version FROM meta.project_state")).rows[0].schema_version, 6);
-    assert.equal((await db.query("SELECT max(version)::int AS version FROM public._sqlx_migrations WHERE success")).rows[0].version, 3);
+    assert.equal((await db.query("SELECT schema_version FROM meta.project_state")).rows[0].schema_version, 7);
+    assert.equal((await db.query("SELECT max(version)::int AS version FROM public._sqlx_migrations WHERE success")).rows[0].version, 4);
     assert.equal((await db.query("SELECT encode(checksum,'hex') AS value FROM public._sqlx_migrations WHERE version=1")).rows[0].value, before.checksum, "already applied migration remains unchanged");
     for (const table of ["history.events", "history.releases"]) {
       for (const privilege of ["UPDATE", "DELETE", "TRUNCATE"]) {
@@ -63,7 +63,7 @@ export async function checkGroupedSchema({ first, second, runtimeUrl, runtimeRol
     { legacy_source: "imports", legacy_id: "301" },
     { legacy_source: "point_history", legacy_id: "101" },
   ]);
-  assert.equal((await first.query("SELECT revision FROM meta.project_state")).rows[0].revision, 9, "each schema upgrade invalidates stale revision-based drafts");
+  assert.equal((await first.query("SELECT revision FROM meta.project_state")).rows[0].revision, 10, "each schema upgrade invalidates stale revision-based drafts");
   assert.deepEqual(await Promise.all([first, second].map(async db => (await db.query("SELECT last_value::text AS value,is_called FROM points.process_points_id_seq")).rows[0])), before.sequences, "moving tables preserves exact sequence high-water marks, including rolled-back IDs");
   assert.ok(BigInt((await first.query("SELECT nextval('history.events_id_seq')::text AS value")).rows[0].value) > 7001n);
   assert.ok(BigInt((await first.query("SELECT nextval('meta.previews_id_seq')::text AS value")).rows[0].value) > 9001n);
@@ -105,7 +105,7 @@ export async function checkGroupedSchema({ first, second, runtimeUrl, runtimeRol
   }
   const after = await rows(first, "history.events");
   migrate();
-  assert.equal((await first.query("SELECT revision FROM meta.project_state")).rows[0].revision, 9, "repeating migrate must not increment revision");
+  assert.equal((await first.query("SELECT revision FROM meta.project_state")).rows[0].revision, 10, "repeating migrate must not increment revision");
   assert.deepEqual(await rows(first, "history.events"), after, "repeating migrate creates no duplicate history");
-  console.log("PASS: grouped-schema v3 preserves exact point/history/release/lease data, legacy event identities and sequence high-water marks; stale previews expire; eight tables retain RLS and append-only history; repeat migration is idempotent.");
+  console.log("PASS: grouped-schema v4 preserves exact point/history/release/lease data, legacy event identities and sequence high-water marks; stale previews expire; eight tables retain RLS and append-only history; repeat migration is idempotent.");
 }

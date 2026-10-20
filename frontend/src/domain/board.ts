@@ -12,7 +12,7 @@ export function configuredBoardSheets(schema: PointSchema, code: string, endpoin
   return (board?.tables || []).flatMap<Sheet>(key => {
     const sheet = boardSheets.find(item => item.key === key || item.key === "forward" && key === "transmit");
     const definition = sheet && schema.boards[code]?.[sheet.pointKind];
-    if (sheet?.pointKind === "forward" && code === "UPM" && definition)
+    if (sheet?.pointKind === "forward" && endpoints.filter(endpoint => endpoint.direction !== "collect").length > 1 && definition)
       return endpoints.filter(endpoint => endpoint.direction !== "collect").map(endpoint => ({
         ...sheet, key: `forward:${endpoint.code}`, endpointKey: endpoint.code, label: endpoint.name,
       }));

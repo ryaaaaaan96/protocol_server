@@ -45,7 +45,7 @@ fn keys(csv: &str) -> BTreeSet<&str> {
 fn schema_writable(kind: &str) -> BTreeSet<&str> {
     match kind {
         "process" => keys(PROCESS)
-            .union(&keys(crate::dsp_sheet::EDIT_FIELDS))
+            .union(&keys(crate::sheet_layout::EDIT_FIELDS))
             .copied()
             .collect::<BTreeSet<_>>()
             .union(&keys(RANGE))
@@ -70,7 +70,7 @@ fn schema_writable(kind: &str) -> BTreeSet<&str> {
 pub(crate) fn writable(kind: &str) -> BTreeSet<&str> {
     match kind {
         "process" => keys("name,enum_name,sig_id,internal_type,flags,callback,process_enabled")
-            .union(&keys(crate::dsp_sheet::EDIT_FIELDS))
+            .union(&keys(crate::sheet_layout::EDIT_FIELDS))
             .copied()
             .collect::<BTreeSet<_>>()
             .union(&keys(RANGE))
@@ -90,14 +90,14 @@ fn readable(kind: &str) -> BTreeSet<&str> {
     );
     let extra = if kind == "process" {
         keys("group_name,contexts,collection_count,forward_count,range_inherited")
-            .union(&keys(crate::dsp_sheet::READ_FIELDS))
+            .union(&keys(crate::sheet_layout::READ_FIELDS))
             .copied()
             .collect()
     } else {
         keys(
             "signal_name,field_name,context_name,dev_id,endpoint_name,protocol,transport,port,upp_model,effective_address,address_length,effective_type,effective_length,register_type,access,scale,byte_order,default_value,min_value,max_value",
         )
-        .union(&keys(crate::dsp_sheet::FORWARD_READ_FIELDS))
+        .union(&keys(crate::sheet_layout::FORWARD_READ_FIELDS))
         .copied()
         .collect()
     };
@@ -396,7 +396,7 @@ pub async fn project_schema(
     ))
 }
 async fn board(tx: &mut PgConnection, pid: i64, board_key: &str) -> Result<Value> {
-    crate::dsp_points::native_board(tx, pid, board_key)
+    crate::native_points::native_board(tx, pid, board_key)
         .await?
         .ok_or(AppError::bad("此板卡尚未启用点表存储"))
 }
@@ -472,7 +472,7 @@ pub(crate) async fn table_rows(
     kind: &str,
 ) -> Result<Vec<Value>> {
     entity(kind)?;
-    crate::dsp_points::table_rows(tx, pid, board_key, kind).await
+    crate::native_points::table_rows(tx, pid, board_key, kind).await
 }
 
 #[derive(Deserialize)]
@@ -525,7 +525,7 @@ pub async fn apply(tx: &mut PgConnection, pid: i64, c: &Change) -> Result<Value>
     if c.operation != "delete" && fields.is_empty() {
         return Err(AppError::bad("未提供修改字段"));
     }
-    crate::dsp_points::apply(tx, pid, board_key, kind, c).await
+    crate::native_points::apply(tx, pid, board_key, kind, c).await
 }
 pub fn audit_before(g: &Value, entity: &str, id: i64, board_key: &str) -> Option<Value> {
     if !is_point_entity(entity) {

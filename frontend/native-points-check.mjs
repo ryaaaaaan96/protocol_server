@@ -171,7 +171,7 @@ assert.equal(allowsPoint(protocolPermissions, "DSP", "process", process, process
 assert.deepEqual(pointChoices(forward, "endpoint_key", {}).map(endpoint => endpoint.id), ["UPP_SERVICE"]);
 console.log("PASS: DSP sheet projections, hidden protocol fields, communication recommendations, category summaries, editable aliases, array bounds, generic tables and scoped permissions");
 
-assert.equal(forwardDefinition.calculation.engine, "javascript");
-assert.equal(forwardDefinition.calculation.script_file, "transmit.js");
+assert.equal(forwardDefinition.calculation.engine, "builtin");
+assert.equal(forwardDefinition.calculation.script_file, undefined);
 for (const column of ["effective_address", "effective_length"]) assert.equal(fieldForColumn(forward, column), undefined);
 assert.deepEqual(editableCommunicationRecommendation(forward, mapping), {wire_type:"S32", scale:1});

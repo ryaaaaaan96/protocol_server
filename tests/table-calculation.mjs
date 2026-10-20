@@ -12,6 +12,9 @@ export async function checkTableCalculation({client, engineer, engineerId, equal
   const originalScript = fs.readFileSync(scriptFile,"utf8");
   let definition = JSON.parse(original);
   const write = () => fs.writeFileSync(filename,JSON.stringify(definition));
+  definition.calculation.engine = "javascript";
+  definition.calculation.script_file = "transmit.js";
+  write();
   const writeScript = body => fs.writeFileSync(scriptFile,`export default function calculate(points, parameters) { ${body} }\n`);
   const graph = () => client.call(`${url}/topology`);
   const history = async () => (await client.call(`${url}/sql`,"POST",{sql:"SELECT record_id,entity_type,action,batch_id,before_data,after_data FROM history.events WHERE kind='point' ORDER BY id"})).rows;

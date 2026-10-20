@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 
 pub fn validate(graph: &Value) -> Value {
-    let mut issues = crate::dsp_points::validate(graph);
+    let mut issues = crate::native_points::validate(graph);
     if let Err(error) = crate::project_config::Config::parse(graph["project_config"].clone()) {
         issues.push(json!({"key":"project_config:invalid","level":"error","entity":"project_config","code":"invalid","message":error.1}));
     }

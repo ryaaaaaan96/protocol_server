@@ -341,7 +341,7 @@ pub async fn commit(
         Some(json!({"record":before_record,"revision":revision})),
         Some(json!({"record":if c.operation == "delete" {Value::Null} else {row.clone()},"impact":effects,"merged":merged,"base_revision":c.revision,"calculation_rule":c.calculation_rule})),
     ).await?;
-    crate::dsp_points::history(
+    crate::native_points::history(
         &mut tx,
         pid,
         u.id,

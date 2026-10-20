@@ -83,19 +83,19 @@ try {
   await page.route("**/__upm_import",route=>route.fulfill({contentType:"text/html; charset=utf-8",body:`<!doctype html><html><head><meta charset="utf-8"></head><body><div id="test"></div><script type="module">
     import {createApp,h} from '/node_modules/.vite/deps/vue.js';
     import ImportModal from '/src/components/ImportModal.vue';
-    createApp({render:()=>h(ImportModal,{pid:1,canWrite:true})}).mount('#test');
+    createApp({render:()=>h(ImportModal,{pid:1,canWrite:true,boards:[{code:"UPM",name:"UPM 控制板"}]})}).mount('#test');
   </script></body></html>`}));
   await page.route("**/api/projects/1/imports/**",route=>{
     assert.equal(new URL(route.request().url()).searchParams.get("board"),"UPM");
-    return route.fulfill({json:{id:2,import_scope:"upm",filename:"upm.xlsx",sha256:"a".repeat(64),
+    return route.fulfill({json:{id:2,board_key:"UPM",board_name:"UPM 控制板",group_counts:[{name:"LOCAL",count:161},{name:"DSP",count:445}],import_scope:"upm",filename:"upm.xlsx",sha256:"a".repeat(64),
       point_count:606,local_count:161,dsp_count:445,collect_count:445,transmit_count:560,warnings:[],sample:points}});
   });
   await page.goto("/__upm_import");
   await page.getByLabel("导入板卡",{exact:true}).selectOption("UPM");
   await page.getByLabel("选择 Excel 文件",{exact:true}).setInputFiles({name:"upm.xlsx",mimeType:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",buffer:Buffer.from("mock")});
   await expect(page.locator(".import-counts")).toContainText("161");
-  await expect(page.locator(".confirm-checkbox")).toContainText("确认替换 UPM 内部点、UPP 采集表及两种对外转发表");
-  await expect(page.locator(".confirm-checkbox")).toContainText("保留项目拓扑、DSP 及其他板卡数据");
+  await expect(page.locator(".confirm-checkbox")).toContainText("确认替换 UPM 控制板 板卡的点表");
+  await expect(page.locator(".confirm-checkbox")).toContainText("保留项目拓扑和其他板卡数据");
   assert.deepEqual(errors,[]);
   console.log("PASS: UPM local/DSP templates, collection cell editing and separate Modbus/UPP views");
 } finally { await browser?.close();await server.close(); }

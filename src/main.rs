@@ -1,15 +1,18 @@
 mod api;
 mod auth;
+mod board_rules;
 mod change_merge;
 mod codegen;
 mod database;
 mod db;
-mod dsp_points;
-mod dsp_sheet;
+#[cfg(test)]
+#[path = "../tests/references/dsp_workbook.rs"]
 mod dsp_workbook;
 mod edit_lock;
 mod error;
 mod model;
+mod native_points;
+mod native_protocol;
 mod permissions;
 mod point_batch;
 mod point_order;
@@ -18,13 +21,16 @@ mod project_config;
 mod project_dump;
 mod project_files;
 mod project_folders;
+mod sheet_layout;
 mod sql_workspace;
 mod table_calculation;
 mod topology;
 mod topology_codegen;
 mod topology_validation;
-mod upm_points;
+#[cfg(test)]
+#[path = "../tests/references/upm_workbook.rs"]
 mod upm_workbook;
+mod workbook_import;
 
 use anyhow::Context;
 use axum::{
@@ -71,8 +77,9 @@ async fn main() -> anyhow::Result<()> {
         arguments.is_empty()
             || arguments == ["migrate"]
             || (arguments.len() == 2
-                && ["create-project", "import-upm"].contains(&arguments[0].as_str())),
-        "用法：protocol-server [migrate | create-project <项目目录名> | import-upm <项目目录名>]"
+                && ["create-project", "import-upm"].contains(&arguments[0].as_str()))
+            || (arguments.len() == 3 && arguments[0] == "import-board"),
+        "用法：protocol-server [migrate | create-project <项目目录名> | import-board <项目目录名> <板卡编码> | import-upm <项目目录名>]"
     );
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -144,7 +151,14 @@ async fn main() -> anyhow::Result<()> {
         return project_files.create(&pool, &arguments[1]).await;
     }
     if arguments.first().is_some_and(|a| a == "import-upm") {
-        return project_files.initialize_upm(&pool, &arguments[1]).await;
+        return project_files
+            .initialize_board(&pool, &arguments[1], "UPM")
+            .await;
+    }
+    if arguments.first().is_some_and(|a| a == "import-board") {
+        return project_files
+            .initialize_board(&pool, &arguments[1], &arguments[2])
+            .await;
     }
     let dummy_hash = auth::hash_password("invalid-password-placeholder".into())
         .await

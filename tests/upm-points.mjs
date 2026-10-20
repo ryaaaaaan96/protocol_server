@@ -16,7 +16,7 @@ export async function checkUpmPoints({client,engineer,engineerId,viewer,viewerId
     return (await commit(p.data)).record;
   };
   const before=await graph();
-  equal(before.schema_version,6);
+  equal(before.schema_version,7);
   equal(before.validation.errors,0);
   equal(before.process_points.filter(p=>p.board_key==="UPM").length,606);
   equal(before.collect_points.length,445);
@@ -80,7 +80,7 @@ export async function checkUpmPoints({client,engineer,engineerId,viewer,viewerId
   const form=new FormData();
   form.append("file",new Blob([fs.readFileSync(path.join(projectConfigs,fixtureKey("upm"),"sources/DC-UPS测点数据表.xlsx"))]),"upm.xlsx");
   const imported=await client.call(`${url}/imports/preview?board=UPM`,"POST",form);
-  equal(imported.import_scope,"upm");equal(imported.collect_count,445);equal(imported.local_count,161);
+  equal(imported.import_scope,"upm");equal(imported.collect_count,445);equal(imported.group_counts.find(g=>g.code==="LOCAL").count,161);
   await client.call(`${url}/imports/${imported.id}/commit`,"POST",{replace:true});
   equal(JSON.stringify((await graph()).process_points.filter(p=>p.board_key==="DSP")),dsp);
   equal((await graph()).validation.errors,0);
@@ -94,6 +94,7 @@ export async function checkUpmPoints({client,engineer,engineerId,viewer,viewerId
   const manifest=JSON.parse(fs.readFileSync(path.join(projectConfigs,fixtureKey("upm"),"project.json"),"utf8"));
   manifest.key=fixtureKey("dsp_native"); manifest.name=manifest.key;
   fs.writeFileSync(path.join(projectConfigs,manifest.key,"project.json"),JSON.stringify(manifest));
+  fs.copyFileSync(path.join(projectConfigs,fixtureKey("upm"),"UPM/workbook.json"),path.join(projectConfigs,fixtureKey("dsp_native"),"UPM/workbook.json"));
   execFileSync("target/debug/protocol-server",["import-upm",manifest.key],{env:testEnv,stdio:"pipe"});
   const upgraded=await client.call(`/projects/${upgrade.id}/topology`);
   equal(upgraded.collect_points.length,445);
