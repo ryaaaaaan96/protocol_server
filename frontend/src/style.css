@@ -3292,11 +3292,6 @@ body {
   flex-wrap: wrap;
   gap: 8px;
 }
-.type-edge-label-background {
-  fill: #fff;
-  stroke: #dce8ed;
-  stroke-width: 1;
-}
 .type-node {
   cursor: pointer;
 }
@@ -3328,6 +3323,13 @@ body {
   font-size: 19px;
   font-weight: 650;
   fill: #287f75;
+}
+.type-edge-count,
+.type-edge-protocol {
+  paint-order: stroke fill;
+  stroke: #fff;
+  stroke-width: 3px;
+  stroke-linejoin: round;
 }
 .type-edge-protocol {
   font-size: 12px;

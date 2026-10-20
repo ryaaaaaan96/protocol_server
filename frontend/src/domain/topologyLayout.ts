@@ -2,8 +2,10 @@ import type { ELK, ElkNode, ElkPoint } from "elkjs/lib/elk-api";
 import type { Row } from "../api";
 
 export type TopologyDirection = "RIGHT" | "DOWN";
+export type TopologyRouting = "SPLINES" | "ORTHOGONAL";
 export const nodeWidth = 230, nodeHeight = 120;
 export interface TopologyLayout {
+  routing: TopologyRouting;
   nodes: (Row & { x: number; y: number })[];
   edges: (Row & {
     id: string; path: string; labels: string[]; routes: ElkPoint[][];
@@ -22,7 +24,7 @@ const byId = (a: { id: string }, b: { id: string }) => a.id < b.id ? -1 : a.id >
 
 // ELK receives only presentation data, in stable order. It never changes the
 // input graph, board quantities, protocol settings or persisted project data.
-export function layoutInput(boards: Row[], links: Row[], direction: TopologyDirection): ElkNode {
+export function layoutInput(boards: Row[], links: Row[], direction: TopologyDirection, routing: TopologyRouting = "SPLINES"): ElkNode {
   const ports = new Map<string, NonNullable<ElkNode["ports"]>>(boards.map(board => [board.code, []]));
   for (const link of links) {
     ports.get(link.parent)?.push({ id: portId(link, "out"), width: 0, height: 0,
@@ -34,7 +36,8 @@ export function layoutInput(boards: Row[], links: Row[], direction: TopologyDire
     id: "project-topology",
     layoutOptions: {
       "elk.algorithm": "layered", "elk.direction": direction,
-      "elk.edgeRouting": "ORTHOGONAL", "elk.randomSeed": "42",
+      "elk.edgeRouting": routing, "elk.randomSeed": "42",
+      "elk.layered.edgeRouting.splines.mode": "CONSERVATIVE",
       "elk.padding": "[top=32,left=32,bottom=32,right=32]",
       "elk.spacing.nodeNode": "55", "elk.spacing.edgeEdge": "20",
       "elk.spacing.edgeLabel": "12",
@@ -57,11 +60,26 @@ export function layoutInput(boards: Row[], links: Row[], direction: TopologyDire
   };
 }
 
-export async function layoutTopology(engine: Pick<ELK, "layout">, boards: Row[], links: Row[], direction: TopologyDirection): Promise<TopologyLayout> {
-  const result = await engine.layout(layoutInput(boards, links, direction));
+function edgePath(points: ElkPoint[], routing: TopologyRouting): string {
+  const start = `M ${points[0].x} ${points[0].y}`;
+  if (routing === "ORTHOGONAL" || points.length === 2) {
+    return start + points.slice(1).map(point => ` L ${point.x} ${point.y}`).join("");
+  }
+  if ((points.length - 1) % 3) throw new Error("自动布局未返回有效的曲线控制点");
+  let path = start;
+  for (let index = 1; index < points.length; index += 3) {
+    const [first, second, end] = points.slice(index, index + 3);
+    path += ` C ${first.x} ${first.y}, ${second.x} ${second.y}, ${end.x} ${end.y}`;
+  }
+  return path;
+}
+
+export async function layoutTopology(engine: Pick<ELK, "layout">, boards: Row[], links: Row[], direction: TopologyDirection, routing: TopologyRouting = "SPLINES"): Promise<TopologyLayout> {
+  const result = await engine.layout(layoutInput(boards, links, direction, routing));
   const nodes = new Map(result.children?.map(node => [node.id, node]));
   const edges = new Map(result.edges?.map(edge => [edge.id, edge]));
   return {
+    routing,
     width: Math.max(900, result.width || 1), height: Math.max(200, result.height || 1),
     nodes: boards.map(board => {
       const node = nodes.get(boardId(board.code));
@@ -73,7 +91,7 @@ export async function layoutTopology(engine: Pick<ELK, "layout">, boards: Row[],
       if (!edge?.sections?.length || label?.x == null || label.y == null) throw new Error("自动布局未返回完整的连接位置");
       const routes = edge.sections.map(section => [section.startPoint, ...(section.bendPoints || []), section.endPoint]);
       return { ...link, id: edgeId(link), labels: labelsFor(link), routes,
-        path: routes.map(points => points.map((point, index) => `${index ? "L" : "M"} ${point.x} ${point.y}`).join(" ")).join(" "),
+        path: routes.map(points => edgePath(points, routing)).join(" "),
         label: { x: label.x, y: label.y, width: label.width!, height: label.height! },
       };
     }),

@@ -65,6 +65,11 @@ try {
     await page.goto("/__topology");
     await expect(page.locator(".type-node")).toHaveCount(config.board_types.length, { timeout: 30000 });
     await expect(page.locator(".type-connection-line")).toHaveCount(config.mounts.length);
+    const diagram = page.getByRole("group", { name: "项目板卡类型协议拓扑", exact: true });
+    await expect(diagram).toHaveAttribute("data-routing", "SPLINES");
+    await expect(page.locator(".type-edge-label-background")).toHaveCount(0);
+    await expect(diagram.locator("rect")).toHaveCount(config.board_types.length);
+    assert((await page.locator(".type-connection-line").evaluateAll(paths => paths.map(path => path.getAttribute("d")))).every(path => path.includes(" C ")));
     const positions = await page.locator(".type-node").evaluateAll(nodes => nodes.map(node => ({
       code: node.getAttribute("data-code"),
       x: Number(node.querySelector("rect").getAttribute("x")),
@@ -94,6 +99,11 @@ try {
       await upm.click();
       await expect.poll(() => page.evaluate(() => window.selectedBoard)).toBe("UPM");
     }
+    await page.getByLabel("连线样式", { exact: true }).selectOption("ORTHOGONAL");
+    await expect(diagram).toHaveAttribute("data-routing", "ORTHOGONAL", { timeout: 30000 });
+    assert((await page.locator(".type-connection-line").evaluateAll(paths => paths.map(path => path.getAttribute("d")))).every(path => !path.includes(" C ")));
+    await page.getByLabel("连线样式", { exact: true }).selectOption("SPLINES");
+    await expect(diagram).toHaveAttribute("data-routing", "SPLINES", { timeout: 30000 });
     await page.getByLabel("布局方向", { exact: true }).selectOption("DOWN");
     await expect(page.getByRole("button", { name: "自动整理", exact: true })).toBeEnabled({ timeout: 30000 });
     await expect(page.locator(".type-node")).toHaveCount(config.board_types.length);
@@ -115,7 +125,7 @@ try {
   }
   assert.deepEqual(requests, [], "Rearranging a diagram never requests or writes project data");
   assert.deepEqual(errors, []);
-  console.log("PASS: worker layout, direction/rearrange controls, stale-result cancellation, readonly view, shared nodes/counts and legacy topology");
+  console.log("PASS: curve/right-angle styles, frameless labels, worker layout, direction controls, readonly view and legacy topology");
 } finally {
   await browser?.close();
   await server.close();

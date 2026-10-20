@@ -4,20 +4,21 @@ import type { ELK } from "elkjs/lib/elk-api";
 import { RefreshCw } from "@lucide/vue";
 import type { Row } from "../api";
 import { boardTypes, typeMounts } from "../domain/project";
-import { layoutTopology, nodeWidth, nodeHeight, type TopologyDirection, type TopologyLayout } from "../domain/topologyLayout";
+import { layoutTopology, nodeWidth, nodeHeight, type TopologyDirection, type TopologyRouting, type TopologyLayout } from "../domain/topologyLayout";
 import Loading from "../components/Loading.vue";
 const props = defineProps<{ graph: Row | null }>();
 const emit = defineEmits<{ board: [key: string] }>();
 const types = computed(() => boardTypes(props.graph));
 const links = computed(() => (props.graph ? typeMounts(props.graph) : []));
 const direction = ref<TopologyDirection>("RIGHT"), rearrange = ref(0), busy = ref(false), error = ref("");
+const routing = ref<TopologyRouting>("SPLINES");
 const layout = shallowRef<TopologyLayout | null>(null);
 // Row edits refresh the project graph too; only topology changes need layout.
 const signature = computed(() => JSON.stringify({
   boards: types.value.map(board => [board.code, board.name, board.quantity]).sort(),
   links: links.value.map(link => [link.parent, link.child, link.quantity, link.connections]).sort(),
 }));
-watch([signature, direction, rearrange], async (_, __, cleanup) => {
+watch([signature, direction, routing, rearrange], async (_, __, cleanup) => {
   let cancelled = false, engine: ELK | undefined;
   cleanup(() => { cancelled = true; engine?.terminateWorker(); });
   busy.value = true;
@@ -28,7 +29,7 @@ watch([signature, direction, rearrange], async (_, __, cleanup) => {
     const { createLayoutEngine } = await import("../domain/topologyWorker");
     if (cancelled) return;
     engine = createLayoutEngine();
-    const result = await layoutTopology(engine, types.value, links.value, direction.value);
+    const result = await layoutTopology(engine, types.value, links.value, direction.value, routing.value);
     if (!cancelled) layout.value = result;
   } catch (cause) {
     if (!cancelled) error.value = `拓扑布局失败：${(cause as Error).message}`;
@@ -54,6 +55,10 @@ watch([signature, direction, rearrange], async (_, __, cleanup) => {
             <option value="RIGHT">横向布局</option>
             <option value="DOWN">纵向布局</option>
           </select>
+          <select v-model="routing" class="button small" aria-label="连线样式">
+            <option value="SPLINES">平滑曲线</option>
+            <option value="ORTHOGONAL">直角折线</option>
+          </select>
           <button class="button small" :disabled="busy" @click="rearrange++">
             <RefreshCw :size="15" />{{ busy ? "整理中…" : "自动整理" }}
           </button>
@@ -69,6 +74,7 @@ watch([signature, direction, rearrange], async (_, __, cleanup) => {
           :viewBox="`0 0 ${layout.width} ${layout.height}`"
           role="group"
           aria-label="项目板卡类型协议拓扑"
+          :data-routing="layout.routing"
         >
           <defs>
             <marker
@@ -116,8 +122,6 @@ watch([signature, direction, rearrange], async (_, __, cleanup) => {
                 {{ link.quantity }} 个
               </title>
             </path>
-            <rect class="type-edge-label-background" :x="link.label.x" :y="link.label.y"
-              :width="link.label.width" :height="link.label.height" rx="6" />
             <text
               :x="link.label.x + link.label.width / 2"
               :y="link.label.y + 21"
