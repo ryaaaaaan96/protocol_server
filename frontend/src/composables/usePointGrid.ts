@@ -4,6 +4,8 @@ import {
   choiceLabel,
   pointChoices,
   pointIsString,
+  communicationFields,
+  communicationRecommendation,
   type PointTableData,
 } from "../domain/pointTables";
 import {
@@ -324,6 +326,22 @@ export function usePointGrid(options: Options) {
         clearStringBounds(next, row);
       setDraft(new Map([[row.id, next]]));
       editor.value = null;
+      return true;
+    } catch (error) {
+      options.error((error as Error).message);
+      return false;
+    }
+  }
+  function applyRecommendation(row: Row) {
+    if (!finish() || !options.data.value || options.blocked() || !options.writable()) return false;
+    const data = options.data.value;
+    const suggestion = communicationRecommendation(data, values(row), row);
+    if (!suggestion || communicationFields.some(key => {
+      const column = Object.keys(data.definition.inline).find(column => data.definition.inline[column] === key);
+      return !column || !editable(row, column);
+    })) return false;
+    try {
+      setDraft(new Map([[row.id, { ...values(row), ...suggestion }]]));
       return true;
     } catch (error) {
       options.error((error as Error).message);
@@ -828,6 +846,7 @@ export function usePointGrid(options: Options) {
     }
   });
   return {
+    applyRecommendation,
     table,
     active,
     anchor,

@@ -64,7 +64,11 @@ erDiagram
 
 `address` 是明确的 UPP 字节偏移，拖动行只改 `display_order`。内部 F32 与线上 S32 可使用显式 `fixed_point` 转换；数组可用 `array_bytes` 映射。DSP 内部没有 sigID；通用存储中的可空 `sig_id` 仅为兼容字段，不属于 DSP sheet 的显示或编辑定义。
 
-DSP 的 `process.json` 按原 sheet 的 25 列定义界面。`variable_name` 映射 `metadata.source_variable`，同步规范化的 `enum_name`；`sheet_type` 将 `Sys_U16` 等映射为 `internal_type`。`EnumTab`、显示位数、存储标志、STRUCT、CPU、上传等级和分类逐字段写入 `metadata` 白名单；RAM/FLASH/EEPROM/Calibration 与恢复默认值等旧布尔字段无关。原始 `source_cells` 保持不变用于追溯，网页读取当前业务值。派生列由当前参数计算；这层显示适配不新增数据库表，也不改写其他板卡或 DSP 转发映射。
+DSP 保留原 sheet 的 25 个来源字段，`process.json` 在界面隐藏“数据类型”和“UPP 模型号”。`variable_name` 映射 `metadata.source_variable`，同步规范化的 `enum_name`；`sheet_type` 将 `Sys_U16` 等映射为 `internal_type`。`EnumTab`、显示位数、存储标志、STRUCT、CPU、上传等级和分类逐字段写入 `metadata` 白名单；RAM/FLASH/EEPROM/Calibration 与恢复默认值等旧布尔字段无关。原始 `source_cells` 保持不变用于追溯，网页读取当前业务值。
+
+DSP 转发的 `upp_model` 保留为存储字段，服务端固定由内部 `category` 推导；禁止独立改成其他型号。分类变更在同一事务更新全部关联映射，现有预览、权限、版本冲突和历史记录覆盖联动；地址碰撞会使整个修改回滚。没有分类的内部点可独立存在，但不能建立转发。工作簿与 Dump 导入同样校验型号一致性。
+
+`wire_type` 是每条转发可编辑的实际通信类型。数组建议 `STRING`，标量 `F32` 建议 `S32`，其他沿用类型；新增时补齐缺省通信参数。合法人工覆盖产生非阻断提示，例如 F32 内部点以 `F32 / identity / scale=1` 转发；不支持的转换仍拒绝。修改 `DateType` 只改变建议，不覆盖已有实际类型。转发表使用 `category` 筛选，按端点及派生型号进行组内排序。此调整不增加数据库表或改变其他板卡规则。
 
 ## 统一历史事件
 

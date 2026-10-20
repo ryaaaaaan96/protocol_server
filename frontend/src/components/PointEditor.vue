@@ -6,10 +6,16 @@ import {
   pointChoices,
   pointChangeSummary,
   pointIsString,
+  isDspForward,
+  communicationFields,
+  communicationRecommendation,
+  communicationHint,
+  communicationDiffers,
   type PointTableData,
 } from "../domain/pointTables";
 import Modal from "./Modal.vue";
 import Field from "./Field.vue";
+import PointWarnings from "./PointWarnings.vue";
 import { usePermissionContext } from "../composables/useProjectPermissions";
 import { allowsPoint, allowsScope } from "../domain/permissions";
 const props = defineProps<{
@@ -25,6 +31,7 @@ const emit = defineEmits<{ close: []; done: [merged?: boolean]; error: [message:
 const def = props.data.definition;
 const permissions = usePermissionContext();
 const values = ref<Row>({});
+let communicationEdited = false;
 for (const key of def.editor) {
   const f = def.fields[key];
   values.value[key] =
@@ -47,6 +54,7 @@ if (!props.row) {
       values.value.endpoint_key = endpoints[0]?.id ?? null;
   }
 }
+if (!props.row && isDspForward(props.data)) Object.assign(values.value, communicationRecommendation(props.data, values.value) || {});
 const initial: Row = JSON.parse(JSON.stringify(values.value));
 const scopeAllowed = computed(() => allowsPoint(permissions.state.value, props.boardKey, props.data.kind, props.data, props.row));
 const canSubmit = computed(() => props.canWrite && scopeAllowed.value && allowsPoint(permissions.state.value, props.boardKey, props.data.kind, props.data, { edit_values: values.value }));
@@ -68,6 +76,16 @@ function locked(key: string) {
 }
 const stringPoint = computed(() => pointIsString(props.data, values.value, props.row || undefined));
 const editorFields = computed(() => def.editor.filter(key => !stringPoint.value || !["min_value", "max_value"].includes(key)));
+const recommendation = computed(() => communicationRecommendation(props.data, values.value, props.row || undefined));
+const recommendationHint = computed(() => communicationHint(props.data, values.value, props.row || undefined));
+const recommendationDiffers = computed(() => communicationDiffers(props.data, values.value, props.row || undefined));
+function applyRecommendation() {
+  if (!canSubmit.value || busy.value || !recommendation.value) return;
+  Object.assign(values.value, recommendation.value);
+  communicationEdited = false;
+  preview.value = null;
+  error.value = "";
+}
 function choices(key: string) {
   const options = pointChoices(props.data, key, values.value);
   return key === "endpoint_key" && props.canWrite
@@ -87,6 +105,9 @@ function set(key: string, event: Event) {
           : input.value;
   preview.value = null;
   error.value = "";
+  if (communicationFields.some(field => field === key)) communicationEdited = true;
+  if (key === "process_point_id" && !props.row && !communicationEdited)
+    Object.assign(values.value, communicationRecommendation(props.data, values.value) || {});
   if (f.reference) {
     for (let pass = 0; pass < 2; pass++)
       for (const k of def.editor)
@@ -173,12 +194,16 @@ function delta(change: Row): string {
         <p class="muted">{{ def.description }}</p>
         <p v-if="!scopeAllowed" class="notice">此记录不在你的板卡或协议编辑范围内，可以查看和复制。请联系管理员授权。</p>
         <p v-else-if="permissions.state.value?.edit_scope === 'scoped'" class="notice">保存时会检查内部点与转发表的一致性，并校验本次修改的授权范围。</p>
+        <div v-if="isDspForward(data)" class="notice point-communication-notice" role="status">
+          <span>{{ recommendationHint }}</span>
+          <button v-if="recommendation && canWrite" type="button" class="button small" :disabled="busy || !canSubmit || !recommendationDiffers" @click="applyRecommendation">应用通信建议</button>
+        </div>
         <div class="form-grid">
           <Field
             v-for="key in editorFields"
             :key="key"
             :label="def.fields[key].label"
-            :hint="def.fields[key].hint"
+            :hint="key === 'wire_type' && isDspForward(data) ? recommendationHint : def.fields[key].hint"
           >
             <select
               v-if="def.fields[key].reference"
@@ -247,6 +272,7 @@ function delta(change: Row): string {
             }}
             <p v-for="(e, i) in preview.errors" :key="i">{{ e.message }}</p>
           </div>
+          <PointWarnings :warnings="preview.warnings" />
           <p v-if="preview.impact.affected_types?.length">
             涉及板卡类型：{{
               preview.impact.affected_types.map((t: Row) => t.code).join("、")

@@ -4,6 +4,10 @@ import { api, revisionConflict, type Row } from "../api";
 import {
   choiceLabel,
   isDspSheet,
+  isDspForward,
+  communicationFields,
+  communicationHint,
+  communicationDiffers,
   pointIsString,
   type PointKind,
   type PointTableData,
@@ -103,10 +107,13 @@ watch(
   },
 );
 const def = computed(() => data.value?.definition);
+const categoryFilter = ref<string | null>(null);
+const classified = computed(() => !!data.value && isDspForward(data.value));
+watch(data, () => { categoryFilter.value = null; });
 const columnSettings = ref(false), columns = ref<TableColumn[]>([]);
 const columnKey = computed(() => {
   const base = `point-columns:${props.pid}:${encodeURIComponent(props.boardKey)}:${props.kind}`;
-  return data.value && isDspSheet(data.value)
+  return data.value && (isDspSheet(data.value) || isDspForward(data.value))
     ? `${base}:layout:${encodeURIComponent(JSON.stringify(data.value.definition.columns))}` : base;
 });
 const { pageSize, setPageSize } = usePageSize(computed(() => `point-page-size:${props.pid}:${encodeURIComponent(props.boardKey)}:${props.kind}`));
@@ -171,7 +178,7 @@ const indexed = computed(() =>
       .toLowerCase(),
   })),
 );
-const filtered = computed(() =>
+const matched = computed(() =>
   indexed.value
     .filter(
       ({ row, search }) =>
@@ -180,6 +187,15 @@ const filtered = computed(() =>
     )
     .map(({ row }) => row),
 );
+function categoryOf(row: Row): string {
+  return String(row.category ?? data.value?.options.process_points?.find(point => point.id === row.process_point_id)?.category ?? "");
+}
+const categories = computed(() => {
+  const counts = new Map<string, number>();
+  for (const row of matched.value) counts.set(categoryOf(row), (counts.get(categoryOf(row)) || 0) + 1);
+  return [...counts].map(([key, count]) => ({ key, label: key || "未分类", count }));
+});
+const filtered = computed(() => matched.value.filter(row => !classified.value || categoryFilter.value == null || categoryOf(row) === categoryFilter.value));
 const pages = computed(() =>
   Math.max(1, Math.ceil(filtered.value.length / pageSize.value)),
 );
@@ -197,6 +213,12 @@ const grid = usePointGrid({
   error: message => { actionError.value = message; },
 });
 const gridTable = grid.table, gridInput = grid.input;
+function selectCategory(category: string | null) {
+  if (busy.value || review.value || orderDraft.value || !grid.finish()) return;
+  categoryFilter.value = category;
+  page.value = 1;
+  grid.clearSelection();
+}
 const gridEditorDef = computed(() => grid.editorDefinition.value || null);
 const draftWithinScope = computed(() => Object.keys(grid.draft.value).every(id => {
   const row = data.value?.rows.find(item => item.id === Number(id));
@@ -327,6 +349,8 @@ function menuAction(action: string) {
 watch([data, page, pageSize, query, displayColumns, busy, review], () => { tableMenu.value = null; });
 function cellHint(row: Row, column: string) {
   const key = grid.field(column);
+  if (data.value && isDspForward(data.value) && key && communicationFields.some(field => field === key))
+    return communicationHint(data.value, grid.values(row), row);
   if (["min_value", "max_value"].includes(column) && pointIsString(data.value!, grid.values(row), row)) return "字符串没有数值上下限，长度由字节数管理。";
   if (!props.canWrite) return "当前项目为只读权限，可选中和复制单元格。";
   if (!scopeEditable(row)) return "未获此板卡或协议的编辑权限，可以查看和复制；请联系管理员授权。";
@@ -502,7 +526,7 @@ function text(row: Row, key: string) {
           v-model="query"
           :disabled="busy || !!review || !!orderDraft || !!grid.editor.value"
           aria-label="搜索当前表格"
-          :placeholder="data && isDspSheet(data) ? '搜索名称、变量、类型或分类…' : '搜索名称、sigID、地址或枚举…'"
+          :placeholder="data && (isDspSheet(data) || isDspForward(data)) ? '搜索名称、变量、类型或分类…' : '搜索名称、sigID、地址或枚举…'"
         />
       </div>
       <div class="inline">
@@ -516,6 +540,11 @@ function text(row: Row, key: string) {
           <Plus :size="16" />新建{{ def.label }}
         </button>
       </div>
+    </div>
+    <div v-if="classified" class="point-categories" role="group" aria-label="转发数据分类">
+      <span>数据分类</span>
+      <button class="button small" :class="{ primary: categoryFilter == null }" :aria-pressed="categoryFilter == null" :disabled="busy || !!review || !!orderDraft" @click="selectCategory(null)">全部分类 <small>{{ matched.length }}</small></button>
+      <button v-for="category in categories" :key="category.key" class="button small" :class="{ primary: categoryFilter === category.key }" :aria-pressed="categoryFilter === category.key" :disabled="busy || !!review || !!orderDraft" @click="selectCategory(category.key)">{{ category.label }} <small>{{ category.count }}</small></button>
     </div>
     <div v-if="grid.changedRows.value || grid.hasHistory.value" class="point-grid-draft" role="status" aria-live="polite">
       <span class="point-draft-summary"><i />{{ grid.changedRows.value }} 行 · {{ grid.changedCells.value }} 处修改 <small>{{ draftWithinScope ? '尚未保存' : '缺少编辑授权 · 草稿保留' }}</small></span>
@@ -603,6 +632,7 @@ function text(row: Row, key: string) {
       <span v-if="copyFeedback" class="point-copy-feedback">{{ copyFeedback }}</span>
       <template v-else-if="grid.active.value && grid.activeRow.value"><strong>{{ def.fields[grid.active.value.column].column_label || def.fields[grid.active.value.column].label }}</strong><span>{{ cellHint(grid.activeRow.value, grid.active.value.column) }}</span></template>
       <span v-else-if="!selectionLabel">{{ scopeEditable() ? `选择一个单元格开始${canEditTable ? '编辑' : '查看'}。计算列随来源数据更新。` : '本表未获编辑授权，可以查看和复制。请联系管理员分配板卡和协议权限。' }}</span>
+      <button v-if="classified && grid.activeRow.value && canEditTable && communicationDiffers(data, grid.values(grid.activeRow.value), grid.activeRow.value)" class="button small" :disabled="busy || !!review || !!orderDraft || !scopeEditable(grid.activeRow.value)" @click="grid.applyRecommendation(grid.activeRow.value)">应用通信建议</button>
     </div>
     <Empty
       v-if="!visible.length"

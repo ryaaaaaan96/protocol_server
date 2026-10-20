@@ -112,9 +112,9 @@ export async function checkProjectFolders({ client, engineer, viewer, engineerId
   };
   const signal = await edit("process_points", {name:"Portable signal",enum_name:"PORTABLE_VOLTAGE",sig_id:1,
     group_key:"LOCAL",internal_type:"U16",element_count:1,byte_length:2,unit:"V",notes:"Round trip: 中文\tnewline\n\\slash",
-    min_value:"0",max_value:"100",default_value:"3",boot_restore:true});
+    min_value:"0",max_value:"100",default_value:"3",boot_restore:true,category:"系统参数2"});
   await edit("transmit_points", {process_point_id:signal.id,endpoint_key:"UPP_SERVICE",name:"Voltage field",
-    upp_model:9,address:6,wire_type:"U16",wire_length:2,scale:1,access:"RO",byte_order:0,conversion:"identity",enabled:true});
+    upp_model:2,address:6,wire_type:"U16",wire_length:2,scale:1,access:"RO",byte_order:0,conversion:"identity",enabled:true});
   await client.call(`${url}/members`, "PUT", { user_id: engineerId, role: "engineer", edit_scope: "scoped", grants: [
     { board_key: "DSP", scope: "internal" },
     { board_key: "DSP", scope: "protocol", endpoint_key: "UPP_SERVICE" },

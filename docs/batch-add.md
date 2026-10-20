@@ -31,9 +31,11 @@ node scripts/excel-batch/index.mjs --project 1 --board DSP --kind process --file
 | 表 | 必填字段 |
 | --- | --- |
 | process | `name`、`variable_name`、`sheet_type`（如 `Sys_U16`） |
-| forward | `process_point_id`、`endpoint_key`、`name`、`upp_model`、`address`、`wire_type`、`wire_length` |
+| forward | `process_point_id`、`endpoint_key`、`name`、`address` |
 
 `group_key` 默认 `LOCAL`；`endpoint_key` 通常为 `UPP_SERVICE`，均以实际 JSON 配置为准。引用接口返回 `native_groups`、`process_points`、`endpoints`。DSP 内部没有 sigID，模板按原 sheet 的可写字段填写，派生列不上传。兼容旧脚本的 `enum_name` / `internal_type` 输入。内部类型、长度、范围、元数据选项和转发转换在服务端统一校验；比例 `scale` 可填小数。
+
+DSP 转发的型号由关联内部点的数据分类固定推导，模板不再提供 `upp_model`。旧文件可以携带匹配的型号，不匹配会拒绝。请先为内部点选择有效分类。`wire_type`、`wire_length`、`scale`、`conversion` 留空时自动补齐建议值；显式值保留并校验。偏离建议的类型会提示，但非法转换或地址冲突仍阻止提交。
 
 第一行保留英文字段名，第二行开始填数据。空单元格省略并采用字段默认值，公式须先粘贴为值；拒绝合并单元格、重复/未知表头、超精度数字和跨项目引用。模板注释列出字段含义。
 

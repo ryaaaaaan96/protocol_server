@@ -271,6 +271,17 @@ pub fn parse(rows: &[Value]) -> Result<DspImport> {
             .map(|index| &process[*index])
             .ok_or_else(|| invalid(row, format!("转发枚举 {en} 未找到对应 DSP 内部变量")))?;
         let upp_model = integer(row, "N", "UPP 模型号", 1, 65535)?;
+        let expected_model = crate::dsp_sheet::upp_model(point)
+            .ok_or_else(|| invalid(row, format!("转发枚举 {en} 的内部点缺少有效数据分类")))?;
+        if upp_model != expected_model {
+            return Err(invalid(
+                row,
+                format!(
+                    "UPP 模型号 {upp_model} 与内部数据分类「{}」推导的 {expected_model} 不一致",
+                    crate::dsp_sheet::category(point)
+                ),
+            ));
+        }
         let address = integer(row, "O", "UPP 偏移", 0, 65535)?;
         let wire_type = required(row, "C", "通信类型")?.to_uppercase();
         if wire_type != "STRING" && type_length(&wire_type).is_none() {
@@ -535,6 +546,16 @@ mod tests {
         let mut rows = fixture();
         row(&mut rows, TRANSMIT_SHEET, "GridFrequency")["cells"]["values"]["N"] = json!("0");
         assert!(parse(&rows).unwrap_err().1.contains("UPP 模型号"));
+    }
+
+    #[test]
+    fn rejects_models_that_disagree_with_internal_classification() {
+        let mut rows = fixture();
+        row(&mut rows, TRANSMIT_SHEET, "GridFrequency")["cells"]["values"]["N"] = json!("99");
+        assert!(parse(&rows).unwrap_err().1.contains("推导的 103 不一致"));
+        let mut rows = fixture();
+        row(&mut rows, PROCESS_SHEET, "GridFrequency")["cells"]["values"]["W"] = json!("");
+        assert!(parse(&rows).unwrap_err().1.contains("缺少有效数据分类"));
     }
 
     #[test]

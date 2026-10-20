@@ -3,6 +3,7 @@ import { ref } from "vue";
 import { api, revisionConflict, type Row } from "../api";
 import { pointChangeSummary, type PointField } from "../domain/pointTables";
 import Modal from "./Modal.vue";
+import PointWarnings from "./PointWarnings.vue";
 const props = defineProps<{pid:number; preview:Row; title:string; canWrite:boolean; checkOnly?:boolean; fields?:Record<string,PointField>}>();
 const emit = defineEmits<{close:[]; done:[merged:boolean]; error:[message:string]; conflict:[]}>();
 const busy = ref(false), error = ref("");
@@ -31,6 +32,7 @@ function changes(change:Row) {
         {{ preview.allowed ? (checkOnly ? '本次修改的关联检查通过，尚未保存。' : '关联检查通过，确认后保存。') : (checkOnly ? '检查发现问题，请调整后重新检查。' : '此修改不能提交，请调整后重新检查。') }}
         <p v-for="(problem,i) in preview.errors" :key="i"><template v-if="problem.row">原始点表第 {{ problem.row }} 行 · </template><template v-if="problem.field">{{ fields?.[problem.field]?.label || problem.field }}： </template>{{ problem.message }}</p>
       </div>
+      <PointWarnings :warnings="preview.warnings" />
       <p v-if="checkOnly" class="muted">本次仅检查，草稿继续保留；检查不会释放编辑权。</p>
       <template v-if="checkOnly && preview.validation">
         <p>按当前草稿校验整个项目：{{ preview.validation.errors }} 条错误、{{ preview.validation.warnings }} 条提示（包含项目原有问题）。关联检查通过表示本次修改没有新增阻断问题。</p>

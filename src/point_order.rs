@@ -82,12 +82,28 @@ pub fn sort_rows(rows: &mut [Value], rule: &Value) {
     } else {
         "display_order"
     };
-    rows.sort_by_key(|r| {
-        (
-            group_key(r, rule),
-            r[column].as_i64().unwrap_or(i64::MAX),
-            topology::num(r, "id"),
-        )
+    rows.sort_by(|a, b| {
+        let group_order = rule["group_by"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|key| {
+                let key = key.as_str().unwrap();
+                match (a[key].as_i64(), b[key].as_i64()) {
+                    (Some(a), Some(b)) => a.cmp(&b),
+                    _ => a[key].to_string().cmp(&b[key].to_string()),
+                }
+            })
+            .find(|order| !order.is_eq())
+            .unwrap_or(std::cmp::Ordering::Equal);
+        group_order
+            .then_with(|| {
+                a[column]
+                    .as_i64()
+                    .unwrap_or(i64::MAX)
+                    .cmp(&b[column].as_i64().unwrap_or(i64::MAX))
+            })
+            .then_with(|| topology::num(a, "id").cmp(&topology::num(b, "id")))
     });
 }
 
@@ -201,5 +217,29 @@ mod tests {
             vec![json!(3), json!(2), json!(1)]
         );
         assert_ne!(group_key(&rows[0], &rule), group_key(&rows[2], &rule));
+    }
+
+    #[test]
+    fn upp_models_sort_numerically_without_changing_group_identity() {
+        let rule = json!({"mode":"display","group_by":["endpoint_key","upp_model"]});
+        let mut rows: Vec<_> = [103, 2, 100, 1, 99, 102].into_iter().map(|model|
+            json!({"id":model,"endpoint_key":"UPP","upp_model":model,"display_order":1})
+        ).collect();
+        let original = group_key(&rows[0], &rule);
+        sort_rows(&mut rows, &rule);
+        assert_eq!(
+            rows.iter()
+                .map(|row| row["upp_model"].clone())
+                .collect::<Vec<_>>(),
+            vec![
+                json!(1),
+                json!(2),
+                json!(99),
+                json!(100),
+                json!(102),
+                json!(103)
+            ]
+        );
+        assert_eq!(group_key(rows.last().unwrap(), &rule), original);
     }
 }

@@ -2,15 +2,14 @@
   "version": 1,
   "enabled": true,
   "label": "DSP UPP转发表",
-  "description": "来源为工作簿“UPM-DSP采集数据” sheet，本表维护 DSP 对外提供的 UPP 字段。同一内部点允许多条映射；UPM 侧采集配置暂不处理。",
+  "description": "按 DSP 内部数据的分类展示 UPP 转发；型号由分类固定推导。数据类型按 DateType 和 ArrayCnt 给出建议，可按通信协议调整，提交前显示偏离建议的提示并校验转换、长度及地址。",
   "columns": [
     "signal_name",
-    "resolved_sig_id",
-    "enum_name",
+    "variable_name",
     "name",
-    "upp_model",
+    "category",
     "effective_address",
-    "data_type",
+    "sheet_type",
     "byte_length",
     "effective_type",
     "effective_length",
@@ -24,7 +23,6 @@
     "process_point_id",
     "endpoint_key",
     "name",
-    "upp_model",
     "address",
     "wire_type",
     "wire_length",
@@ -36,11 +34,13 @@
   ],
   "ordering": {
     "mode": "display",
-    "group_by": []
+    "group_by": [
+      "endpoint_key",
+      "upp_model"
+    ]
   },
   "inline": {
     "name": "name",
-    "upp_model": "upp_model",
     "scale": "scale",
     "access": "access",
     "byte_order": "byte_order",
@@ -59,13 +59,7 @@
       "label": "DSP 内部点",
       "reference": "process_points",
       "type": "number",
-      "hint": "通过固定记录 ID 关联，sigID 和枚举随内部点更新。"
-    },
-    "resolved_sig_id": {
-      "label": "sigID"
-    },
-    "enum_name": {
-      "label": "内部枚举"
+      "hint": "通过固定记录 ID 关联 DSP 内部点；其数据分类决定模型，DateType 和 ArrayCnt 提供通信类型建议。"
     },
     "endpoint_key": {
       "label": "输出接口",
@@ -74,11 +68,6 @@
     },
     "name": {
       "label": "转发字段名称"
-    },
-    "upp_model": {
-      "label": "UPP 模型",
-      "type": "number",
-      "default": 0
     },
     "effective_address": {
       "label": "实际字节偏移"
@@ -89,17 +78,14 @@
       "default": 6,
       "hint": "UPP 帧头占 6 字节。拖动仅调整显示顺序，不会重算偏移。"
     },
-    "data_type": {
-      "label": "内部类型"
-    },
     "byte_length": {
       "label": "内部字节数"
     },
     "effective_type": {
-      "label": "通信类型"
+      "label": "数据类型"
     },
     "wire_type": {
-      "label": "通信类型",
+      "label": "数据类型",
       "options": [
         "U8",
         "U16",
@@ -109,20 +95,18 @@
         "F32",
         "STRING"
       ],
-      "default": "F32"
+      "hint": "由 DateType 和 ArrayCnt 建议，可手动调整；偏离建议时提示，仍须满足通信长度和转换规则。"
     },
     "effective_length": {
       "label": "通信字节数"
     },
     "wire_length": {
       "label": "通信字节数",
-      "type": "number",
-      "default": 4
+      "type": "number"
     },
     "scale": {
       "label": "协议系数",
-      "type": "number",
-      "default": 1
+      "type": "number"
     },
     "access": {
       "label": "读写属性",
@@ -151,13 +135,34 @@
         "fixed_point",
         "array_bytes"
       ],
-      "default": "identity",
       "hint": "identity：直接映射；fixed_point：定点缩放；array_bytes：数组字节映射。"
     },
     "enabled": {
       "label": "启用",
       "type": "boolean",
       "default": true
+    },
+    "variable_name": {
+      "label": "VariateName"
+    },
+    "sheet_type": {
+      "label": "DateType"
+    },
+    "category": {
+      "label": "数据分类",
+      "hint": "由关联内部点的分类决定；需要变更时修改内部点，关联转发将同步分类并检查地址冲突。"
+    },
+    "recommended_wire_type": {
+      "label": "建议数据类型"
+    },
+    "recommended_wire_length": {
+      "label": "建议通信字节数"
+    },
+    "recommended_scale": {
+      "label": "建议协议系数"
+    },
+    "recommended_conversion": {
+      "label": "建议数据转换"
     }
   }
 }

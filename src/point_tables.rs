@@ -86,6 +86,9 @@ fn readable(kind: &str) -> BTreeSet<&str> {
         keys(
             "signal_name,field_name,context_name,dev_id,endpoint_name,protocol,transport,port,upp_model,effective_address,address_length,effective_type,effective_length,register_type,access,scale,byte_order,default_value,min_value,max_value",
         )
+        .union(&keys(crate::dsp_sheet::FORWARD_READ_FIELDS))
+        .copied()
+        .collect()
     };
     schema_writable(kind)
         .union(&common)

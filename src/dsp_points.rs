@@ -144,7 +144,8 @@ pub async fn apply(
     }
     .split(',')
     .collect();
-    let worksheet = kind == "process" && crate::dsp_sheet::is_dsp(&board);
+    let dsp = crate::dsp_sheet::is_dsp(&board);
+    let worksheet = kind == "process" && dsp;
     if worksheet {
         allowed.extend(crate::dsp_sheet::EDIT_FIELDS.split(','));
     }
@@ -185,6 +186,7 @@ pub async fn apply(
     } else {
         fields.clone()
     };
+    let old_category = crate::dsp_sheet::category(&old).to_owned();
     let mut merged = old;
     if kind == "process" {
         for key in ["unit", "default_value", "min_value", "max_value", "notes"] {
@@ -214,14 +216,48 @@ pub async fn apply(
         {
             return Err(AppError::bad("转发端点不在已应用 JSON 的 UPP 端点配置中"));
         }
-        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM points.process_points WHERE project_id=$1 AND board_key=$2 AND id=$3)")
-            .bind(pid).bind(board_key).bind(merged["process_point_id"].as_i64()).fetch_one(&mut *tx).await?;
-        if !exists {
-            return Err(AppError::bad("转发必须关联当前板卡的内部数据点"));
+        let point: Value = sqlx::query_scalar("SELECT to_jsonb(p) FROM points.process_points p WHERE project_id=$1 AND board_key=$2 AND id=$3")
+            .bind(pid).bind(board_key).bind(merged["process_point_id"].as_i64()).fetch_optional(&mut *tx).await?
+            .ok_or(AppError::bad("转发必须关联当前板卡的内部数据点"))?;
+        if dsp {
+            let model = require_upp_model(&point)?;
+            if fields
+                .get("upp_model")
+                .is_some_and(|value| value.as_i64() != Some(model))
+            {
+                return Err(AppError::bad(format!(
+                    "UPP 模型号由内部数据分类「{}」固定推导为 {model}，不能手动修改",
+                    crate::dsp_sheet::category(&point)
+                )));
+            }
+            updates.insert("upp_model".into(), json!(model));
+            merged["upp_model"] = json!(model);
+            if c.operation == "create" {
+                let suggested = crate::dsp_sheet::wire_defaults(
+                    &point,
+                    fields.get("wire_type").and_then(Value::as_str),
+                );
+                for key in ["wire_type", "wire_length", "scale", "conversion"] {
+                    if !fields.contains_key(key) {
+                        merged[key] = suggested[key].clone();
+                    }
+                }
+            }
         }
     }
     if c.operation == "create" {
         return insert(tx, pid, board_key, kind, &merged).await;
+    }
+    if worksheet && old_category != crate::dsp_sheet::category(&merged) {
+        let linked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM points.transmit_points WHERE project_id=$1 AND board_key=$2 AND process_point_id=$3)")
+            .bind(pid).bind(board_key).bind(c.id).fetch_one(&mut *tx).await?;
+        if linked {
+            let model = require_upp_model(&merged)?;
+            // Keep offsets and all manually configured wire parameters unchanged.
+            // Normal preview, authorization, validation and history see this update.
+            sqlx::query("UPDATE points.transmit_points SET upp_model=$4 WHERE project_id=$1 AND board_key=$2 AND process_point_id=$3 AND upp_model<>$4")
+                .bind(pid).bind(board_key).bind(c.id).bind(model).execute(&mut *tx).await?;
+        }
     }
     let cols: Vec<_> = updates.keys().map(String::as_str).collect();
     let selected = cols
@@ -233,6 +269,12 @@ pub async fn apply(
     Ok(sqlx::query_scalar(&format!(
         "UPDATE {table} t SET ({assigned})=(SELECT {selected} FROM jsonb_populate_record(NULL::{table},$4) x) WHERE project_id=$1 AND board_key=$2 AND id=$3 RETURNING to_jsonb(t)"
     )).bind(pid).bind(board_key).bind(c.id).bind(Value::Object(updates)).fetch_one(&mut *tx).await?)
+}
+
+fn require_upp_model(point: &Value) -> Result<i64> {
+    crate::dsp_sheet::upp_model(point).ok_or(AppError::bad(
+        "DSP 转发需要内部点具有有效的数据分类，请先设置数据分类",
+    ))
 }
 
 pub async fn table_rows(
@@ -255,7 +297,7 @@ pub async fn table_rows(
             .bind(pid).bind(board_key).fetch_all(&mut *tx).await?
     } else {
         sqlx::query_scalar(r#"SELECT to_jsonb(t) || jsonb_build_object(
-            'edit_values',to_jsonb(t),'signal_name',p.name,
+            'edit_values',to_jsonb(t),'signal_name',p.name,'source_point',to_jsonb(p),
             'enum_name',p.enum_name,'resolved_sig_id',p.sig_id,'data_type',p.internal_type,
             'byte_length',p.byte_length,'element_count',p.element_count,'unit',p.unit,
             'group_key',p.group_key,'default_value',p.default_value,'min_value',p.min_value,'max_value',p.max_value,
@@ -272,6 +314,11 @@ pub async fn table_rows(
             crate::dsp_sheet::project(row);
         }
         if kind != "process" {
+            if let Some(point) = row.as_object_mut().unwrap().remove("source_point") {
+                if crate::dsp_sheet::is_dsp(&board) {
+                    crate::dsp_sheet::project_forward(row, &point);
+                }
+            }
             if let Some(endpoint) = board["point_endpoints"].as_array().and_then(|endpoints| {
                 endpoints
                     .iter()
@@ -308,6 +355,21 @@ pub async fn import(tx: &mut PgConnection, pid: i64, data: &DspImport) -> Result
     };
     if data.process.is_empty() {
         return Err(AppError::bad("DSP 工作簿没有可导入的内部数据"));
+    }
+    // Import previews may have been created by an older server version.
+    // Recheck fixed model rules before replacing any current rows.
+    for mapping in &data.transmit {
+        let point = data
+            .process
+            .iter()
+            .find(|point| point["enum_name"] == mapping["process_enum"])
+            .ok_or(AppError::bad("DSP 转发记录找不到对应内部点"))?;
+        if mapping["upp_model"].as_i64() != Some(require_upp_model(point)?) {
+            return Err(AppError::bad(format!(
+                "转发字段 {} 的 UPP 模型号与内部数据分类不一致",
+                strv(mapping, "name")
+            )));
+        }
     }
     let board_key = strv(board, "code");
     sqlx::query("DELETE FROM points.transmit_points WHERE project_id=$1 AND board_key=$2")
@@ -591,6 +653,39 @@ pub fn validate(g: &Value) -> Vec<Value> {
             );
             continue;
         };
+        if board_definition(g, strv(t, "board_key")).is_some_and(crate::dsp_sheet::is_dsp) {
+            let model = crate::dsp_sheet::upp_model(p);
+            if model.is_none() || model != t["upp_model"].as_i64() {
+                issue(
+                    &mut out,
+                    entity,
+                    t,
+                    "upp_model_category",
+                    "DSP UPP 模型号必须由所关联内部点的有效数据分类固定推导",
+                    num(p, "id"),
+                );
+            }
+            let suggested = crate::dsp_sheet::wire_defaults(p, None);
+            if t["wire_type"] != suggested["wire_type"] {
+                issue(
+                    &mut out,
+                    entity,
+                    t,
+                    "wire_type_suggestion",
+                    &format!(
+                        "通信类型 {} 与 DateType / ArrayCnt 建议的 {} 不同；当前采用手动配置，请确认通信双方一致",
+                        strv(t, "wire_type"),
+                        strv(&suggested, "wire_type")
+                    ),
+                    num(p, "id"),
+                );
+                let warning = out.last_mut().unwrap();
+                warning["level"] = json!("warning");
+                warning["field"] = json!("wire_type");
+                warning["recommended_wire_type"] = suggested["wire_type"].clone();
+                warning["actual_wire_type"] = t["wire_type"].clone();
+            }
+        }
         let wire = strv(t, "wire_type");
         let length = num(t, "wire_length");
         if length < 1 || length > 65535 || (wire != "STRING" && size(wire) != Some(length)) {
@@ -837,7 +932,8 @@ mod tests {
         let mut point = defaults("process");
         point.as_object_mut().unwrap().extend(
             json!({"id":1,"project_id":7,"board_key":"DSP","name":"母线电压",
-                "enum_name":"DC_BUS_VOLTAGE","internal_type":"F32","byte_length":4})
+                "enum_name":"DC_BUS_VOLTAGE","internal_type":"F32","byte_length":4,
+                "metadata":{"category":"任务级观测量","display_digits":2}})
             .as_object()
             .unwrap()
             .clone(),
@@ -908,6 +1004,53 @@ mod tests {
         assert!(validate(&overlap).iter().any(|i| i["code"] == "overlap"));
         overlap["transmit_points"][1]["enabled"] = json!(false);
         assert!(validate(&overlap).is_empty());
+    }
+
+    #[test]
+    fn dsp_models_follow_categories_and_manual_wire_overrides_only_warn_when_valid() {
+        let mut g = graph();
+        g["transmit_points"][0]["wire_type"] = json!("F32");
+        g["transmit_points"][0]["conversion"] = json!("identity");
+        g["transmit_points"][0]["scale"] = json!(1);
+        let issues = validate(&g);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0]["level"], "warning");
+        assert_eq!(issues[0]["code"], "wire_type_suggestion");
+        assert_eq!(issues[0]["recommended_wire_type"], "S32");
+        assert_eq!(issues[0]["field"], "wire_type");
+        g["transmit_points"][0]["wire_type"] = json!("U32");
+        assert!(
+            validate(&g)
+                .iter()
+                .any(|issue| issue["code"] == "conversion" && issue["level"] == "error")
+        );
+        g["transmit_points"][0]["upp_model"] = json!(100);
+        assert!(
+            validate(&g)
+                .iter()
+                .any(|issue| issue["code"] == "upp_model_category")
+        );
+        g["process_points"][0]["metadata"]["category"] = json!("");
+        assert!(require_upp_model(&g["process_points"][0]).is_err());
+        g["transmit_points"] = json!([]);
+        assert!(
+            validate(&g).is_empty(),
+            "unmapped points may leave category unset"
+        );
+    }
+
+    #[test]
+    fn other_board_wire_configuration_is_independent_of_dsp_categories() {
+        let mut g = graph();
+        g["project_config"]["board_types"][0]["code"] = json!("UPM");
+        g["process_points"][0]["board_key"] = json!("UPM");
+        g["transmit_points"][0]["board_key"] = json!("UPM");
+        g["process_points"][0]["metadata"] = json!({});
+        g["transmit_points"][0]["upp_model"] = json!(42);
+        g["transmit_points"][0]["wire_type"] = json!("F32");
+        g["transmit_points"][0]["conversion"] = json!("identity");
+        g["transmit_points"][0]["scale"] = json!(1);
+        assert!(validate(&g).is_empty());
     }
 
     #[test]

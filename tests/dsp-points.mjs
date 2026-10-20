@@ -8,6 +8,7 @@ import os from "node:os";
 import { createHash } from "node:crypto";
 import { exportProject } from "../scripts/export-project.mjs";
 import { checkDspSheet } from "./dsp-sheet.mjs";
+import ExcelJS from "../scripts/excel-batch/node_modules/exceljs/excel.js";
 
 function folderFiles(directory) {
   const files = new Map();
@@ -336,13 +337,13 @@ export async function checkDspPoints({ client, engineer, viewer, engineerId, vie
     equal(forwardCreated.length, 2);
     const numericMappingUpdate = await client.call(`${table}/forward/batch/preview`, "POST", {
       revision: (await graph()).revision, operation: "update", rows: [
-        { row: 1, id: forwardCreated[0].id, values: { upp_model: 104, address: 3100, wire_length: 4, scale: 0.01, byte_order: 1, enabled: false } },
+        { row: 1, id: forwardCreated[0].id, values: { upp_model: 103, address: 3100, wire_length: 4, scale: 0.01, byte_order: 1, enabled: false } },
       ],
     });
     ok(numericMappingUpdate.allowed, JSON.stringify(numericMappingUpdate.errors));
     await commit(numericMappingUpdate);
     const numericMapping = (await graph()).transmit_points.find(row => row.id === forwardCreated[0].id);
-    equal(numericMapping.upp_model, 104);
+    equal(numericMapping.upp_model, 103);
     equal(numericMapping.address, 3100);
     equal(numericMapping.scale, 0.01);
     equal(numericMapping.byte_order, 1);
@@ -484,6 +485,18 @@ export async function checkDspPoints({ client, engineer, viewer, engineerId, vie
       body.append("file", new Blob([book]), "DSP.xlsx");
       return body;
     };
+    // Workbook import cannot bypass the same fixed category-to-model contract.
+    const tamperedWorkbook = new ExcelJS.Workbook();
+    await tamperedWorkbook.xlsx.load(book);
+    tamperedWorkbook.getWorksheet("UPM-DSP采集数据").getCell("N2").value = 2;
+    const tamperedForm = new FormData();
+    tamperedForm.append("file", new Blob([await tamperedWorkbook.xlsx.writeBuffer()]), "wrong-model.xlsx");
+    const wrongModelImport = await client.raw(`${url}/imports/preview`, "POST", tamperedForm);
+    equal(wrongModelImport.status, 400);
+    ok(JSON.stringify(wrongModelImport.data).includes("模型"), JSON.stringify(wrongModelImport.data));
+    equal(JSON.stringify((await graph()).process_points), JSON.stringify(beforeReimport.process_points));
+    equal(JSON.stringify((await graph()).transmit_points), JSON.stringify(beforeReimport.transmit_points));
+    equal(await historyCount(), beforeReimportHistory);
     const ownChange = await preview("process", { notes: "pending admin change" }, frequency.id);
     const otherChange = await preview("process", { notes: "pending engineer change" }, frequency.id, engineer);
     const otherImport = await engineer.call(`${url}/imports/preview`, "POST", workbookForm());

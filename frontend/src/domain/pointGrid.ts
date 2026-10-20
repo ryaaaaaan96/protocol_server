@@ -234,6 +234,8 @@ export function displayCell(
     const signalColumns: Record<string, string> = {
       signal_name: "name", resolved_sig_id: "sig_id", enum_name: "enum_name",
       data_type: "data_type", byte_length: "byte_length", unit: "unit",
+      category: "category", sheet_type: "sheet_type", variable_name: "variable_name",
+      recommended_wire_type: "recommended_wire_type",
     };
     if (signalColumns[column] && changed("process_point_id"))
       return projected(related("process_points", "process_point_id"), signalColumns[column]);

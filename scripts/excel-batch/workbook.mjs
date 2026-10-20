@@ -5,14 +5,14 @@ export const columns = {
   // This offline example follows the DSP internal worksheet. Other boards may
   // define a different set of editable fields in their own process.json.
   process: ["name", "variable_name", "sheet_type", "enum_table", "display_digits", "element_count", "default_value", "max_value", "min_value", "unit", "access", "ram", "flash", "eeprom", "calibration", "structure", "cpu", "upload_level", "category", "notes"],
-  forward: ["process_point_id", "endpoint_key", "name", "upp_model", "address", "wire_type", "wire_length", "scale", "access", "byte_order", "conversion", "enabled"],
+  forward: ["process_point_id", "endpoint_key", "name", "address", "wire_type", "wire_length", "scale", "access", "byte_order", "conversion", "enabled"],
 };
 const legacyProcessColumns = ["group_key", "enum_name", "sig_id", "internal_type", "flags", "callback", "process_enabled", "boot_restore", "manual_restore"];
 const numbers = new Set(["sig_id", "display_digits", "element_count", "process_point_id", "upp_model", "address", "wire_length", "byte_order"]);
 const booleans = new Set(["process_enabled", "boot_restore", "manual_restore", "enabled"]);
 const required = {
   process: [["name"], ["variable_name", "enum_name"], ["sheet_type", "internal_type"]],
-  forward: ["process_point_id", "endpoint_key", "name", "upp_model", "address", "wire_type", "wire_length"].map(key => [key]),
+  forward: ["process_point_id", "endpoint_key", "name", "address"].map(key => [key]),
 };
 const dspChoices = {
   sheet_type: ["Sys_U8", "Sys_U16", "Sys_S16", "Sys_U32", "Sys_S32", "Sys_F32"],
@@ -37,11 +37,11 @@ const descriptions = {
   max_value: "数值上限；STRING 不填写", boot_restore: "上电恢复；默认 false",
   manual_restore: "手动恢复；默认 false", process_point_id: "当前板卡已有内部点 ID（必填）",
   endpoint_key: "project.json 中的 UPP 端点代码，例如 UPP_SERVICE（必填）",
-  upp_model: "UPP 模型号（必填）", address: "显式字节偏移（必填）",
-  wire_type: "通信类型 U8/U16/S16/U32/S32/F32/STRING（必填）",
-  wire_length: "通信字节长度（必填）", scale: "比例系数，支持小数；默认 1",
+  upp_model: "兼容旧模板；DSP 型号由内部点的数据分类固定推导，填写不同值将拒绝", address: "显式字节偏移（必填）",
+  wire_type: "数据类型 U8/U16/S16/U32/S32/F32/STRING；留空采用内部 DateType / ArrayCnt 推导建议，偏离建议时提示",
+  wire_length: "通信字节长度；留空按所选类型计算", scale: "比例系数，支持小数；留空按转换方式及内部显示精度建议",
   access: "访问属性 RO/WO/RW，默认 RO", byte_order: "字节序，默认 0",
-  conversion: "identity/fixed_point/array_bytes；默认 identity", enabled: "启用；默认 true",
+  conversion: "identity/fixed_point/array_bytes；留空按内部类型与通信类型推导", enabled: "启用；默认 true",
   ram: "RAM：Y/N，默认 N", flash: "FLASH：Y/N，默认 Y",
   eeprom: "EEPROM：Y/N，默认 N", calibration: "Calibration：Y/N，默认 Y",
   structure: "STRUCT，留空表示未指定", cpu: "数据来自CPU：CPU1/CPU2，默认 CPU2",
@@ -123,7 +123,7 @@ export async function readRows(file, kind, sheetName = kind) {
   sheet.getRow(1).eachCell((cell, col) => {
     const key = scalar(cell);
     if (key == null || key === "") return;
-    if (!columns[kind].includes(key) && !(kind === "process" && legacyProcessColumns.includes(key))) throw new Error(`表头 ${cell.address}「${key}」不属于 ${kind} 可写字段`);
+    if (!columns[kind].includes(key) && !(kind === "process" && legacyProcessColumns.includes(key)) && !(kind === "forward" && key === "upp_model")) throw new Error(`表头 ${cell.address}「${key}」不属于 ${kind} 可写字段`);
     if (seen.has(key)) throw new Error(`表头 ${key} 重复`);
     seen.add(key);
     headers.set(col, key);
@@ -167,8 +167,12 @@ export async function writeTemplate(file, kind) {
   for (const key of columns[kind]) help.addRow([key, description(kind, key)]);
   if (kind === "process") {
     help.addRow(["DSP 示例", "按 DSP内部数据 sheet 的可写字段排列；没有 sigID。其他板卡请以各自配置为准。"]);
-    help.addRow(["自动计算", "DataType Length、Total Length、精度、数据类型、UPP模型号由服务端计算，无需填写；转发配置在 forward 表中单独填写。"]);
+    help.addRow(["自动计算", "DataType Length、Total Length、精度由服务端计算；数据类型建议和UPP模型号在内部表隐藏，转发实际类型在 forward 表中单独填写。"]);
     help.addRow(["分组", "DSP 默认使用 LOCAL；需要其他已配置分组时，可自行添加 group_key 列。"]);
+  }
+  if (kind === "forward") {
+    help.addRow(["分类", "UPP 模型号由关联内部点的数据分类固定推导，无需填写。请先为内部点选择有效分类。"]);
+    help.addRow(["建议配置", "wire_type/wire_length/scale/conversion 可留空，由服务端成套建议。手工类型偏离建议会提示，仍须通过转换、长度及地址校验。"]);
   }
   help.addRow(["规则", "第 1 行保留英文字段名，第 2 行开始填数据；仅处理指定工作表，每批最多 200 行。"]);
   help.addRow(["空值", "空单元格省略，采用字段默认值。代码和 ID 请用 --references 查询，不能跨项目复用。"]);

@@ -2,7 +2,7 @@
   "version": 1,
   "enabled": true,
   "label": "DSP内部数据",
-  "description": "按「DSP内部数据」sheet 的 A–Y 列定义显示和编辑；DSP 内部没有 sigID。长度、精度、数据类型和模型号由 sheet 规则推导，通讯映射在本板卡转发表独立配置。",
+  "description": "按「DSP内部数据」sheet 定义内部参数；DSP 内部没有 sigID。数据类型建议和 UPP 模型号在后台推导：通信类型仅在转发表配置，模型号固定由数据分类决定。修改分类会同步关联转发，提交前校验地址及权限。",
   "columns": [
     "name",
     "variable_name",
@@ -24,10 +24,8 @@
     "structure",
     "cpu",
     "precision",
-    "sheet_data_type",
     "upload_level",
     "category",
-    "sheet_upp_model",
     "notes"
   ],
   "editor": [
@@ -201,7 +199,7 @@
     },
     "sheet_data_type": {
       "label": "数据类型",
-      "hint": "原 sheet 推导值：数组为 STRING，标量 F32 对应 S32，其余沿用类型。实际转发映射在转发表配置。"
+      "hint": "后台推导的建议通信类型，仅在转发表显示和配置；允许合法的人工覆盖，提交时提示。"
     },
     "upload_level": {
       "label": "数据上传\n等级",
@@ -224,11 +222,12 @@
         "控制参数设置",
         "任务级标定量"
       ],
-      "default": ""
+      "default": "",
+      "hint": "决定关联转发的数据分类及 UPP 模型；修改后会联动所有关联转发，地址冲突时整笔修改不保存。"
     },
     "sheet_upp_model": {
       "label": "UPP\n模型号",
-      "hint": "按数据分类显示原 sheet 的模型号；实际协议映射由当前板卡转发表维护。"
+      "hint": "后台按数据分类固定推导，不可独立修改；转发表按数据分类展示。"
     },
     "notes": {
       "label": "备注",

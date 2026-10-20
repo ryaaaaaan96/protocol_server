@@ -6,7 +6,8 @@ use crate::{
 use serde_json::{Map, Value, json};
 
 pub const EDIT_FIELDS: &str = "variable_name,sheet_type,enum_table,display_digits,access,ram,flash,eeprom,calibration,structure,cpu,upload_level,category";
-pub const READ_FIELDS: &str = "type_length,precision,sheet_data_type,sheet_upp_model";
+pub const READ_FIELDS: &str = "type_length,precision,sheet_data_type,sheet_upp_model,recommended_wire_type,recommended_wire_length,recommended_scale,recommended_conversion";
+pub const FORWARD_READ_FIELDS: &str = "category,variable_name,sheet_type,recommended_wire_type,recommended_wire_length,recommended_scale,recommended_conversion";
 const METADATA: [(&str, &str); 11] = [
     ("enum_table", "D"),
     ("display_digits", "E"),
@@ -42,6 +43,73 @@ fn source<'a>(row: &'a Value, key: &str, column: &str) -> &'a Value {
     row["metadata"]
         .get(key)
         .unwrap_or(&row["metadata"]["source_cells"]["values"][column])
+}
+
+pub fn category(point: &Value) -> &str {
+    source(point, "category", "W").as_str().unwrap_or_default()
+}
+
+pub fn upp_model(point: &Value) -> Option<i64> {
+    CATEGORIES
+        .iter()
+        .find(|(name, _)| *name == category(point))
+        .map(|(_, model)| *model)
+}
+
+fn display_digits(point: &Value) -> i64 {
+    let value = source(point, "display_digits", "E");
+    value
+        .as_i64()
+        .or_else(|| value.as_str()?.parse().ok())
+        .filter(|digits| (0..=8).contains(digits))
+        .unwrap_or_default()
+}
+
+/// Worksheet defaults are suggestions. An explicitly chosen, valid wire type
+/// keeps its own compatible length, conversion and scaling defaults.
+pub fn wire_defaults(point: &Value, selected: Option<&str>) -> Value {
+    let internal = text(point, "internal_type");
+    let array = point["element_count"]
+        .as_i64()
+        .is_some_and(|count| count > 1)
+        || internal == "STRING";
+    let recommended = if array {
+        "STRING"
+    } else if internal == "F32" {
+        "S32"
+    } else {
+        internal
+    };
+    let wire = selected.unwrap_or(recommended);
+    let fixed = !array && internal == "F32" && wire == "S32";
+    let conversion = if wire == "STRING" {
+        "array_bytes"
+    } else if fixed {
+        "fixed_point"
+    } else {
+        "identity"
+    };
+    let length = match wire {
+        "U8" => json!(1),
+        "U16" | "S16" => json!(2),
+        "U32" | "S32" | "F32" => json!(4),
+        _ => point["byte_length"].clone(),
+    };
+    json!({"wire_type":wire,"wire_length":length,
+        "scale":if fixed {10_f64.powi(-(display_digits(point) as i32))} else {1.},
+        "conversion":conversion})
+}
+
+pub fn project_forward(row: &mut Value, point: &Value) {
+    let mut point = point.clone();
+    project(&mut point);
+    for field in ["category", "variable_name", "sheet_type"] {
+        row[field] = point[field].clone();
+    }
+    let recommended = wire_defaults(&point, None);
+    for field in ["wire_type", "wire_length", "scale", "conversion"] {
+        row[format!("recommended_{field}")] = recommended[field].clone();
+    }
 }
 
 /// Include editable aliases in both the displayed row and its concurrency baseline.
@@ -90,24 +158,14 @@ pub fn project(row: &mut Value) {
             _ => String::new(),
         }),
     );
-    fields.insert(
-        "sheet_data_type".into(),
-        json!(
-            if row["element_count"].as_i64().is_some_and(|count| count > 1) {
-                "STRING"
-            } else if typ == "F32" {
-                "S32"
-            } else {
-                typ
-            }
-        ),
-    );
+    let recommended = wire_defaults(row, None);
+    fields.insert("sheet_data_type".into(), recommended["wire_type"].clone());
+    for key in ["wire_type", "wire_length", "scale", "conversion"] {
+        fields.insert(format!("recommended_{key}"), recommended[key].clone());
+    }
     fields.insert(
         "sheet_upp_model".into(),
-        CATEGORIES
-            .iter()
-            .find(|(category, _)| fields["category"] == *category)
-            .map_or(json!(""), |(_, model)| json!(model)),
+        upp_model(row).map_or(json!(""), |model| json!(model)),
     );
     if !row["edit_values"].is_object() {
         row["edit_values"] = row.clone();
@@ -343,6 +401,76 @@ mod tests {
         assert!(is_dsp(&json!({"code":"DSP"})));
         assert!(is_dsp(&json!({"code":"DSP2","model_code":"DSP"})));
         assert!(!is_dsp(&json!({"code":"UPM"})));
+    }
+
+    #[test]
+    fn wire_suggestions_follow_sheet_types_arrays_and_precision() {
+        let mut point = json!({"internal_type":"F32","element_count":1,"byte_length":4,
+            "metadata":{"display_digits":"3","category":"任务级观测量"}});
+        assert_eq!(
+            wire_defaults(&point, None),
+            json!({"wire_type":"S32","wire_length":4,
+            "scale":0.001,"conversion":"fixed_point"})
+        );
+        assert_eq!(
+            wire_defaults(&point, Some("F32")),
+            json!({"wire_type":"F32","wire_length":4,
+            "scale":1.,"conversion":"identity"})
+        );
+        assert_eq!(upp_model(&point), Some(99));
+        point["element_count"] = json!(3);
+        point["byte_length"] = json!(12);
+        assert_eq!(
+            wire_defaults(&point, None),
+            json!({"wire_type":"STRING","wire_length":12,
+            "scale":1.,"conversion":"array_bytes"})
+        );
+        point["internal_type"] = json!("U16");
+        point["element_count"] = json!(1);
+        point["byte_length"] = json!(2);
+        assert_eq!(
+            wire_defaults(&point, None),
+            json!({"wire_type":"U16","wire_length":2,
+            "scale":1.,"conversion":"identity"})
+        );
+        point["metadata"] = json!({"source_cells":{"values":{"W":"系统参数2","E":"4"}}});
+        assert_eq!(upp_model(&point), Some(2));
+        point["metadata"]["category"] = json!("");
+        assert_eq!(
+            upp_model(&point),
+            None,
+            "explicit empty category must not use stale source cells"
+        );
+    }
+
+    #[test]
+    fn every_transmit_source_supplies_matching_suggestions() {
+        let data = crate::dsp_workbook::parse_workbook(
+            include_bytes!("../config/dc-ups/sources/DC-UPS测点数据表.xlsx").to_vec(),
+        )
+        .unwrap();
+        for mapping in data.transmit {
+            let point = data
+                .process
+                .iter()
+                .find(|point| point["enum_name"] == mapping["process_enum"])
+                .unwrap();
+            assert_eq!(upp_model(point), mapping["upp_model"].as_i64());
+            let suggested = wire_defaults(point, None);
+            for field in ["wire_type", "wire_length", "conversion"] {
+                assert_eq!(
+                    suggested[field], mapping[field],
+                    "{} {field}",
+                    mapping["name"]
+                );
+            }
+            let mut displayed = mapping.clone();
+            project_forward(&mut displayed, point);
+            assert_eq!(displayed["wire_type"], mapping["wire_type"]);
+            assert_eq!(displayed["recommended_wire_type"], suggested["wire_type"]);
+            assert_eq!(displayed["category"], category(point));
+            assert!(!displayed["variable_name"].as_str().unwrap().is_empty());
+        }
     }
 
     #[test]

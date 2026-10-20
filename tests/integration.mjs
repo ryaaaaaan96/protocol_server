@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { checkDspPoints } from "./dsp-points.mjs";
+import { checkDspTransmitRules } from "./dsp-transmit-rules.mjs";
 import { checkProjectFolders } from "./project-folders.mjs";
 import { checkExcelBatch } from "./excel-batch.mjs";
 import { checkProjectDatabases } from "./project-databases.mjs";
@@ -28,7 +29,7 @@ migration.pathname=`/${dbname}`;appUrl.pathname=`/${dbname}`;
 const password=crypto.randomBytes(20).toString("hex");
 const projectConfigs=fs.mkdtempSync(path.join(root,".runtime/test-project-configs-"));
 const fixtureSource=path.join(root,"config/dc-ups");
-for(const [baseKey,workbook] of [["dsp_native",true],["dsp_native_other",false],["cli",false],["excel",false],["broken",true]]){
+for(const [baseKey,workbook] of [["dsp_native",true],["dsp_native_other",false],["dsp_rules",false],["cli",false],["excel",false],["broken",true]]){
   const key=fixtureKey(baseKey);
   const directory=path.join(projectConfigs,key);fs.cpSync(fixtureSource,directory,{recursive:true});
   const manifest=JSON.parse(fs.readFileSync(path.join(directory,"project.json"),"utf8"));
@@ -144,6 +145,7 @@ async function runIntegration(){
   equal((await e.raw("/projects","POST",{config_key:fixtureKey("dsp_native")})).status,403);
   if (!process.argv.some(arg=>["--folders","--excel","--databases"].includes(arg))) await checkDspPoints({client,engineer:e,viewer:v,engineerId:engineer.id,viewerId:viewer.id,equal,ok,
     migrationUrl:migration.toString(),appUrl:appUrl.toString(),testEnv,projectConfigs,fixtureKey});
+  if (!process.argv.some(arg=>["--folders","--excel","--databases"].includes(arg))) await checkDspTransmitRules({client,engineer:e,engineerId:engineer.id,equal,ok,fixtureKey});
   if (!process.argv.some(arg=>["--excel","--databases"].includes(arg))) await checkProjectFolders({client,engineer:e,viewer:v,engineerId:engineer.id,viewerId:viewer.id,password,
     makeClient:()=>new Client(),projectConfigs,fixtureSource,testEnv,equal,ok,fixtureKey});
   if (!process.argv.some(arg=>["--folders","--databases"].includes(arg))) await checkExcelBatch({client,equal,ok,fixtureKey});

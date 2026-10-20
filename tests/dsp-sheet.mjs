@@ -5,7 +5,8 @@ export async function checkDspSheet({ client, engineer, url, read, graph, previe
     "element_count", "byte_length", "default_value", "max_value", "min_value", "unit", "access", "ram",
     "flash", "eeprom", "calibration", "structure", "cpu", "precision", "sheet_data_type", "upload_level",
     "category", "sheet_upp_model", "notes"];
-  equal(JSON.stringify(table.definition.columns), JSON.stringify(columns));
+  equal(JSON.stringify(table.definition.columns), JSON.stringify(columns.filter(key => !["sheet_data_type", "sheet_upp_model"].includes(key))));
+  ok(!table.definition.editor.some(key => ["sheet_data_type", "sheet_upp_model"].includes(key)));
   ok(!table.definition.editor.some(key => ["sig_id", "enum_name", "internal_type"].includes(key)));
   ok(!Object.keys(table.definition.fields).some(key => key.includes("sig_id")));
   for (const row of table.rows) {

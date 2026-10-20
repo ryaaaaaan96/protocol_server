@@ -91,6 +91,36 @@ pub(crate) fn new_errors(before: &Value, after: &Value) -> Vec<Value> {
         .cloned()
         .collect()
 }
+
+/// Do not repeat unrelated workbook warnings on every edit. Include warnings
+/// on changed rows and newly changed recommendations caused by a source edit.
+fn relevant_warnings(
+    before: &Value,
+    after: &Value,
+    before_report: &Value,
+    after_report: &Value,
+) -> Vec<Value> {
+    let changed: BTreeSet<_> = TABLES
+        .iter()
+        .flat_map(|table| {
+            rows(after, table)
+                .iter()
+                .filter(|row| find(before, table, num(row, "id")) != Some(*row))
+                .map(move |row| (*table, num(row, "id")))
+        })
+        .collect();
+    rows(after_report, "issues")
+        .iter()
+        .filter(|issue| {
+            issue["level"] == "warning"
+                && (changed.contains(&(strv(issue, "entity"), num(issue, "id")))
+                    || !rows(before_report, "issues")
+                        .iter()
+                        .any(|old| old == *issue))
+        })
+        .cloned()
+        .collect()
+}
 fn impact(before: &Value, after: &Value) -> Value {
     let mut changes = Vec::new();
     let config_changed = before["project_config"] != after["project_config"];
@@ -169,13 +199,14 @@ pub async fn preview(
                 e.2.and_then(|details| details.get("errors").cloned())
                     .unwrap_or_else(|| json!([{"message":e.1}]));
             return Ok(Json(
-                json!({"allowed":false,"revision":revision,"errors":errors,"impact":{"count":0,"changes":[]}}),
+                json!({"allowed":false,"revision":revision,"errors":errors,"warnings":[],"impact":{"count":0,"changes":[]}}),
             ));
         }
     };
     let after = snapshot(&mut proposed, pid, true).await?;
     crate::permissions::check_change(&access, &before, &after)?;
     let after_report = crate::topology_validation::validate(&after);
+    let warnings = relevant_warnings(&before, &after, &before_report, &after_report);
     let mut errors = new_errors(&before_report, &after_report);
     if c.entity == "point_batch" {
         crate::point_batch::annotate(&mut errors, &applied);
@@ -184,7 +215,7 @@ pub async fn preview(
     proposed.rollback().await?;
     if !errors.is_empty() {
         return Ok(Json(
-            json!({"allowed":false,"revision":revision,"errors":errors,"impact":effects,"validation":after_report}),
+            json!({"allowed":false,"revision":revision,"errors":errors,"warnings":warnings,"impact":effects,"validation":after_report}),
         ));
     }
     let base = crate::change_merge::document(&before);
@@ -199,7 +230,7 @@ pub async fn preview(
         .bind(base).bind(serde_json::to_value(patch)?).fetch_one(&mut *tx).await?;
     tx.commit().await?;
     Ok(Json(
-        json!({"id":id,"allowed":true,"merged":merged,"revision":revision,"errors":[],"impact":effects,"validation":after_report}),
+        json!({"id":id,"allowed":true,"merged":merged,"revision":revision,"errors":[],"warnings":warnings,"impact":effects,"validation":after_report}),
     ))
 }
 pub async fn commit(
@@ -357,5 +388,38 @@ async fn apply_change(s: &AppState, tx: &mut PgConnection, pid: i64, c: &Change)
         crate::point_order::apply(tx, pid, c, &s.project_files).await
     } else {
         apply(tx, pid, c).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preview_warnings_cover_changed_rows_and_changed_source_recommendations() {
+        let before = json!({"process_points":[{"id":1,"name":"source","internal_type":"F32"}],
+            "transmit_points":[{"id":1,"name":"first","process_point_id":1,"wire_type":"F32"},
+                {"id":2,"name":"unrelated","process_point_id":2,"wire_type":"F32"}]});
+        let first = json!({"key":"first","entity":"transmit_points","id":1,"related_id":1,
+            "level":"warning","message":"recommended S32"});
+        let other = json!({"key":"other","entity":"transmit_points","id":2,"related_id":2,
+            "level":"warning","message":"unrelated warning"});
+        let report = json!({"issues":[first,other]});
+        let mut after = before.clone();
+        after["process_points"][0]["name"] = json!("source renamed");
+        assert!(relevant_warnings(&before, &after, &report, &report).is_empty());
+        after["transmit_points"][0]["name"] = json!("updated first");
+        assert_eq!(
+            relevant_warnings(&before, &after, &report, &report),
+            vec![first.clone()]
+        );
+        after = before.clone();
+        after["process_points"][0]["internal_type"] = json!("U32");
+        let mut new_report = report.clone();
+        new_report["issues"][0]["message"] = json!("recommended U32");
+        assert_eq!(
+            relevant_warnings(&before, &after, &report, &new_report),
+            vec![new_report["issues"][0].clone()]
+        );
     }
 }

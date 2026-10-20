@@ -55,6 +55,57 @@ export function isDspSheet(data: PointTableData): boolean {
     data.definition.columns.includes("variable_name");
 }
 
+export function isDspForward(data: PointTableData): boolean {
+  return data.kind === "forward" && !!data.definition.fields.recommended_wire_type &&
+    !!data.definition.fields.category;
+}
+
+export const communicationFields = ["wire_type", "wire_length", "scale", "conversion"] as const;
+export type CommunicationRecommendation = { wire_type: string; wire_length: number; scale: number; conversion: string };
+
+/** Recommendations belong to the selected internal point; existing mappings remain independent. */
+export function communicationRecommendation(data: PointTableData, values: Row, row?: Row): CommunicationRecommendation | undefined {
+  if (!isDspForward(data)) return undefined;
+  const selected = Object.hasOwn(values, "process_point_id") ? values.process_point_id : row?.process_point_id;
+  if (selected == null) return undefined;
+  const point = data.options.process_points?.find(item => item.id === selected);
+  const source = point || (selected === row?.process_point_id ? row : undefined);
+  if (!source) return undefined;
+  const internal = sheetType(source.sheet_type ?? source.internal_type ?? source.data_type);
+  const count = Number(source.element_count ?? 1);
+  const type = source.recommended_wire_type ?? source.sheet_data_type ??
+    (count > 1 ? "STRING" : internal === "F32" ? "S32" : internal);
+  const widths: Record<string, number> = { U8: 1, U16: 2, S16: 2, U32: 4, S32: 4, F32: 4 };
+  const length = Number(source.recommended_wire_length ?? (type === "STRING" ? source.byte_length : widths[type]));
+  const scale = Number(source.recommended_scale ?? (internal === "F32" && type === "S32" ? source.precision ?? 1 : 1));
+  const conversion = source.recommended_conversion ?? (type === "STRING" ? "array_bytes" : internal === "F32" && type === "S32" ? "fixed_point" : "identity");
+  if (!type || !Number.isSafeInteger(length) || length < 1 || !Number.isFinite(scale) || scale <= 0) return undefined;
+  return { wire_type: type, wire_length: length, scale, conversion };
+}
+
+export function communicationHint(data: PointTableData, values: Row, row?: Row): string {
+  const suggestion = communicationRecommendation(data, values, row);
+  if (!suggestion) return "选择 DSP 内部点后，根据 DateType 和 ArrayCnt 给出通信建议。";
+  const current = values.wire_type ?? row?.wire_type;
+  const prefix = `根据 DateType 和 ArrayCnt，建议 ${suggestion.wire_type}，${suggestion.wire_length} 字节，协议系数 ${suggestion.scale}。`;
+  return prefix + (current != null && current !== "" && current !== suggestion.wire_type
+    ? `当前 ${current} 偏离建议；请确认通信类型、长度及转换方式符合接收端协议。`
+    : "可按接收端协议调整，修改不会改变内部 DateType。");
+}
+
+export function communicationDiffers(data: PointTableData, values: Row, row?: Row): boolean {
+  const suggestion = communicationRecommendation(data, values, row);
+  return !!suggestion && communicationFields.some(key => !Object.is(Object.hasOwn(values, key) ? values[key] : row?.[key], suggestion[key]));
+}
+
+export function dspCategory(model: unknown): string {
+  const categories: Record<string, string> = {
+    "1": "系统参数1", "2": "系统参数2", "99": "任务级观测量",
+    "100": "中断级观测量", "102": "控制参数设置", "103": "任务级标定量",
+  };
+  return categories[String(model)] ?? (model == null ? "—" : "未匹配分类");
+}
+
 export function sheetType(value: unknown): string | undefined {
   const type = normalizedDataType(value)?.replace(/^SYS_/, "");
   return type === "FLOAT" ? "F32" : type;
@@ -157,9 +208,18 @@ export function pointChangeSummary(change: Row, fields?: Record<string, PointFie
     before = sheetChangeValues(before);
     after = sheetChangeValues(after);
   }
+  if (fields?.variable_name && fields.sheet_type && !process) {
+    const classify = (record: Row) => {
+      if (!Object.hasOwn(record, "upp_model")) return record;
+      const { upp_model, ...rest } = record;
+      return { ...rest, category: record.category || dspCategory(upp_model) };
+    };
+    before = classify(before);
+    after = classify(after);
+  }
   const text = (value: unknown) => value !== null && typeof value === "object"
     ? JSON.stringify(value) : pointText(value);
-  const labels: Record<string, string> = { display_order: "显示顺序", ordinal: "协议排列", effective_address: "协议地址" };
+  const labels: Record<string, string> = { display_order: "显示顺序", ordinal: "协议排列", effective_address: "协议地址", category: "数据分类" };
   return Object.keys({ ...before, ...after })
     .filter(key => !["project_id", "raw_json"].includes(key) && JSON.stringify(before[key]) !== JSON.stringify(after[key]))
     .map(key => `${fields?.[key]?.column_label || fields?.[key]?.label || labels[key] || key}：${text(before[key])} → ${text(after[key])}`)

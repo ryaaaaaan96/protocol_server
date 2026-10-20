@@ -9,7 +9,7 @@ async function compile(path) {
   }).outputText;
 }
 const choicesUrl = moduleUrl(await compile("./src/domain/pointTables.ts"));
-const { pointChoices, pointDataType, pointIsString, isDspSheet, pointChangeSummary } = await import(choicesUrl);
+const { pointChoices, pointDataType, pointIsString, isDspSheet, isDspForward, pointChangeSummary, communicationRecommendation, communicationHint, communicationDiffers } = await import(choicesUrl);
 const { parseCell, displayCell, fieldForColumn } = await import(moduleUrl((await compile("./src/domain/pointGrid.ts")).replace('"./pointTables"', JSON.stringify(choicesUrl))));
 const { allowsPoint } = await import(moduleUrl(await compile("./src/domain/permissions.ts")));
 const { belongsToBoard, scopedRows } = await import(moduleUrl(await compile("./src/domain/board.ts")));
@@ -20,7 +20,7 @@ const point = {
   variable_name: "DcBusVoltage", sheet_type: "Sys_F32", type_length: 4, display_digits: 0, precision: 1, sheet_data_type: "S32", category: "系统参数1", sheet_upp_model: 1, enum_table: "bit0:有效\nbit1:故障",
   data_type: "F32", internal_type: "F32", element_count: 1, byte_length: 4, unit: "V", default_value: "0", min_value: "0", max_value: "1000",
 };
-const alternate = { ...point, id: 2, name: "设备名称", enum_name: "DEVICE_NAME", sig_id: 4098, data_type: "STRING", internal_type: "STRING", element_count: 32, byte_length: 32 };
+const alternate = { ...point, id: 2, name: "设备名称", enum_name: "DEVICE_NAME", variable_name: "DeviceName", sig_id: 4098, data_type: "STRING", internal_type: "STRING", sheet_type: "Sys_U16", sheet_data_type: "STRING", element_count: 16, byte_length: 32, category: "任务级观测量" };
 const boardGraph = {
   project_config: { board_types: [
     { code: "DSP", point_storage: "native" },
@@ -40,7 +40,8 @@ const options = { native_groups: [{ code: "LOCAL", name: "本机数据" }], proc
 const process = { storage: "native", board_key: "DSP", kind: "process", definition: processDefinition, options, rows: [], revision: 1 };
 const processRow = { ...point, group_name: "本机数据", resolved_sig_id: point.sig_id, edit_values: { ...point } };
 assert.equal(isDspSheet(process), true);
-assert.equal(processDefinition.columns.length, 25);
+assert.equal(processDefinition.columns.length, 23);
+for (const key of ["sheet_data_type", "sheet_upp_model"]) assert.ok(!processDefinition.columns.includes(key));
 assert.deepEqual(processDefinition.columns.slice(0, 8), ["name", "variable_name", "sheet_type", "enum_table", "display_digits", "type_length", "element_count", "byte_length"]);
 assert.equal(fieldForColumn(process, "variable_name"), "variable_name");
 assert.equal(fieldForColumn(process, "sheet_type"), "sheet_type");
@@ -117,6 +118,25 @@ assert.equal(displayCell(forward, forwardRow, "signal_name", { process_point_id:
 assert.equal(displayCell(forward, forwardRow, "enum_name", { process_point_id: 2 }), "DEVICE_NAME");
 assert.equal(displayCell(forward, forwardRow, "data_type", { process_point_id: 2 }), "STRING");
 assert.equal(displayCell(forward, forwardRow, "byte_length", { process_point_id: 2 }), "32");
+assert.equal(isDspForward(forward), true);
+assert.equal(isDspForward(process), false);
+assert.equal(isDspForward({ ...forward, definition: { ...forwardDefinition, fields: {} } }), false);
+for (const key of ["upp_model", "resolved_sig_id", "enum_name"]) assert.ok(!forwardDefinition.columns.includes(key));
+assert.ok(!forwardDefinition.editor.includes("upp_model"));
+assert.equal(displayCell(forward, forwardRow, "category", { process_point_id: 2 }), "任务级观测量");
+assert.equal(displayCell(forward, forwardRow, "variable_name", { process_point_id: 2 }), "DeviceName");
+assert.equal(displayCell(forward, forwardRow, "sheet_type", { process_point_id: 2 }), "Sys_U16");
+assert.deepEqual(communicationRecommendation(forward, mapping), { wire_type: "S32", wire_length: 4, scale: 1, conversion: "fixed_point" });
+assert.deepEqual(communicationRecommendation(forward, { process_point_id: 2 }), { wire_type: "STRING", wire_length: 32, scale: 1, conversion: "array_bytes" });
+assert.equal(communicationRecommendation(generic, mapping), undefined);
+assert.match(communicationHint(forward, { ...mapping, wire_type: "F32" }), /当前 F32 偏离建议/);
+assert.equal(communicationDiffers(forward, { ...mapping, scale: 1 }), false);
+assert.equal(communicationDiffers(forward, mapping), true);
+assert.equal(communicationDiffers(forward, { ...mapping, scale: 1, wire_length: null }, mapping), true);
+assert.equal(communicationRecommendation(forward, { process_point_id: null }, mapping), undefined);
+assert.equal(pointChangeSummary({ entity: "transmit_points", before: { upp_model: 1 }, after: { upp_model: 99 } }, forwardDefinition.fields), "数据分类：系统参数1 → 任务级观测量");
+const serverRecommendation = { ...point, recommended_wire_type: "U16", recommended_wire_length: 2, recommended_scale: 1, recommended_conversion: "identity" };
+assert.deepEqual(communicationRecommendation({ ...forward, options: { ...options, process_points: [serverRecommendation] } }, mapping), { wire_type: "U16", wire_length: 2, scale: 1, conversion: "identity" });
 const permissions = { role: "engineer", can_edit: true, can_manage_project: false, edit_scope: "scoped", grants: [{ board_key: "DSP", scope: "internal" }], catalog: [] };
 assert.equal(allowsPoint(permissions, "DSP", "process", process, processRow), true);
 assert.equal(allowsPoint(permissions, "DSP", "forward", forward, forwardRow), false);
@@ -129,4 +149,4 @@ assert.equal(allowsPoint(protocolPermissions, "DSP", "forward", forward, { ...fo
 assert.equal(allowsPoint(protocolPermissions, "UPM", "forward", forward, forwardRow), false);
 assert.equal(allowsPoint(protocolPermissions, "DSP", "process", process, processRow), false);
 assert.deepEqual(pointChoices(forward, "endpoint_key", {}).map(endpoint => endpoint.id), ["UPP_SERVICE"]);
-console.log("PASS: 25-column DSP sheet projections, editable aliases, array bounds, generic table compatibility, references, fractional scale and scoped permissions");
+console.log("PASS: DSP sheet projections, hidden protocol fields, communication recommendations, category summaries, editable aliases, array bounds, generic tables and scoped permissions");
