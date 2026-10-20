@@ -35,7 +35,10 @@ pub async fn native_board(
         config["board_types"]
             .as_array()?
             .iter()
-            .find(|board| board["code"] == board_key && board["point_storage"] == "native")
+            .find(|board| {
+                board["code"] == board_key
+                    && matches!(board["point_storage"].as_str(), Some("native" | "derived"))
+            })
             .cloned()
     }))
 }
@@ -139,6 +142,11 @@ pub async fn apply(
     let fields = c.values["fields"]
         .as_object()
         .ok_or(AppError::bad("点表字段必须为对象"))?;
+    if board["point_storage"] == "derived" {
+        return Err(AppError::bad(
+            "此采集表由源转发和脚本生成，请修改源点表或 JSON/JS 配置",
+        ));
+    }
     if !["create", "update", "delete"].contains(&c.operation.as_str()) {
         return Err(AppError::bad("点表操作无效"));
     }

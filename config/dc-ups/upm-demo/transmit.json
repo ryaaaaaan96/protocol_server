@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "enabled": false,
+  "label": "未启用",
+  "description": "本设备只显示派生采集表。",
+  "columns": [
+    "name"
+  ],
+  "editor": [
+    "name"
+  ],
+  "inline": {},
+  "ordering": {
+    "mode": "disabled",
+    "group_by": []
+  },
+  "fields": {
+    "name": {
+      "label": "名称"
+    }
+  }
+}

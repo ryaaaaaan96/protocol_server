@@ -155,10 +155,10 @@ impl Config {
             }
             if t.point_storage
                 .as_deref()
-                .is_some_and(|storage| storage != "native")
+                .is_some_and(|storage| !["native", "derived"].contains(&storage))
             {
                 return Err(AppError::bad(
-                    "point_storage 仅支持 native，省略时板卡仅用于拓扑预览",
+                    "point_storage 仅支持 native 或 derived，省略时板卡仅用于拓扑预览",
                 ));
             }
             if t.point_storage.is_none() && (t.point_rules.is_some() || t.workbook_import.is_some())
@@ -168,6 +168,18 @@ impl Config {
                 ));
             }
             let mut groups = BTreeSet::new();
+            if t.point_storage.as_deref() == Some("derived")
+                && (t.point_rules.is_some()
+                    || t.workbook_import.is_some()
+                    || t.point_endpoints.len() != 1
+                    || t.point_endpoints.iter().any(|endpoint| {
+                        endpoint.direction != "collect" || endpoint.protocol != "MODBUS"
+                    }))
+            {
+                return Err(AppError::bad(
+                    "derived 板卡只支持一个 Modbus 采集端点，不接受存储规则或工作簿导入",
+                ));
+            }
             if t.point_groups.iter().any(|g| {
                 !model::identifier(&g.code)
                     || g.code.len() > 80
@@ -189,7 +201,9 @@ impl Config {
                     || e.name.len() > 300
                     || !["UPP", "MODBUS"].contains(&e.protocol.as_str())
                     || !["collect", "transmit"].contains(&e.direction.as_str())
-                    || (e.direction == "collect" && e.protocol != "UPP")
+                    || (e.direction == "collect"
+                        && e.protocol != "UPP"
+                        && t.point_storage.as_deref() != Some("derived"))
                     || !endpoints.insert(&e.code)
             }) || (t.point_storage.is_none() && !t.point_endpoints.is_empty())
             {
@@ -469,7 +483,7 @@ mod tests {
     fn type_counts_do_not_expand_instances() {
         let c = Config::parse(example()).unwrap();
         let n = c.counts().unwrap();
-        assert_eq!(c.board_types.len(), 5);
+        assert_eq!(c.board_types.len(), 6);
         assert_eq!(n["CSU"], 1);
         assert_eq!(n["UPM"], 24);
         assert_eq!(n["DSP"], 192);

@@ -86,7 +86,7 @@ pub(crate) fn writable(kind: &str) -> BTreeSet<&str> {
 }
 fn readable(kind: &str) -> BTreeSet<&str> {
     let common = keys(
-        "id,board_key,unit,data_type,byte_length,resolved_sig_id,enum_name,group_key,group_name,metadata,device_addresses,source_variable,source_sig_id,source_notes,register_count",
+        "id,board_key,unit,data_type,byte_length,resolved_sig_id,enum_name,group_key,group_name,metadata,device_addresses,source_variable,source_sig_id,source_notes,register_count,source_id,source_device_code,source_device_name",
     );
     let extra = if kind == "process" {
         keys("group_name,contexts,collection_count,forward_count,range_inherited")
@@ -196,7 +196,10 @@ pub(crate) fn validate_table_file(kind: &str, table: &Value) -> Result<()> {
     ];
     if object.keys().any(|key| {
         !required.contains(&key.as_str())
-            && !matches!(key.as_str(), "calculation" | "hidden_source_sig_ids")
+            && !matches!(
+                key.as_str(),
+                "calculation" | "hidden_source_sig_ids" | "mapping"
+            )
     }) || required.iter().any(|key| !object.contains_key(*key))
     {
         return Err(AppError::bad(
@@ -218,6 +221,18 @@ pub(crate) fn validate_table_file(kind: &str, table: &Value) -> Result<()> {
                 "hidden_source_sig_ids 仅支持处理点表，须为最多 16 个非空标记的数组，每项不超过 64 字节",
             ));
         }
+    }
+    if let Some(rule) = table.get("mapping") {
+        if kind != "collect"
+            || !table["editor"].as_array().is_some_and(|v| v.is_empty())
+            || !table["inline"].as_object().is_some_and(|v| v.is_empty())
+            || table["ordering"]["mode"] != "disabled"
+        {
+            return Err(AppError::bad(
+                "mapping 仅支持只读采集表，须关闭编辑、行排序与 inline",
+            ));
+        }
+        crate::derived_collection::validate_rule(rule)?;
     }
     if let Some(rule) = table.get("calculation") {
         if kind != "forward" {
@@ -279,7 +294,7 @@ fn validate_table(
     for section in ["columns", "editor"] {
         let items = table[section]
             .as_array()
-            .filter(|a| !a.is_empty())
+            .filter(|a| !a.is_empty() || section == "editor" && table.get("mapping").is_some())
             .ok_or(AppError::bad("点表 columns/editor 不能为空"))?;
         let mut seen = BTreeSet::new();
         for item in items {
@@ -430,6 +445,19 @@ pub async fn read(
         .fetch_one(&mut *tx)
         .await?;
     let board = board(&mut tx, pid, &board_key).await?;
+    if board["point_storage"] == "derived" {
+        if kind != "collect" {
+            return Err(AppError::bad("此设备只有一张派生采集表"));
+        }
+        let definition =
+            board_definition(&mut tx, pid, &board_key, "collect", &s.project_files).await?;
+        let graph = crate::topology::snapshot(&mut tx, pid, false).await?;
+        let data = crate::derived_collection::evaluate(&graph, &board_key, &definition["mapping"])?;
+        return Ok(Json(
+            json!({"version":1,"revision":revision,"board_key":board_key,"kind":"collect","storage":"derived","derived":true,
+            "definition":definition,"rows":data,"options":{"native_groups":board["point_groups"],"endpoints":board["point_endpoints"],"process_points":[]}}),
+        ));
+    }
     if kind == "collect"
         && !board["point_endpoints"]
             .as_array()

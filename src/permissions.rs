@@ -67,7 +67,7 @@ impl Access {
                 })
     }
     pub fn value(&self, graph: &Value) -> Value {
-        let catalog: Vec<_> = graph["project_config"]["board_types"].as_array().into_iter().flatten().map(|b| {
+        let catalog: Vec<_> = graph["project_config"]["board_types"].as_array().into_iter().flatten().filter(|b| b["point_storage"] != "derived").map(|b| {
             let endpoints: Vec<_> = b["point_endpoints"].as_array().into_iter().flatten().map(|e| {
                 json!({"endpoint_key":e["code"],"name":e["name"],"protocol":e["protocol"]})
             }).collect();
@@ -258,13 +258,14 @@ pub fn validate_grants_graph(graph: &Value, grants: &[Grant]) -> Result<()> {
             return Err(AppError::bad("板卡/协议编辑范围无效或重复"));
         }
         let valid = board(graph, &grant.board_key).is_some_and(|b| {
-            grant
-                .endpoint_key
-                .as_deref()
-                .is_none_or(|key| endpoint(b, key).is_some())
+            b["point_storage"] != "derived"
+                && grant
+                    .endpoint_key
+                    .as_deref()
+                    .is_none_or(|key| endpoint(b, key).is_some())
         });
         if !valid {
-            return Err(AppError::bad("授权板卡或端点未在当前项目 JSON 中定义"));
+            return Err(AppError::bad("授权板卡或端点不存在，或属于只读派生设备"));
         }
     }
     Ok(())
@@ -273,6 +274,33 @@ pub fn validate_grants_graph(graph: &Value, grants: &[Grant]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn derived_devices_are_readonly_and_not_offered_as_edit_grants() {
+        let graph = json!({"project_config":{"board_types":[{"code":"PROJECTION_B","point_storage":"derived","point_endpoints":[{"code":"IN"}]}]}});
+        let access = Access {
+            role: "admin".into(),
+            edit_scope: "all".into(),
+            grants: vec![],
+        };
+        assert!(
+            access.value(&graph)["catalog"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        for scope in ["board", "internal", "protocol"] {
+            let grant = Grant::new(
+                "PROJECTION_B",
+                scope,
+                if scope == "protocol" {
+                    Some("IN")
+                } else {
+                    None
+                },
+            );
+            assert!(validate_grants_graph(&graph, &[grant]).is_err());
+        }
+    }
     fn scoped(grants: Vec<Grant>) -> Access {
         Access {
             role: "engineer".into(),

@@ -16,7 +16,8 @@ pub async fn generate(
     pid: i64,
     definitions: &crate::project_files::ProjectFiles,
 ) -> Result<Value> {
-    let graph = crate::topology::snapshot(tx, pid, true).await?;
+    let mut graph = crate::topology::snapshot(tx, pid, true).await?;
+    crate::derived_collection::attach(tx, pid, definitions, &mut graph).await?;
     let mut generated = crate::topology_codegen::generate(&graph)?;
     let issues = crate::table_calculation::issues(tx, pid, definitions, &graph).await?;
     if !issues.is_empty() {

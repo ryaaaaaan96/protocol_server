@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { exportProject } from "../scripts/export-project.mjs";
+import { checkDerivedCollection } from "./derived-collection.mjs";
 
 export async function checkUpmPoints({client,engineer,engineerId,viewer,viewerId,equal,ok,fixtureKey,projectConfigs,testEnv}) {
   const project=await client.call("/projects","POST",{config_key:fixtureKey("upm")});
@@ -16,6 +17,7 @@ export async function checkUpmPoints({client,engineer,engineerId,viewer,viewerId
     return (await commit(p.data)).record;
   };
   const before=await graph();
+  await checkDerivedCollection({client,url,graph,equal,ok,projectConfigs,key:fixtureKey("upm")});
   equal(before.schema_version,7);
   equal(before.validation.errors,0);
   equal(before.process_points.filter(p=>p.board_key==="UPM").length,606);

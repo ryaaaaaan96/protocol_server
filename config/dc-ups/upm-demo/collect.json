@@ -1,0 +1,91 @@
+{
+  "version": 1,
+  "enabled": true,
+  "label": "采集点表",
+  "description": "UPM Modbus对外数据的完整映射，包含LOCAL及DSP1～DSP8实际地址。",
+  "columns": [
+    "signal_name",
+    "enum_name",
+    "source_device_code",
+    "address",
+    "register_type",
+    "register_count",
+    "wire_type",
+    "wire_length",
+    "scale",
+    "access",
+    "dev_id",
+    "poll_interval",
+    "byte_order",
+    "unit",
+    "source_notes"
+  ],
+  "editor": [],
+  "inline": {},
+  "ordering": {
+    "mode": "disabled",
+    "group_by": []
+  },
+  "fields": {
+    "signal_name": {
+      "label": "数据名称"
+    },
+    "enum_name": {
+      "label": "枚举"
+    },
+    "source_device_code": {
+      "label": "来源设备"
+    },
+    "address": {
+      "label": "Modbus地址"
+    },
+    "register_type": {
+      "label": "寄存器区"
+    },
+    "register_count": {
+      "label": "寄存器数量"
+    },
+    "wire_type": {
+      "label": "数据类型"
+    },
+    "wire_length": {
+      "label": "协议字节数"
+    },
+    "scale": {
+      "label": "精度"
+    },
+    "access": {
+      "label": "读写权限"
+    },
+    "dev_id": {
+      "label": "UPM从站地址"
+    },
+    "poll_interval": {
+      "label": "采集周期（毫秒）"
+    },
+    "byte_order": {
+      "label": "字节序"
+    },
+    "unit": {
+      "label": "单位"
+    },
+    "source_notes": {
+      "label": "备注"
+    }
+  },
+  "mapping": {
+    "engine": "javascript",
+    "script_file": "collect.js",
+    "source": {
+      "board_key": "UPM",
+      "endpoint_key": "MODBUS_SERVICE"
+    },
+    "endpoint_key": "UPM_MODBUS",
+    "group_key": "LOCAL",
+    "parameters": {
+      "upm_dev_id": 1,
+      "poll_interval": 1000,
+      "byte_order": 0
+    }
+  }
+}

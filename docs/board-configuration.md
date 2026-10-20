@@ -57,3 +57,7 @@
 完整示例见 DSP、UPM 的 `workbook.json`。重复内部枚举默认拒绝；`merge_equal: true` 仅合并类型、sigID、范围等定义相同的记录，并保留多条转发和来源行。Excel 只读取缓存值，不运行公式；布局计算另见 [点表计算规则](table-calculation.md)。
 
 导入预览冻结映射和已应用板卡配置；任一内容变化都要求重新预览。应用新规则、导入、编辑依然受权限、编辑租约、版本冲突检查和历史记录约束。
+
+## 只读派生采集设备
+
+`point_storage: "derived"` 可定义只有一张 Modbus 采集表的设备；不创建或保存独立点记录。`collect.json` 的 `mapping` 通过 `source` 引用 native 板卡的 Modbus 转发端点，并用板卡目录内的 `script_file` 展开设备地址。Rust 引擎校验完整覆盖、合法引用、地址范围和冲突。界面、生成与发布均使用同一份实时映射。配置示例及 JS 输入输出约束见 [upm-demo](upm-demo.md)。

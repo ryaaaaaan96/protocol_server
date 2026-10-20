@@ -5,6 +5,7 @@ mod change_merge;
 mod codegen;
 mod database;
 mod db;
+mod derived_collection;
 #[cfg(test)]
 #[path = "../tests/references/dsp_workbook.rs"]
 mod dsp_workbook;

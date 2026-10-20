@@ -114,7 +114,8 @@ pub async fn validate(
         .bind(pid)
         .execute(&mut *tx)
         .await?;
-    let graph = topology::snapshot(&mut tx, pid, true).await?;
+    let mut graph = topology::snapshot(&mut tx, pid, true).await?;
+    crate::derived_collection::attach(&mut tx, pid, &s.project_files, &mut graph).await?;
     let mut report = topology_validation::validate(&graph);
     let issues = crate::table_calculation::issues(&mut tx, pid, &s.project_files, &graph).await?;
     report["errors"] = json!(report["errors"].as_u64().unwrap_or(0) + issues.len() as u64);

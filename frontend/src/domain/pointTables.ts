@@ -13,6 +13,7 @@ export type PointField = {
   multiline?: boolean;
 };
 export type PointDefinition = {
+  mapping?: Record<string, unknown>;
   hidden_source_sig_ids?: string[];
   calculation?: { engine: "javascript" | "builtin"; script_file?: string; script?: string; parameters: Record<string, unknown> };
   label: string;
@@ -36,7 +37,8 @@ export type PointTableData = {
   revision: number;
   board_key: string;
   kind: PointKind;
-  storage?: "native";
+  storage?: "native" | "derived";
+  derived?: boolean;
   definition: PointDefinition;
   rows: Row[];
   options: Record<string, Row[]>;

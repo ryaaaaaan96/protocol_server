@@ -38,7 +38,7 @@ fn fail(message: impl std::fmt::Display) -> AppError {
     AppError::bad(format!("点表计算失败：{message}；全部修改未保存"))
 }
 
-fn engine() -> Result<Context> {
+pub(crate) fn engine() -> Result<Context> {
     let runtime = Runtime::new().map_err(fail)?;
     runtime.set_memory_limit(64 * 1024 * 1024);
     runtime.set_max_stack_size(512 * 1024);

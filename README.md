@@ -75,6 +75,8 @@ JSON 是组织配置的编辑来源。服务器文件修改后，通过网页读
 
 UPM 使用 LOCAL 本地设备和 DSP 共享模板，8 个 DSP 设备地址独立配置。LOCAL 无采集表；DSP 使用 UPP 采集；对外分为 Modbus 和 UPP 两个视图。详见 [UPM 数据来源与地址规则](docs/upm.md)。
 
+`upm-demo` 演示设备仅显示一张采集表，用 `collect.js` 将 UPM Modbus 对外定义按 LOCAL、DSP1～DSP8 完整展开为 3646 条实际地址。派生表只读，源数据及 JSON/JS 修改会实时反映，无需复制点数据或数据库迁移。详见 [upm-demo 配置](docs/upm-demo.md)。
+
 已有 DC-UPS 项目首次启用 UPM：
 
 ```bash

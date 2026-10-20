@@ -38,6 +38,10 @@ for(const [baseKey,workbook] of [["generic",true],["upm",true],["dsp_native",tru
   const manifest=JSON.parse(fs.readFileSync(path.join(directory,"project.json"),"utf8"));
   manifest.key=key;manifest.name=key;
   if(!["upm","generic"].includes(baseKey)) {
+    const derived=manifest.topology.board_types.filter(b=>b.point_storage==="derived").map(b=>b.code);
+    manifest.topology.board_types=manifest.topology.board_types.filter(b=>!derived.includes(b.code));
+    manifest.topology.mounts=manifest.topology.mounts.filter(m=>!derived.includes(m.child));
+    for(const key of derived)delete manifest.workspace.boards[key];
     const upm=manifest.topology.board_types.find(board=>board.code==="UPM");
     for(const key of ["point_storage","point_groups","point_endpoints","point_rules","workbook_import"]) delete upm[key];
     manifest.workspace.boards.UPM.tables=[];

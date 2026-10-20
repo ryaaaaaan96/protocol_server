@@ -47,6 +47,7 @@ pub async fn snapshot(tx: &mut PgConnection, pid: i64, _computed: bool) -> Resul
 pub async fn read(State(s): State<AppState>, u: User, Path(pid): Path<i64>) -> Result<Json<Value>> {
     let mut tx = db::read_snapshot_context(&s.pool, &u, pid).await?;
     let mut graph = snapshot(&mut tx, pid, true).await?;
+    crate::derived_collection::attach(&mut tx, pid, &s.project_files, &mut graph).await?;
     graph["validation"] = crate::topology_validation::validate(&graph);
     graph["permissions"] = crate::permissions::load(&mut tx, pid).await?.value(&graph);
     Ok(Json(graph))
@@ -171,7 +172,8 @@ pub async fn preview(
 ) -> Result<Json<Value>> {
     let mut tx = db::context(&s.pool, &u, Some(pid), true).await?;
     let revision = db::lock_project(&mut tx, pid).await?;
-    let before = snapshot(&mut tx, pid, true).await?;
+    let mut before = snapshot(&mut tx, pid, true).await?;
+    crate::derived_collection::attach(&mut tx, pid, &s.project_files, &mut before).await?;
     let merged = revision != c.revision;
     if merged {
         if c.revision > revision
@@ -206,7 +208,8 @@ pub async fn preview(
             ));
         }
     };
-    let after = snapshot(&mut proposed, pid, true).await?;
+    let mut after = snapshot(&mut proposed, pid, true).await?;
+    crate::derived_collection::attach(&mut proposed, pid, &s.project_files, &mut after).await?;
     crate::permissions::check_change(&access, &before, &after)?;
     let after_report = crate::topology_validation::validate(&after);
     let warnings = relevant_warnings(&before, &after, &before_report, &after_report);
@@ -250,7 +253,8 @@ pub async fn commit(
         access.require_all()?;
     }
     let merged = revision != c.revision;
-    let before = snapshot(&mut tx, pid, true).await?;
+    let mut before = snapshot(&mut tx, pid, true).await?;
+    crate::derived_collection::attach(&mut tx, pid, &s.project_files, &mut before).await?;
     let has_baseline = crate::change_merge::eligible(&c)
         && !pending["merge_base"].is_null()
         && !pending["merge_patch"].is_null();
@@ -294,7 +298,8 @@ pub async fn commit(
                 error
             }
         })?;
-    let after = snapshot(&mut tx, pid, true).await?;
+    let mut after = snapshot(&mut tx, pid, true).await?;
+    crate::derived_collection::attach(&mut tx, pid, &s.project_files, &mut after).await?;
     crate::permissions::check_change(&access, &before, &after)?;
     if target.is_some_and(|expected| expected != crate::change_merge::document(&after)) {
         return Err(crate::change_merge::conflict(

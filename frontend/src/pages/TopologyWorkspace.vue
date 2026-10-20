@@ -28,7 +28,7 @@ const emit = defineEmits<{
 }>();
 const types = computed(() => boardTypes(props.graph));
 const board = computed(() => types.value.find(type => type.code === props.boardKey));
-const enabled = computed(() => board.value?.point_storage === "native");
+const enabled = computed(() => ["native", "derived"].includes(board.value?.point_storage));
 const groups = computed<Row[]>(() => enabled.value ? board.value?.point_groups || [] : []);
 const groupKey = ref<string>();
 const sheetKey = ref<string>("process");
@@ -73,6 +73,7 @@ watch([sheets, hasOverview], ([available, overview]) => {
 watch(() => sheetKey.value === "overview" ? `${board.value?.name || props.boardKey} 总体视图` : sheet.value?.label || "", label => emit("sheet", label), { immediate: true });
 const points = computed(() => rows(props.graph || {}, "process_points").filter(point => point.board_key === props.boardKey));
 function count(kind: PointKind, endpointKey?: string) {
+  if (board.value?.point_storage === "derived" && kind === "collect") return props.graph?.derived_collections?.[props.boardKey]?.rows?.length || 0;
   const selected = points.value.filter(point => groupKey.value == null || point.group_key === groupKey.value);
   if (kind === "process") {
     const definition = schema.value?.boards[props.boardKey]?.process;
@@ -129,7 +130,7 @@ function done(merged = false) {
         @click="emit('board', type.code)">
         <Box :size="21" />
         <div><strong>{{ type.code }}</strong><span>{{ type.name }}</span></div>
-        <small>{{ type.point_storage === 'native' ? `${rows(graph, 'process_points').filter(point => point.board_key === type.code).length} 个内部点` : '点表暂未启用' }}</small>
+        <small>{{ type.point_storage === 'derived' ? '派生采集表' : type.point_storage === 'native' ? `${rows(graph, 'process_points').filter(point => point.board_key === type.code).length} 个内部点` : '点表暂未启用' }}</small>
       </button>
     </div>
     <Empty v-if="!enabled" title="此板卡点表暂未启用" detail="此板卡的组成与连接由项目 JSON 定义。" />

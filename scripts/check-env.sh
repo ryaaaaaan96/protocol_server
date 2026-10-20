@@ -126,8 +126,8 @@ for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
         const tableFile = path.resolve(directory, board.directory, `${table}.json`);
         requireFile(tableFile, project);
         const definition = JSON.parse(fs.readFileSync(tableFile, 'utf8'));
-        if (definition.calculation?.engine === "javascript") {
-          const reference = definition.calculation.script_file;
+        for (const rule of [definition.calculation, definition.mapping]) if (rule?.engine === "javascript") {
+          const reference = rule.script_file;
           if (typeof reference !== 'string' || path.isAbsolute(reference) || reference.includes('\\')
               || reference.split('/').includes('..') || !reference.endsWith('.js')) {
             throw new Error(`${tableFile}：script_file 必须指向板卡目录内的 .js 文件`);

@@ -56,10 +56,10 @@ const showHelp = ref(false);
 const showNonUploaded = ref(false);
 const permissions = usePermissionContext();
 function scopeEditable(row?: Row | null, values?: Row) {
-  return !!data.value && allowsPoint(permissions.state.value, props.boardKey, props.kind, data.value,
+  return !!data.value && !data.value.derived && allowsPoint(permissions.state.value, props.boardKey, props.kind, data.value,
     row && values ? { ...row, edit_values: { ...row.edit_values, ...values } } : row);
 }
-const canEditTable = computed(() => props.canWrite && scopeEditable());
+const canEditTable = computed(() => !data.value?.derived && props.canWrite && scopeEditable());
 const editing = ref(false),
   selected = ref<Row | null>(null);
 const reload = ref(0);
@@ -292,11 +292,11 @@ const menuItems = computed(() => {
   if (!menu) return [];
   if (menu.type === "row") {
     return [
-      { key: "detail", label: "记录详情" },
+      ...(!data.value?.derived ? [{ key: "detail", label: "记录详情" }] : []),
       { key: "copy-row", label: "复制此行" },
       ...(grid.selectedRowIds.value.length ? [{ key: "copy-rows", label: "复制选中行" }] : []),
       ...(props.kind === "process" && props.allowForward ? [{ key: "forward", label: "转发配置" }] : []),
-      ...(props.kind !== "process" && props.processPointId == null ? [{ key: "process", label: "关联处理点" }] : []),
+      ...(props.kind !== "process" && props.processPointId == null && !data.value?.derived ? [{ key: "process", label: "关联处理点" }] : []),
     ];
   }
   const column = columns.value.find(c => c.key === menu.key)!;
@@ -577,6 +577,7 @@ function text(row: Row, key: string) {
       <button class="button small" :class="{ primary: categoryFilter == null }" :aria-pressed="categoryFilter == null" :disabled="busy || !!review || !!orderDraft" @click="selectCategory(null)">全部分类 <small>{{ matched.length }}</small></button>
       <button v-for="category in categories" :key="category.key" class="button small" :class="{ primary: categoryFilter === category.key }" :aria-pressed="categoryFilter === category.key" :disabled="busy || !!review || !!orderDraft" @click="selectCategory(category.key)">{{ category.label }} <small>{{ category.count }}</small></button>
     </div>
+    <p v-if="data.derived" class="notice">本采集表由源转发表和映射规则自动生成。请在源点表调整数据，在配置文件中调整采集参数和地址展开规则。</p>
     <p v-if="kind === 'collect' && data.options.endpoints.some(endpoint => endpoint.subset_of)" class="notice">
       本采集表是
       <span v-for="endpoint in data.options.endpoints.filter(endpoint => endpoint.subset_of)" :key="endpoint.code">{{ endpoint.subset_of.board_key }} / {{ endpoint.subset_of.endpoint_key }} </span>
@@ -727,7 +728,7 @@ function text(row: Row, key: string) {
       :board-key="boardKey"
       :data="scopedData!"
       :row="selected"
-      :can-write="canWrite && scopeEditable(selected)"
+      :can-write="canEditTable && scopeEditable(selected)"
       :group-key="groupKey"
       :endpoint-key="endpointKey"
       :process-point-id="processPointId"

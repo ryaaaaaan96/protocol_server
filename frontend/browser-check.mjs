@@ -2,4 +2,5 @@
 await import("./native-points-browser-check.mjs");
 await import("./point-overview-browser-check.mjs");
 await import("./upm-browser-check.mjs");
+await import("./derived-collection-browser-check.mjs");
 await import("./app-browser-check.mjs");

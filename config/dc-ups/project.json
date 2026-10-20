@@ -199,6 +199,28 @@
         "name": "整流模块 IDU",
         "model_code": "IDU_RECTIFIER",
         "directory": "IDU_R"
+      },
+      {
+        "code": "UPM_DEMO",
+        "name": "upm-demo",
+        "model_code": "UPM_DEMO",
+        "directory": "upm-demo",
+        "point_storage": "derived",
+        "point_groups": [
+          {
+            "code": "LOCAL",
+            "name": "UPM完整采集",
+            "collect_enabled": true
+          }
+        ],
+        "point_endpoints": [
+          {
+            "code": "UPM_MODBUS",
+            "name": "UPM Modbus采集",
+            "protocol": "MODBUS",
+            "direction": "collect"
+          }
+        ]
       }
     ],
     "root": {
@@ -253,6 +275,12 @@
             "transport": "RS485"
           }
         ]
+      },
+      {
+        "parent": "CSU",
+        "child": "UPM_DEMO",
+        "quantity": 1,
+        "connections": []
       }
     ]
   },
@@ -279,6 +307,11 @@
       },
       "IDU_R": {
         "tables": []
+      },
+      "UPM_DEMO": {
+        "tables": [
+          "collect"
+        ]
       }
     }
   },

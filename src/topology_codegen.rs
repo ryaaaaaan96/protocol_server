@@ -10,6 +10,17 @@ pub fn generate(graph: &Value) -> Result<Value> {
         crate::native_points::generate(graph)
     };
     if !blocked {
+        for (board, data) in graph["derived_collections"]
+            .as_object()
+            .into_iter()
+            .flatten()
+        {
+            let definition = crate::topology::rows(&graph["project_config"], "board_types")
+                .iter()
+                .find(|item| item["code"] == board.as_str())
+                .unwrap_or(&Value::Null);
+            files.insert(format!("board_types/{board}/collect.json"),serde_json::to_string_pretty(&json!({"version":1,"board_key":board,"derived":true,"groups":definition["point_groups"],"endpoints":definition["point_endpoints"],"mapping":data["mapping"],"points":data["rows"]}))?);
+        }
         files.insert(
             "project.json".into(),
             serde_json::to_string_pretty(&graph["project_config"])?,

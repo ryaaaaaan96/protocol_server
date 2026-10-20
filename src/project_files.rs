@@ -395,9 +395,12 @@ fn load_table_directory(project_path: &Path, manifest: &Manifest) -> Result<Valu
             // All nine business/metadata properties are explicit; no global defaults are read.
             ensure!(
                 object.keys().all(|key| REQUIRED.contains(&key.as_str())
-                    || matches!(key.as_str(), "calculation" | "hidden_source_sig_ids"))
+                    || matches!(
+                        key.as_str(),
+                        "calculation" | "hidden_source_sig_ids" | "mapping"
+                    ))
                     && REQUIRED.iter().all(|key| object.contains_key(*key)),
-                "{}: 表格须完整包含 version、enabled、label、description、columns、editor、ordering、inline、fields，可选 calculation、hidden_source_sig_ids，不支持其他属性",
+                "{}: 表格须完整包含 version、enabled、label、description、columns、editor、ordering、inline、fields，可选 calculation、hidden_source_sig_ids、mapping，不支持其他属性",
                 path.display()
             );
             ensure!(
@@ -409,6 +412,27 @@ fn load_table_directory(project_path: &Path, manifest: &Manifest) -> Result<Valu
                 .remove("enabled")
                 .and_then(|value| value.as_bool())
                 .with_context(|| format!("{}: enabled 必须为布尔值", path.display()))?;
+            if let Some(mapping) = object.get_mut("mapping") {
+                let reference = mapping["script_file"]
+                    .as_str()
+                    .context("mapping.script_file 必须为字符串")?;
+                ensure!(
+                    Path::new(reference).extension().and_then(|v| v.to_str()) == Some("js")
+                        && !reference.contains('\\'),
+                    "mapping.script_file 必须为板卡目录内的 .js 文件"
+                );
+                ensure!(
+                    mapping.get("script").is_none(),
+                    "mapping.script 不能内联，请使用 script_file"
+                );
+                let script_path =
+                    project_relative_path(board_path, reference, "script_file", false)?;
+                let mut script = String::new();
+                std::fs::File::open(&script_path)?
+                    .take(32_769)
+                    .read_to_string(&mut script)?;
+                mapping["script"] = json!(script);
+            }
             if let Some(calculation) = object
                 .get_mut("calculation")
                 .filter(|c| c["engine"] != "builtin")
@@ -454,6 +478,8 @@ fn load_table_directory(project_path: &Path, manifest: &Manifest) -> Result<Valu
         }
         result["workspace"]["boards"][code] = json!({"tables":tables,"labels":labels});
     }
+    crate::derived_collection::validate_configuration(&manifest.topology, &result)
+        .map_err(|error| anyhow!(error.1))?;
     point_tables::validate_definition(&result)
         .map_err(|error| anyhow!("{}: {}", project_path.display(), error.1))?;
     Ok(result)
