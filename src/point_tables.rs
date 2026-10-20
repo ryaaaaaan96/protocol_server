@@ -394,16 +394,15 @@ pub async fn read(
     u: User,
     Path((pid, board_key, kind)): Path<(i64, String, String)>,
 ) -> Result<Json<Value>> {
-    entity(&kind)?;
+    if kind != "overview" {
+        entity(&kind)?;
+    }
     let mut tx = db::read_snapshot_context(&s.pool, &u, pid).await?;
     let revision: i32 = sqlx::query_scalar("SELECT revision FROM meta.project_state WHERE id=$1")
         .bind(pid)
         .fetch_one(&mut *tx)
         .await?;
     let board = board(&mut tx, pid, &board_key).await?;
-    let definition = board_definition(&mut tx, pid, &board_key, &kind, &s.project_files).await?;
-    let mut data = table_rows(&mut tx, pid, &board_key, &kind).await?;
-    crate::point_order::sort_rows(&mut data, &definition["ordering"]);
     let options = json!({
         "native_groups": board["point_groups"],
         "endpoints": board["point_endpoints"],
@@ -411,19 +410,36 @@ pub async fn read(
     });
     let graph = crate::permissions::catalog(&mut tx, pid).await?;
     let access = crate::permissions::load(&mut tx, pid).await?;
-    for row in &mut data {
-        row["can_edit"] = json!(crate::permissions::can_edit_row(
-            &access,
-            &graph,
-            entity(&kind)?,
-            row
-        ));
+    let kinds = if kind == "overview" {
+        vec!["process", "forward"]
+    } else {
+        vec![kind.as_str()]
+    };
+    let mut result = json!({"revision":revision});
+    // Both sides of the joined view share a single repeatable-read snapshot.
+    for table_kind in kinds {
+        let definition =
+            board_definition(&mut tx, pid, &board_key, table_kind, &s.project_files).await?;
+        let mut data = table_rows(&mut tx, pid, &board_key, table_kind).await?;
+        crate::point_order::sort_rows(&mut data, &definition["ordering"]);
+        for row in &mut data {
+            row["can_edit"] = json!(crate::permissions::can_edit_row(
+                &access,
+                &graph,
+                entity(table_kind)?,
+                row
+            ));
+        }
+        result[table_kind] = json!({
+            "version":1,"revision":revision,"board_key":board_key,"kind":table_kind,"storage":"native",
+            "definition":definition,"rows":data,"options":options,"permissions":access.value(&graph)
+        });
     }
-    let permissions = access.value(&graph);
-    Ok(Json(
-        json!({"version":1,"revision":revision,"board_key":board_key,"kind":kind,"storage":"native",
-        "definition":definition,"rows":data,"options":options,"permissions":permissions}),
-    ))
+    Ok(Json(if kind == "overview" {
+        result
+    } else {
+        result[&kind].take()
+    }))
 }
 
 pub(crate) async fn table_rows(

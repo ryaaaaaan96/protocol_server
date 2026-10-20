@@ -267,6 +267,19 @@ pub async fn apply(
                 merged[key] = value;
             }
         }
+        if !c.calculation_rule.is_null() {
+            // CHECK constraints are immediate. Stage a valid scalar width and
+            // address while applying the batch, then the frozen whole-table
+            // script replaces both before validation/history/commit.
+            if strv(&merged, "wire_type") != "STRING" {
+                if let Some(width) = size(strv(&merged, "wire_type")) {
+                    updates.insert("wire_length".into(), json!(width));
+                    merged["wire_length"] = json!(width);
+                }
+            }
+            updates.insert("address".into(), json!(0));
+            merged["address"] = json!(0);
+        }
     }
     if c.operation == "create" {
         return insert(tx, pid, board_key, kind, &merged).await;

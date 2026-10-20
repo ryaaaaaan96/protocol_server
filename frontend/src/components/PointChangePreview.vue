@@ -4,7 +4,7 @@ import { api, revisionConflict, type Row } from "../api";
 import { pointChangeSummary, type PointField } from "../domain/pointTables";
 import Modal from "./Modal.vue";
 import PointWarnings from "./PointWarnings.vue";
-const props = defineProps<{pid:number; preview:Row; title:string; canWrite:boolean; checkOnly?:boolean; fields?:Record<string,PointField>}>();
+const props = defineProps<{pid:number; preview:Row; title:string; canWrite:boolean; checkOnly?:boolean; fields?:Record<string,PointField>; fieldsByEntity?:Record<string,Record<string,PointField>>}>();
 const emit = defineEmits<{close:[]; done:[merged:boolean]; error:[message:string]; conflict:[]}>();
 const busy = ref(false), error = ref("");
 async function commit() {
@@ -21,7 +21,7 @@ async function commit() {
   finally { busy.value = false; }
 }
 function changes(change:Row) {
-  return pointChangeSummary(change, props.fields);
+  return pointChangeSummary(change, props.fieldsByEntity?.[change.entity?.replace(/^points\./, "")] || props.fields);
 }
 </script>
 <template>

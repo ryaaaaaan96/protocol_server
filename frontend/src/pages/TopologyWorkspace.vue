@@ -8,6 +8,7 @@ import type { PointKind, PointSchema } from "../domain/pointTables";
 import Loading from "../components/Loading.vue";
 import Empty from "../components/Empty.vue";
 import PointTable from "../components/PointTable.vue";
+import PointOverview from "../components/PointOverview.vue";
 const props = defineProps<{
   pid: number;
   graph: Row | null;
@@ -29,7 +30,7 @@ const board = computed(() => types.value.find(type => type.code === props.boardK
 const enabled = computed(() => board.value?.point_storage === "native");
 const groups = computed<Row[]>(() => enabled.value ? board.value?.point_groups || [] : []);
 const groupKey = ref<string>();
-const sheetKey = ref<PointKind>("process");
+const sheetKey = ref<PointKind | "overview">("process");
 const pointFocus = ref<number>();
 const pointDirty = ref(false);
 const schema = ref<PointSchema | null>(null), error = ref(""), reload = ref(0);
@@ -61,11 +62,14 @@ watch([groups, () => board.value?.code], ([available, code]) => {
 }, { immediate: true });
 const sheets = computed(() => enabled.value && schema.value
   ? configuredBoardSheets(schema.value, props.boardKey) : []);
+const hasOverview = computed(() => props.boardKey === "DSP" &&
+  ["process", "forward"].every(kind => sheets.value.some(sheet => sheet.key === kind)));
 const sheet = computed(() => sheets.value.find(item => item.key === sheetKey.value) || sheets.value[0]);
-watch(sheets, available => {
+watch([sheets, hasOverview], ([available, overview]) => {
+  if (sheetKey.value === "overview" && overview) return;
   if (available.length && !available.some(item => item.key === sheetKey.value)) sheetKey.value = available[0].key;
 }, { immediate: true });
-watch(() => sheet.value?.label || "", label => emit("sheet", label), { immediate: true });
+watch(() => sheetKey.value === "overview" ? "DSP 总体视图" : sheet.value?.label || "", label => emit("sheet", label), { immediate: true });
 const points = computed(() => rows(props.graph || {}, "process_points").filter(point => point.board_key === props.boardKey));
 function count(kind: PointKind) {
   const selected = points.value.filter(point => groupKey.value == null || point.group_key === groupKey.value);
@@ -82,7 +86,7 @@ function leaveTable() {
 function selectGroup(code?: string) {
   if (code !== groupKey.value && leaveTable()) groupKey.value = code;
 }
-function selectSheet(kind: PointKind) {
+function selectSheet(kind: PointKind | "overview") {
   if (kind !== sheetKey.value && leaveTable()) sheetKey.value = kind;
 }
 function openProcess(id: number) {
@@ -137,11 +141,16 @@ function done(merged = false) {
         <button v-if="groups.length > 1" class="button small" :aria-pressed="groupKey == null" @click="selectGroup()">全部分组</button>
       </div>
       <div class="entity-tabs" role="tablist" aria-label="板卡内表格">
+        <button v-if="hasOverview" role="tab" :aria-selected="sheetKey === 'overview'" :class="{ selected: sheetKey === 'overview' }"
+          @click="selectSheet('overview')">总体视图</button>
         <button v-for="item in sheets" :key="item.key" role="tab"
-          :aria-selected="sheet.key === item.key" :class="{ selected: sheet.key === item.key }"
+          :aria-selected="sheetKey === item.key" :class="{ selected: sheetKey === item.key }"
           @click="selectSheet(item.key)">{{ item.label }}<small>{{ count(item.pointKind) }}</small></button>
       </div>
-      <PointTable :key="`${boardKey}:${sheet.key}:${groupKey ?? 'all'}`" :pid="pid" :board-key="boardKey"
+      <PointOverview v-if="sheetKey === 'overview' && hasOverview" :key="`${boardKey}:overview:${groupKey ?? 'all'}`"
+        :pid="pid" :board-key="boardKey" :revision="graph.revision" :can-write="canWrite" :group-key="groupKey"
+        @done="done" @error="emit('error', $event)" @dirty="pointDirty = $event" />
+      <PointTable v-else :key="`${boardKey}:${sheet.key}:${groupKey ?? 'all'}`" :pid="pid" :board-key="boardKey"
         :kind="sheet.pointKind" :label="sheet.label" :revision="graph.revision" :can-write="canWrite"
         :focus-id="pointFocus" :group-key="groupKey" :allow-forward="sheets.some(item => item.key === 'forward')"
         :forward-label="sheets.find(item => item.key === 'forward')?.label"

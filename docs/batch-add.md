@@ -62,6 +62,25 @@ DSP 转发的型号由关联内部点的数据分类固定推导，模板不再�
 
 编辑权接口为 `/api/projects/{pid}/edit-lock/acquire`、`renew`、`release`（POST）。提交校验当前权限、租约、revision 和关联；原子写入点、历史、审计。无关字段变化可合并，同字段/引用冲突返回 409。
 
+## 总体视图批量修改
+
+`GET /api/projects/{pid}/boards/DSP/point-tables/overview` 在同一数据库快照中返回 `process` 和 `forward`，两侧共用 `revision`。总表按内部记录 ID 关联；一对多映射重复显示内部字段，但提交时每条源记录只出现一次。
+
+修改通过 `POST /api/projects/{pid}/boards/DSP/point-tables/overview/batch/preview`，仍使用原有预览确认接口提交：
+
+```json
+{
+  "revision": 3,
+  "operation": "update",
+  "rows": [
+    {"row": 1, "kind": "process", "id": 12, "values": {"name": "母线电压"}, "expected": {"name": "电压"}},
+    {"row": 2, "kind": "forward", "id": 8, "values": {"access": "RW"}, "expected": {"access": "RO"}}
+  ]
+}
+```
+
+此接口仅修改已有记录，最多 200 条；`kind` 必须为 `process` 或 `forward`，`row` 是本次提交中的唯一来源行号。按 `(kind, id)` 去重，`expected` 至少包含本次修改字段的原值，供并发合并判断。先应用内部修改，再应用转发修改，最后整表计算布局并统一检查权限和约束；失败整批回滚，成功共用一个历史批次。添加/删除仍使用各自点表的原有入口。总表本地列设置不会提交到这些接口。
+
 ## 验证
 
 ```bash

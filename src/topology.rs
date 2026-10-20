@@ -424,8 +424,10 @@ async fn apply_change(s: &AppState, tx: &mut PgConnection, pid: i64, c: &Change)
         crate::table_calculation::apply(tx, pid, board, &rule).await?;
         let graph = snapshot(tx, pid, true).await?;
         if c.entity == "point_batch" {
-            let entity = crate::point_tables::entity(strv(&c.values, "kind"))?;
             for row in record["rows"].as_array_mut().into_iter().flatten() {
+                let entity = crate::point_tables::entity(
+                    row["kind"].as_str().unwrap_or(strv(&c.values, "kind")),
+                )?;
                 if let Some(current) = find(&graph, entity, num(&row["record"], "id")) {
                     row["record"] = current.clone();
                 }

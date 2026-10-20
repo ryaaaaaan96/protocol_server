@@ -156,6 +156,68 @@ export async function checkTableCalculation({client, engineer, engineerId, equal
     // Deletion also recomputes the remaining rows with the current script.
     const removed = await proposal("forward",{},b.id,client,"delete");ok(removed.allowed);await commit(removed);
     ok(!(await graph()).transmit_points.some(row=>row.id===b.id));
+    // The overview reads both tables at one revision and commits mixed edits atomically.
+    const overview = () => client.call(`${table}/overview`);
+    let combined = await overview();
+    equal(combined.revision, combined.process.revision);
+    equal(combined.revision, combined.forward.revision);
+    const target = combined.forward.rows.find(row => row.process_point_id === second.id);
+    ok(target);
+    const mixed = (snapshot, internal, wire) => ({
+      revision:snapshot.revision, operation:"update", rows:[
+        // Intentionally reversed: the server must derive mappings after source edits.
+        {row:1,kind:"forward",id:target.id,values:wire,expected:snapshot.forward.rows.find(row=>row.id===target.id).edit_values},
+        {row:2,kind:"process",id:second.id,values:internal,expected:snapshot.process.rows.find(row=>row.id===second.id).edit_values},
+      ],
+    });
+    const mixedPreview = (body,who=client) => who.call(`${table}/overview/batch/preview`,"POST",body);
+    const combinedBefore = JSON.stringify(await graph()), historyBefore = (await history()).length;
+    const both = await mixedPreview(mixed(combined,{sheet_type:"Sys_U32"},{wire_type:"U32"}));
+    ok(both.allowed,JSON.stringify(both.errors));
+    equal(JSON.stringify(await graph()),combinedBefore,"preview must roll back both tables");
+    const result = await commit(both);
+    equal(result.record.rows[0].kind,"forward");
+    equal(result.record.rows[0].record.wire_length,4);
+    equal(result.record.rows[1].record.internal_type,"U32");
+    const mixedEvents = (await history()).slice(historyBefore);
+    ok(mixedEvents.some(row=>row.entity_type==="process"));
+    ok(mixedEvents.some(row=>row.entity_type==="transmit"));
+    equal(new Set(mixedEvents.map(row=>row.batch_id)).size,1);
+    combined = await overview();
+    const invalidBefore = JSON.stringify(await graph()), invalidHistory = JSON.stringify(await history());
+    const bad = await mixedPreview(mixed(combined,{notes:"不能部分保存"},{scale:0}));
+    equal(bad.allowed,false);
+    equal(JSON.stringify(await graph()),invalidBefore);
+    equal(JSON.stringify(await history()),invalidHistory);
+    const readOnly = await mixedPreview(mixed(combined,{notes:"不能写计算字段"},{address:0}));
+    equal(readOnly.allowed,false);
+
+    // Old drafts merge disjoint fields from both tables, but reject same-field edits.
+    const draft = mixed(combined,{notes:"总体视图备注"},{access:"RW"});
+    await edit("process",{unit:"V"},second.id,engineer);
+    const rebased = await mixedPreview(draft);ok(rebased.allowed);equal(rebased.merged,true);
+    await commit(rebased);
+    equal((await graph()).process_points.find(row=>row.id===second.id).unit,"V");
+    combined = await overview();
+    const staleMixed = mixed(combined,{notes:"待提交"},{access:"RO"});
+    const reviewed = await mixedPreview(staleMixed);ok(reviewed.allowed);
+    await edit("process",{notes:"其他成员的内容"},second.id,engineer);
+    const conflictBefore = JSON.stringify(await graph());
+    equal((await client.raw(`${table}/overview/batch/preview`,"POST",staleMixed)).status,409);
+    equal((await client.raw(`${url}/changes/${reviewed.id}/commit`,"POST",{})).status,409);
+    equal(JSON.stringify(await graph()),conflictBefore);
+    combined = await overview();
+    const frozen = await mixedPreview(mixed(combined,{notes:"冻结脚本"},{access:"RO"}));ok(frozen.allowed);
+    const scriptBefore = fs.readFileSync(scriptFile,"utf8");
+    fs.writeFileSync(scriptFile,scriptBefore+"\n// overview preview is frozen too\n");
+    equal((await client.raw(`${url}/changes/${frozen.id}/commit`,"POST",{})).status,409);
+    fs.writeFileSync(scriptFile,scriptBefore);
+    equal(JSON.stringify(await graph()),conflictBefore);
+    await client.call(`${url}/members`,"PUT",{user_id:engineerId,role:"engineer",edit_scope:"scoped",grants:[{board_key:"DSP",scope:"internal"}]});
+    equal((await engineer.raw(`${table}/overview/batch/preview`,"POST",mixed(combined,{notes:"无权限"},{access:"RO"}))).status,403);
+    equal(JSON.stringify(await graph()),conflictBefore);
+    await client.call(`${url}/members`,"PUT",{user_id:engineerId,role:"engineer"});
+    console.log("PASS: joined overview snapshot, mixed updates, single history batch, rollback, permissions and concurrent conflicts");
     console.log("PASS: table scripts, atomic cascades, JSON reload, stale-rule guards, history, permissions, batch results and rollback");
   } finally {
     fs.writeFileSync(filename,original);

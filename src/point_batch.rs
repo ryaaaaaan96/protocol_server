@@ -23,6 +23,8 @@ const MAX_ROWS: usize = 200;
 struct BatchRow {
     row: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     id: Option<i64>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     expected: Value,
@@ -53,7 +55,9 @@ pub async fn preview(
     Path((pid, board_key, kind)): Path<(i64, String, String)>,
     Json(request): Json<BatchRequest>,
 ) -> Result<Json<Value>> {
-    point_tables::entity(&kind)?;
+    if kind != "overview" {
+        point_tables::entity(&kind)?;
+    }
     topology::preview(
         State(s),
         u,
@@ -76,7 +80,13 @@ fn decode(c: &Change) -> Result<Batch> {
         return Err(AppError::bad("点表批量操作只支持新增或修改"));
     }
     let batch: Batch = serde_json::from_value(c.values.clone())?;
-    point_tables::entity(&batch.kind)?;
+    if batch.kind == "overview" {
+        if c.operation != "update" {
+            return Err(AppError::bad("总体视图仅支持修改已有记录"));
+        }
+    } else {
+        point_tables::entity(&batch.kind)?;
+    }
     if batch.board_key.trim().is_empty() || batch.rows.is_empty() || batch.rows.len() > MAX_ROWS {
         return Err(AppError::bad("请选择板卡，每批操作 1～200 行"));
     }
@@ -86,8 +96,9 @@ fn decode(c: &Change) -> Result<Batch> {
     }
     let mut ids = BTreeSet::new();
     for row in &batch.rows {
+        let kind = row_kind(&batch, row)?;
         if c.operation == "update" {
-            if row.id.is_none_or(|id| id <= 0 || !ids.insert(id)) {
+            if row.id.is_none_or(|id| id <= 0 || !ids.insert((kind, id))) {
                 return Err(failure(vec![
                     json!({"row":row.row,"field":"id","message":"修改行必须指定不重复的有效记录 ID"}),
                 ]));
@@ -111,6 +122,21 @@ fn decode(c: &Change) -> Result<Batch> {
     Ok(batch)
 }
 
+fn row_kind<'a>(batch: &'a Batch, row: &'a BatchRow) -> Result<&'a str> {
+    if batch.kind == "overview" {
+        let kind = row
+            .kind
+            .as_deref()
+            .ok_or(AppError::bad("总体视图必须指定每条记录的点表类型"))?;
+        point_tables::entity(kind)?;
+        Ok(kind)
+    } else if row.kind.as_deref().is_some_and(|kind| kind != batch.kind) {
+        Err(AppError::bad("记录类型与当前点表不一致"))
+    } else {
+        Ok(&batch.kind)
+    }
+}
+
 fn failure(errors: Vec<Value>) -> AppError {
     let mut error = AppError::bad("批量点表校验失败，整批未保存");
     error.2 = Some(json!({"errors":errors}));
@@ -118,14 +144,15 @@ fn failure(errors: Vec<Value>) -> AppError {
 }
 
 fn check_fields(batch: &Batch, operation: &str, dsp: bool) -> Result<()> {
-    let allowed = point_tables::writable(&batch.kind);
-    let required: &[&str] = match batch.kind.as_str() {
-        "process" => &["name", "enum_name"],
-        "forward" if dsp => &["process_point_id"],
-        _ => &["process_point_id", "name"],
-    };
     let mut errors = Vec::new();
     for row in &batch.rows {
+        let kind = row_kind(batch, row)?;
+        let allowed = point_tables::writable(kind);
+        let required: &[&str] = match kind {
+            "process" => &["name", "enum_name"],
+            "forward" if dsp => &["process_point_id"],
+            _ => &["process_point_id", "name"],
+        };
         let mut add = |key: &str, message: &str| {
             errors.push(json!({"row":row.row,"field":key,"message":message}))
         };
@@ -196,7 +223,12 @@ pub async fn apply(tx: &mut PgConnection, pid: i64, c: &Change) -> Result<Value>
     check_fields(&batch, &c.operation, crate::dsp_sheet::is_dsp(&board))?;
     let mut records = Vec::new();
     let mut errors = Vec::new();
-    for row in batch.rows {
+    // Apply internal edits before mappings so conversion/model derivation uses
+    // the final source values. Layout calculation happens once in topology.
+    let mut ordered: Vec<_> = batch.rows.iter().collect();
+    ordered.sort_by_key(|row| row_kind(&batch, row).ok() != Some("process"));
+    for row in ordered {
+        let kind = row_kind(&batch, row)?;
         // Keep successful rows in the outer transaction to detect within-batch duplicates.
         // A failed row is fully rolled back before collecting its errors.
         let mut proposed = tx.begin().await?;
@@ -204,12 +236,12 @@ pub async fn apply(tx: &mut PgConnection, pid: i64, c: &Change) -> Result<Value>
             &mut proposed,
             pid,
             &Change {
-                calculation_rule: Value::Null,
+                calculation_rule: c.calculation_rule.clone(),
                 revision: c.revision,
-                entity: point_tables::entity(&batch.kind)?.into(),
+                entity: point_tables::entity(kind)?.into(),
                 operation: c.operation.clone(),
                 id: row.id,
-                expected: row.expected,
+                expected: row.expected.clone(),
                 values: json!({"board_key":batch.board_key,"fields":row.values}),
             },
         )
@@ -217,7 +249,7 @@ pub async fn apply(tx: &mut PgConnection, pid: i64, c: &Change) -> Result<Value>
         match result {
             Ok(record) => {
                 proposed.commit().await?;
-                records.push(json!({"row":row.row,"record":record}));
+                records.push(json!({"row":row.row,"kind":kind,"record":record}));
             }
             Err(error) => {
                 proposed.rollback().await?;
@@ -238,6 +270,12 @@ pub async fn apply(tx: &mut PgConnection, pid: i64, c: &Change) -> Result<Value>
     if !errors.is_empty() {
         return Err(failure(errors));
     }
+    records.sort_by_key(|row| {
+        batch
+            .rows
+            .iter()
+            .position(|source| Some(u64::from(source.row)) == row["row"].as_u64())
+    });
     Ok(json!({"board_key":batch.board_key,"kind":batch.kind,"count":records.len(),"rows":records}))
 }
 
@@ -250,23 +288,36 @@ pub async fn can_preview(
     c: &Change,
 ) -> Result<bool> {
     let batch = decode(c)?;
-    let definition =
-        point_tables::board_definition(tx, pid, &batch.board_key, &batch.kind, &s.project_files)
-            .await?;
-    let current = point_tables::table_rows(tx, pid, &batch.board_key, &batch.kind).await?;
-    Ok(batch.rows.iter().all(|change| {
-        current
+    for kind in ["process", "forward"] {
+        let changes: Vec<_> = batch
+            .rows
             .iter()
-            .find(|row| row["id"].as_i64() == change.id)
-            .is_some_and(|row| {
-                change.values.keys().all(|key| {
-                    let value = row["edit_values"]
-                        .get(key)
-                        .unwrap_or(&definition["fields"][key]["default"]);
-                    change.expected.get(key).is_some_and(|old| old == value)
+            .filter(|row| row_kind(&batch, row).ok() == Some(kind))
+            .collect();
+        if changes.is_empty() {
+            continue;
+        }
+        let definition =
+            point_tables::board_definition(tx, pid, &batch.board_key, kind, &s.project_files)
+                .await?;
+        let current = point_tables::table_rows(tx, pid, &batch.board_key, kind).await?;
+        if !changes.iter().all(|change| {
+            current
+                .iter()
+                .find(|row| row["id"].as_i64() == change.id)
+                .is_some_and(|row| {
+                    change.values.keys().all(|key| {
+                        let value = row["edit_values"]
+                            .get(key)
+                            .unwrap_or(&definition["fields"][key]["default"]);
+                        change.expected.get(key).is_some_and(|old| old == value)
+                    })
                 })
-            })
-    }))
+        }) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 pub fn audit_before(graph: &Value, c: &Change) -> Option<Value> {
@@ -274,12 +325,13 @@ pub fn audit_before(graph: &Value, c: &Change) -> Option<Value> {
         return None;
     }
     let batch = decode(c).ok()?;
-    let entity = point_tables::entity(&batch.kind).ok()?;
     let rows: Vec<_> = batch
         .rows
         .iter()
         .map(|row| {
-            json!({"row":row.row,"record":point_tables::audit_before(graph,entity,row.id.unwrap(),&batch.board_key)})
+            let kind = row_kind(&batch, row).unwrap();
+            let entity = point_tables::entity(kind).unwrap();
+            json!({"row":row.row,"kind":kind,"record":point_tables::audit_before(graph,entity,row.id.unwrap(),&batch.board_key)})
         })
         .collect();
     Some(json!({"board_key":batch.board_key,"kind":batch.kind,"count":rows.len(),"rows":rows}))
@@ -291,8 +343,8 @@ pub fn annotate(errors: &mut [Value], applied: &Value) {
         let row = topology::rows(applied, "rows").iter().find(|r| {
             let id = &r["record"]["id"];
             let matches = match error["entity"].as_str() {
-                Some("process_points") => applied["kind"] == "process",
-                Some("transmit_points") => applied["kind"] != "process",
+                Some("process_points") => r.get("kind").unwrap_or(&applied["kind"]) == "process",
+                Some("transmit_points") => r.get("kind").unwrap_or(&applied["kind"]) == "forward",
                 _ => false,
             };
             matches && (error["id"] == *id || error["related_id"] == *id)
@@ -332,6 +384,47 @@ pub fn guard(base: &Value, current: &Value, c: &Change, revision: i32) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn overview_deduplicates_by_table_and_rejects_ambiguous_updates() {
+        let mut change = Change {
+            revision: 1,
+            entity: "point_batch".into(),
+            operation: "update".into(),
+            id: None,
+            expected: Value::Null,
+            calculation_rule: Value::Null,
+            values: json!({"board_key":"DSP","kind":"overview","rows":[
+                {"row":1,"kind":"process","id":1,"values":{"name":"内部"}},
+                {"row":2,"kind":"forward","id":1,"values":{"scale":1}}
+            ]}),
+        };
+        assert!(decode(&change).is_ok());
+        change.values["rows"][1]["kind"] = json!("process");
+        assert!(decode(&change).is_err());
+        change.values["rows"][1]["kind"] = json!("collect");
+        assert!(decode(&change).is_err());
+        change.values["rows"][1]
+            .as_object_mut()
+            .unwrap()
+            .remove("kind");
+        assert!(decode(&change).is_err());
+        change.operation = "create".into();
+        assert!(decode(&change).is_err());
+    }
+    #[test]
+    fn overview_errors_use_record_type_even_when_ids_overlap() {
+        let applied = json!({"kind":"overview","rows":[
+            {"row":1,"kind":"process","record":{"id":7}},
+            {"row":2,"kind":"forward","record":{"id":7}}
+        ]});
+        let mut errors = vec![
+            json!({"entity":"process_points","id":7}),
+            json!({"entity":"transmit_points","id":7}),
+        ];
+        annotate(&mut errors, &applied);
+        assert_eq!(errors[0]["row"], 1);
+        assert_eq!(errors[1]["row"], 2);
+    }
     fn batch(kind: &str, values: Value) -> Batch {
         serde_json::from_value(
             json!({"board_key":"DSP","kind":kind,"rows":[{"row":1,"values":values}]}),
