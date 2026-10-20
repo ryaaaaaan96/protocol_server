@@ -78,6 +78,10 @@ try {
     return route.fulfill({json:{id:1,allowed:true,errors:[],impact:{count:1,changes:[]}}});
   });
   await page.goto("/__upm_test");
+  const tabCount=(label)=>page.getByRole("tab",{name:label}).locator("small");
+  await expect(tabCount(/处理点表/)).toHaveText("1");
+  await expect(tabCount(/转发点表 · MODBUS/)).toHaveText("1");
+  await expect(tabCount(/转发点表 · UPP/)).toHaveText("1");
   await expect(page.getByRole("tab",{name:/处理点表/})).toHaveAttribute("aria-selected","true");
   await expect(page.getByRole("tab",{name:/采集点表/})).toHaveCount(0);
   await expect(page.locator("tbody tr")).toHaveCount(1);
@@ -136,6 +140,10 @@ try {
   await expect(page.locator('[data-column-key="device_addresses"]')).toHaveCount(0);
   await expect(page.getByRole("columnheader",{name:/Modbus 寄存器区/})).toHaveCount(0);
   await page.getByRole("button",{name:"DSP · DSP 设备共享模板",exact:true}).click();
+  await expect(tabCount(/处理点表/)).toHaveText("2");
+  await expect(tabCount(/采集点表/)).toHaveText("1");
+  await expect(tabCount(/转发点表 · MODBUS/)).toHaveText("8");
+  await expect(tabCount(/转发点表 · UPP/)).toHaveText("0");
   await page.getByRole("tab",{name:"总体视图",exact:true}).click();
   await expect(overviewRows()).toHaveCount(2);
   await expect(overviewCell("process:name",1)).toHaveText("未转发测点");
@@ -159,6 +167,7 @@ try {
   await page.getByRole("button",{name:"继续编辑",exact:true}).click();
   await page.getByRole("tab",{name:/转发点表 · MODBUS/}).click();
   await expect(page.locator("tbody tr")).toHaveCount(8);
+  await expect(page.locator(".pagination-summary")).toContainText("共 8 条");
   await expect(page.locator('tbody [data-column-key="instance_device"]')).toHaveText(["DSP1","DSP2","DSP3","DSP4","DSP5","DSP6","DSP7","DSP8"]);
   await expect(page.locator('tbody [data-column-key="address"]')).toHaveText(["50000","51000","52000","53000","54000","55000","56000","57000"]);
   await expect(page.locator('[data-column-key="device_addresses"]')).toHaveCount(0);
@@ -169,6 +178,8 @@ try {
   assert.equal(requests.length,beforeReadOnly);
   await page.getByRole("textbox",{name:"搜索当前表格",exact:true}).fill("DSP8");
   await expect(page.locator("tbody tr")).toHaveCount(1);
+  await expect(tabCount(/转发点表 · MODBUS/)).toHaveText("8");
+  await expect(page.locator(".pagination-summary")).toContainText("共 1 条");
   await expect(page.locator('tbody [data-column-key="address"]')).toHaveText("57000");
   await page.getByRole("textbox",{name:"搜索当前表格",exact:true}).fill("");
   await expect(page.locator("tbody tr")).toHaveCount(8);
@@ -190,6 +201,13 @@ try {
   await page.getByRole("button",{name:"放弃修改",exact:true}).click();
   await page.getByRole("button",{name:"按设备展开",exact:true}).click();
   await expect(page.locator("tbody tr")).toHaveCount(8);
+  await page.getByRole("button",{name:"全部分组",exact:true}).click();
+  await expect(tabCount(/处理点表/)).toHaveText("3");
+  await expect(tabCount(/采集点表/)).toHaveText("1");
+  await expect(tabCount(/转发点表 · MODBUS/)).toHaveText("9");
+  await expect(tabCount(/转发点表 · UPP/)).toHaveText("1");
+  await expect(page.locator("tbody tr")).toHaveCount(9);
+  await expect(page.locator(".pagination-summary")).toContainText("共 9 条");
   // The generic view never mutates storage IDs, associations or source data.
   const expansionChecks=await page.evaluate(async source=>{
     const {expandedPointTable}=await import('/src/domain/pointExpansion.ts');

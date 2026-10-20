@@ -79,8 +79,13 @@ function count(kind: PointKind, endpointKey?: string) {
     const definition = schema.value?.boards[props.boardKey]?.process;
     return selected.filter(point => !definition || !hiddenProcessPoint(definition, point)).length;
   }
-  const ids = new Set(selected.map(point => point.id));
-  return rows(props.graph || {}, kind === "collect" ? "collect_points" : "transmit_points").filter(point => point.board_key === props.boardKey && ids.has(point.process_point_id) && (!endpointKey || point.endpoint_key === endpointKey)).length;
+  const sources = new Map(selected.map(point => [point.id, point]));
+  const expand = !!schema.value?.boards[props.boardKey]?.[kind]?.presentation?.row_expansion;
+  const deviceCounts = new Map(groups.value.map(group => [group.code, group.devices?.length || 1]));
+  return rows(props.graph || {}, kind === "collect" ? "collect_points" : "transmit_points")
+    .filter(point => point.board_key === props.boardKey && sources.has(point.process_point_id) && (!endpointKey || point.endpoint_key === endpointKey))
+    // Match the configured device expansion; groups without devices use one default instance.
+    .reduce((total, point) => total + (expand ? deviceCounts.get(sources.get(point.process_point_id)?.group_key) || 1 : 1), 0);
 }
 function leaveTable() {
   if (pointDirty.value && !window.confirm("有未保存的点表修改，是否放弃？")) return false;
