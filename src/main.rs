@@ -51,10 +51,35 @@ use axum::{
 };
 use sqlx::postgres::PgPoolOptions;
 use tower_http::{
+    compression::CompressionLayer,
     services::{ServeDir, ServeFile},
     set_header::SetResponseHeaderLayer,
     trace::TraceLayer,
 };
+
+// Vite filenames contain content hashes. Keep HTML fresh so deployments load new hashes.
+fn static_files(directory: &str) -> Router {
+    let assets = Router::new()
+        .fallback_service(ServeDir::new(format!("{directory}/assets")))
+        .layer(middleware::from_fn(cache_asset));
+    Router::new()
+        .nest_service("/assets", assets)
+        .fallback_service(
+            ServeDir::new(directory)
+                .not_found_service(ServeFile::new(format!("{directory}/index.html"))),
+        )
+}
+
+async fn cache_asset(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    if response.status().is_success() || response.status() == StatusCode::NOT_MODIFIED {
+        response.headers_mut().insert(
+            axum::http::header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=31536000, immutable"),
+        );
+    }
+    response
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -267,10 +292,11 @@ async fn main() -> anyhow::Result<()> {
         .layer(middleware::from_fn(csrf));
     let static_dir = std::env::var("STATIC_DIR").unwrap_or("frontend/dist".into());
     let app=Router::new().nest("/api",api)
-      .fallback_service(ServeDir::new(&static_dir).not_found_service(ServeFile::new(format!("{static_dir}/index.html"))))
+      .fallback_service(static_files(&static_dir))
       .layer(SetResponseHeaderLayer::if_not_present(axum::http::header::X_CONTENT_TYPE_OPTIONS,HeaderValue::from_static("nosniff")))
       .layer(SetResponseHeaderLayer::if_not_present(axum::http::header::CONTENT_SECURITY_POLICY,HeaderValue::from_static("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")))
       .layer(SetResponseHeaderLayer::if_not_present(axum::http::header::CACHE_CONTROL,HeaderValue::from_static("no-store")))
+      .layer(CompressionLayer::new())
       .layer(TraceLayer::new_for_http()).with_state(state);
     let bind = std::env::var("BIND_ADDR").unwrap_or("127.0.0.1:8080".into());
     let listener = tokio::net::TcpListener::bind(&bind).await?;
@@ -281,4 +307,70 @@ async fn main() -> anyhow::Result<()> {
         })
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod delivery_tests {
+    use super::*;
+    use axum::body::{Body, to_bytes};
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn static_assets_cache_and_compress_without_caching_html_or_errors() {
+        let directory =
+            std::env::temp_dir().join(format!("protocol-delivery-{}", std::process::id()));
+        std::fs::create_dir_all(directory.join("assets")).unwrap();
+        std::fs::write(directory.join("index.html"), "<html>fresh entry</html>").unwrap();
+        let source = "const example = 'compressible content';\n".repeat(500);
+        std::fs::write(directory.join("assets/app-hash.js"), &source).unwrap();
+        let app = static_files(directory.to_str().unwrap())
+            .route("/api/test", get(|| async { "private project data" }))
+            .layer(SetResponseHeaderLayer::if_not_present(
+                axum::http::header::CACHE_CONTROL,
+                HeaderValue::from_static("no-store"),
+            ))
+            .layer(CompressionLayer::new());
+        for path in ["/", "/workspace", "/api/test", "/assets/missing.js"] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.headers()["cache-control"], "no-store");
+            if path.ends_with("missing.js") {
+                assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            }
+        }
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/app-hash.js")
+                    .header("accept-encoding", "gzip")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["cache-control"],
+            "public, max-age=31536000, immutable"
+        );
+        assert_eq!(response.headers()["content-encoding"], "gzip");
+        assert!(
+            response.headers()["vary"]
+                .to_str()
+                .unwrap()
+                .to_lowercase()
+                .contains("accept-encoding")
+        );
+        assert!(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .len()
+                < source.len() / 2
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 }

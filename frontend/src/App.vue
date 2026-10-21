@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onBeforeUnmount, provide } from "vue";
+import { ref, computed, watch, onMounted, onBeforeUnmount, provide, defineAsyncComponent } from "vue";
 import Toast from "./components/Toast.vue";
 import {
   Network,
@@ -33,21 +33,22 @@ import { boardTypes } from "./domain/project";
 import Badge from "./components/Badge.vue";
 import Empty from "./components/Empty.vue";
 import Login from "./pages/Login.vue";
-import TopologyWorkspace from "./pages/TopologyWorkspace.vue";
-import ProjectTopology from "./pages/ProjectTopology.vue";
-import ProjectConfig from "./components/ProjectConfig.vue";
-import SqlWorkspace from "./pages/SqlWorkspace.vue";
-import Validation from "./pages/Validation.vue";
-import Releases from "./pages/Releases.vue";
-import Members from "./pages/Members.vue";
-import Audit from "./pages/Audit.vue";
-import UsersPanel from "./pages/UsersPanel.vue";
-import ImportModal from "./components/ImportModal.vue";
-import ProjectFolderImport from "./components/ProjectFolderImport.vue";
-import CreateUser from "./components/CreateUser.vue";
+import Loading from "./components/Loading.vue";
 import { useProjectEditLock } from "./composables/useProjectEditLock";
 import { permissionKey, useProjectPermissions } from "./composables/useProjectPermissions";
 import { allowsBoard } from "./domain/permissions";
+const TopologyWorkspace = defineAsyncComponent({ loader: () => import("./pages/TopologyWorkspace.vue"), loadingComponent: Loading });
+const ProjectTopology = defineAsyncComponent({ loader: () => import("./pages/ProjectTopology.vue"), loadingComponent: Loading });
+const ProjectConfig = defineAsyncComponent({ loader: () => import("./components/ProjectConfig.vue"), loadingComponent: Loading });
+const SqlWorkspace = defineAsyncComponent({ loader: () => import("./pages/SqlWorkspace.vue"), loadingComponent: Loading });
+const Validation = defineAsyncComponent({ loader: () => import("./pages/Validation.vue"), loadingComponent: Loading });
+const Releases = defineAsyncComponent({ loader: () => import("./pages/Releases.vue"), loadingComponent: Loading });
+const Members = defineAsyncComponent({ loader: () => import("./pages/Members.vue"), loadingComponent: Loading });
+const Audit = defineAsyncComponent({ loader: () => import("./pages/Audit.vue"), loadingComponent: Loading });
+const UsersPanel = defineAsyncComponent({ loader: () => import("./pages/UsersPanel.vue"), loadingComponent: Loading });
+const ImportModal = defineAsyncComponent({ loader: () => import("./components/ImportModal.vue"), loadingComponent: Loading });
+const ProjectFolderImport = defineAsyncComponent({ loader: () => import("./components/ProjectFolderImport.vue"), loadingComponent: Loading });
+const CreateUser = defineAsyncComponent({ loader: () => import("./components/CreateUser.vue"), loadingComponent: Loading });
 const nav = [
   { id: "overview", label: "项目拓扑", icon: LayoutDashboard },
   { id: "board", label: "板卡内部信息", icon: Box },
@@ -74,7 +75,6 @@ const user = ref<Row | null>(null),
   projects = ref<Row[]>([]),
   pid = ref(Number(localStorage.getItem("protocol-project")) || 0),
   tab = ref("overview"),
-  overview = ref<Row | null>(null),
   graph = ref<Row | null>(null),
   boardKey = ref(""),
   sheetLabel = ref("内部信号表"),
@@ -88,7 +88,7 @@ const permissions = useProjectPermissions({ pid, user, tick });
 provide(permissionKey, permissions);
 const project = computed(() => projects.value.find((p) => p.id === pid.value)),
   canEditProject = computed(() => !!project.value && project.value.role !== "viewer" && permissions.eligible.value),
-  report = computed(() => overview.value?.validation),
+  report = computed(() => graph.value?.validation),
   types = computed(() => boardTypes(graph.value)),
   selectedBoard = computed(() =>
     types.value.find((b: Row) => b.code === boardKey.value),
@@ -221,17 +221,12 @@ watch([pid, tick, user], ([id, _, currentUser], __, onCleanup) => {
   let cancelled = false;
   onCleanup(() => (cancelled = true));
   localStorage.setItem("protocol-project", String(id));
-  overview.value = null;
   graph.value = null;
   overviewError.value = "";
   if (!id || !currentUser) return;
-  Promise.all([
-    api(`/projects/${id}/overview`),
-    api(`/projects/${id}/topology`),
-  ])
-    .then(([data, topology]) => {
+  api(`/projects/${id}/topology`)
+    .then((topology) => {
       if (cancelled) return;
-      overview.value = data;
       graph.value = topology;
       if (!boardTypes(topology).some((t) => t.code === boardKey.value))
         boardKey.value =
@@ -452,7 +447,7 @@ function userCreated() {
         <div class="topbar-right">
           <span class="top-label"><span class="status-dot" />版本受控</span
           ><Badge v-if="project"
-            >REV {{ overview?.project?.revision || project.revision }}</Badge
+            >REV {{ graph?.revision ?? project.revision }}</Badge
           ><button class="icon-btn" aria-label="刷新数据" @click="refresh">
             <RefreshCw :size="17" />
           </button>
