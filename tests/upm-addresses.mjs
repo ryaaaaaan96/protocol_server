@@ -21,6 +21,17 @@ export async function checkUpmAddresses({client,engineer,engineerId,equal,ok,fix
   const forward=await edit("forward",{process_point_id:a.id,endpoint_key:"MODBUS_SERVICE",address:0,wire_type:"U16",wire_length:2,register_type:"HOLDING",scale:1,access:"RO"});
   await edit("forward",{process_point_id:b.id,endpoint_key:"MODBUS_SERVICE",address:20,wire_type:"U16",wire_length:2,register_type:"HOLDING",scale:1,access:"RO"});
   const initial=await graph();
+  const workspace=await client.call(`${url}/topology?workspace=true`);
+  equal(workspace.revision,initial.revision);
+  equal(JSON.stringify(workspace.project_config),JSON.stringify(initial.project_config));
+  equal(workspace.derived_counts.UPM_DEMO,16);
+  equal(workspace.validation,undefined);
+  equal(workspace.table_definitions,undefined);
+  equal((await engineer.raw(`${url}/topology?workspace=true`)).status,403);
+  for(const entity of ["process_points","collect_points","transmit_points"]) {
+    equal(JSON.stringify(workspace[entity].map(row=>row.id)),JSON.stringify(initial[entity].map(row=>row.id)));
+    ok(workspace[entity].every(row=>row.address===undefined&&row.name===undefined&&row.metadata===undefined));
+  }
   const originalCollection=initial.collect_points.find(row=>row.id===collection.id);
   const collect=await client.call(`${table}/collect`);
   equal(collect.rows[0].base_address,0);equal(collect.rows[0].edit_values.base_address,0);

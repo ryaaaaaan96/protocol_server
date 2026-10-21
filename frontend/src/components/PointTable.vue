@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch, nextTick, onBeforeUnmount } from "vue";
+import { computed, ref, shallowRef, shallowReactive, watch, nextTick, onBeforeUnmount } from "vue";
 import { api, revisionConflict, type Row } from "../api";
 import {
   choiceLabel,
@@ -50,11 +50,11 @@ const emit = defineEmits<{
   error: [message: string];
   dirty: [value: boolean];
 }>();
-const data = ref<PointTableData | null>(null),
+const data = shallowRef<PointTableData | null>(null),
   error = ref(""),
   query = ref(""),
   page = ref(1);
-const templateData = ref<PointTableData | null>(null);
+const templateData = shallowRef<PointTableData | null>(null);
 const expanded = ref(false);
 const expandable = computed(() => !!templateData.value?.definition.presentation?.row_expansion);
 function changeExpansion(value: boolean) {
@@ -62,7 +62,7 @@ function changeExpansion(value: boolean) {
   try {
     const next = value ? expandedPointTable(templateData.value) : templateData.value;
     expanded.value = value;
-    data.value = next;
+    data.value = shallowReactive(next);
     page.value = 1;
   } catch (e) {
     actionError.value = (e as Error).message;
@@ -116,9 +116,9 @@ watch(
           const protocol = result.options.endpoints.find((endpoint: Row) => endpoint.code === props.endpointKey)?.protocol;
           result.definition = definitionForProtocol(result.definition, protocol);
         }
-        templateData.value = result;
+        templateData.value = shallowReactive(result);
         expanded.value = !!result.definition.presentation?.row_expansion;
-        data.value = expanded.value ? expandedPointTable(result) : result;
+        data.value = shallowReactive(expanded.value ? expandedPointTable(result) : result);
       }
     } catch (e) {
       if (!cancelled) error.value = (e as Error).message;

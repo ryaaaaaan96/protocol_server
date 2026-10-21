@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onBeforeUnmount, provide, defineAsyncComponent } from "vue";
+import { ref, shallowRef, computed, watch, onMounted, onBeforeUnmount, provide, defineAsyncComponent } from "vue";
 import Toast from "./components/Toast.vue";
 import {
   Network,
@@ -75,7 +75,7 @@ const user = ref<Row | null>(null),
   projects = ref<Row[]>([]),
   pid = ref(Number(localStorage.getItem("protocol-project")) || 0),
   tab = ref("overview"),
-  graph = ref<Row | null>(null),
+  graph = shallowRef<Row | null>(null),
   boardKey = ref(""),
   sheetLabel = ref("内部信号表"),
   overviewError = ref(""),
@@ -88,7 +88,7 @@ const permissions = useProjectPermissions({ pid, user, tick });
 provide(permissionKey, permissions);
 const project = computed(() => projects.value.find((p) => p.id === pid.value)),
   canEditProject = computed(() => !!project.value && project.value.role !== "viewer" && permissions.eligible.value),
-  report = computed(() => graph.value?.validation),
+  report = shallowRef<Row>(),
   types = computed(() => boardTypes(graph.value)),
   selectedBoard = computed(() =>
     types.value.find((b: Row) => b.code === boardKey.value),
@@ -224,7 +224,7 @@ watch([pid, tick, user], ([id, _, currentUser], __, onCleanup) => {
   graph.value = null;
   overviewError.value = "";
   if (!id || !currentUser) return;
-  api(`/projects/${id}/topology`)
+  api(`/projects/${id}/topology?workspace=true`)
     .then((topology) => {
       if (cancelled) return;
       graph.value = topology;
@@ -246,6 +246,21 @@ watch([pid, tick, user], ([id, _, currentUser], __, onCleanup) => {
       }
     });
 });
+const validationError = ref("");
+const validationReload = ref(0);
+watch([pid, tick, user], () => { report.value = undefined; validationError.value = ""; });
+watch([pid, tick, user, tab, validationReload], async ([id, , currentUser, currentTab], _, cleanup) => {
+  let cancelled = false;
+  cleanup(() => { cancelled = true; });
+  if (!id || !currentUser || currentTab !== "validation" || report.value) return;
+  validationError.value = "";
+  try {
+    const result = await api(`/projects/${id}/validation`);
+    if (!cancelled) report.value = result;
+  } catch (cause) {
+    if (!cancelled) { validationError.value = (cause as Error).message; fail(validationError.value); }
+  }
+}, { immediate: true });
 function openIssue(issue: Row) {
   if (!graph.value) return;
   if (issue.entity === "project_config") {
@@ -368,7 +383,7 @@ function userCreated() {
           >
             <component :is="item.icon" :size="18" /><span>{{ item.label }}</span
             ><span
-              v-if="item.id === 'validation' && report?.errors > 0"
+              v-if="item.id === 'validation' && report && report.errors > 0"
               class="nav-count"
               >{{ report.errors }}</span
             >
@@ -554,6 +569,9 @@ function userCreated() {
             :pid="pid"
             @error="fail"
           />
+          <div v-else-if="tab === 'validation' && validationError" class="notice danger" role="alert">
+            {{ validationError }} <button class="text-button" @click="validationReload++">重试</button>
+          </div>
           <Validation
             v-else-if="tab === 'validation'"
             :report="report"

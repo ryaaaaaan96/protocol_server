@@ -6,7 +6,7 @@ use crate::{
 };
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -45,8 +45,39 @@ pub async fn snapshot(tx: &mut PgConnection, pid: i64, _computed: bool) -> Resul
     graph["table_definitions"] = crate::table_runtime::definitions(tx, pid).await?;
     Ok(graph)
 }
-pub async fn read(State(s): State<AppState>, u: User, Path(pid): Path<i64>) -> Result<Json<Value>> {
+#[derive(Default, Deserialize)]
+pub struct ReadQuery {
+    #[serde(default)]
+    workspace: bool,
+}
+
+// Navigation and tab counts do not need point values, scripts or full validation.
+async fn workspace(tx: &mut PgConnection, pid: i64) -> Result<Value> {
+    let mut graph: Value = sqlx::query_scalar("SELECT jsonb_build_object('project_config',topology_config,'revision',revision,'schema_version',schema_version) FROM meta.project_state WHERE id=$1")
+        .bind(pid).fetch_one(&mut *tx).await?;
+    graph["process_points"] = json!(db::all_json(tx,
+        "SELECT jsonb_build_object('id',id,'board_key',board_key,'group_key',group_key,'sig_id',sig_id,'source_sig_id',metadata->'source_sig_id') FROM points.process_points WHERE project_id=$1 ORDER BY id",pid).await?);
+    for table in ["collect_points", "transmit_points"] {
+        graph[table] = json!(db::all_json(tx,&format!(
+            "SELECT jsonb_build_object('id',id,'board_key',board_key,'process_point_id',process_point_id,'endpoint_key',endpoint_key) FROM points.{table} WHERE project_id=$1 ORDER BY id"),pid).await?);
+    }
+    Ok(graph)
+}
+
+pub async fn read(
+    State(s): State<AppState>,
+    u: User,
+    Path(pid): Path<i64>,
+    Query(query): Query<ReadQuery>,
+) -> Result<Json<Value>> {
     let mut tx = db::read_snapshot_context(&s.pool, &u, pid).await?;
+    if query.workspace {
+        let mut graph = workspace(&mut tx, pid).await?;
+        let definitions = crate::table_runtime::bind(&mut tx, pid, &s.project_files).await?;
+        graph["derived_counts"] = crate::derived_collection::counts(&graph, &definitions)?;
+        graph["permissions"] = crate::permissions::load(&mut tx, pid).await?.value(&graph);
+        return Ok(Json(graph));
+    }
     crate::table_runtime::bind(&mut tx, pid, &s.project_files).await?;
     let mut graph = snapshot(&mut tx, pid, true).await?;
     crate::derived_collection::attach(&mut tx, pid, &s.project_files, &mut graph).await?;

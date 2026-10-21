@@ -10,7 +10,7 @@ const definition=JSON.parse(await readFile(new URL("../config/dc-ups/upm-demo/co
 const records=[{id:1,board_key:"UPM_DEMO",group_key:"LOCAL",endpoint_key:"UPM_MODBUS",signal_name:"本地电压",source_device_code:"LOCAL",address:31000,dev_id:1,wire_type:"U16",wire_length:2,register_count:1,register_type:"INPUT",poll_interval:1000,can_edit:false,edit_values:{}},
 {id:2,board_key:"UPM_DEMO",group_key:"LOCAL",endpoint_key:"UPM_MODBUS",signal_name:"DSP电压",source_device_code:"DSP8",address:57006,dev_id:1,wire_type:"U32",wire_length:4,register_count:2,register_type:"HOLDING",poll_interval:1000,can_edit:false,edit_values:{}}];
 const data={revision:1,board_key:"UPM_DEMO",kind:"collect",derived:true,storage:"derived",definition,rows:records,options:{native_groups:board.point_groups,endpoints:board.point_endpoints,process_points:[]}};
-const graph={revision:1,project_config:manifest.topology,process_points:[],collect_points:[],transmit_points:[],derived_collections:{UPM_DEMO:{rows:records}}};
+const graph={revision:1,project_config:manifest.topology,process_points:[],collect_points:[],transmit_points:[],derived_counts:{UPM_DEMO:records.length}};
 const server=await createServer({root,logLevel:"error",server:{host:"127.0.0.1",port:0}});
 let browser;const errors=[];
 try {

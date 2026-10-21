@@ -194,6 +194,39 @@ pub fn evaluate(graph: &Value, key: &str, mapping: &Value) -> Result<Vec<Value>>
     Ok(output)
 }
 
+/// The mapping contract returns every source/device pair exactly once. Counting
+/// these pairs needs no address calculations, script execution or stored copies.
+pub fn counts(graph: &Value, definitions: &Value) -> Result<Value> {
+    let config = &graph["project_config"];
+    let points: BTreeMap<_, _> = rows(graph, "process_points")
+        .iter()
+        .map(|p| (num(p, "id"), p))
+        .collect();
+    let mut counts = json!({});
+    for target in rows(config, "board_types")
+        .iter()
+        .filter(|b| b["point_storage"] == "derived")
+    {
+        let key = strv(target, "code");
+        let rule = parse(&definitions[key]["collect"]["mapping"])?;
+        check_source(config, target, &rule)?;
+        let source = board(config, &rule.source.board_key).unwrap();
+        let mut count = 0usize;
+        for mapping in rows(graph, "transmit_points").iter().filter(|row| {
+            row["board_key"] == rule.source.board_key
+                && row["endpoint_key"] == rule.source.endpoint_key
+        }) {
+            let point = points
+                .get(&num(mapping, "process_point_id"))
+                .filter(|point| point["board_key"] == rule.source.board_key)
+                .ok_or(fail("源转发内部点不存在"))?;
+            count += crate::point_instances::devices(source, &point["group_key"]).len();
+        }
+        counts[key] = json!(count);
+    }
+    Ok(counts)
+}
+
 pub async fn attach(
     tx: &mut PgConnection,
     pid: i64,
@@ -291,6 +324,24 @@ mod tests {
             assert_eq!(row["scale"], 0.1);
         }
         assert_eq!(graph, before);
+    }
+
+    #[test]
+    fn workspace_counts_match_expansion_without_executing_scripts() {
+        let (graph, _) = fixture();
+        let mut definitions = graph["table_definitions"].clone();
+        assert_eq!(counts(&graph, &definitions).unwrap()["UPM_DEMO"], json!(9));
+        definitions["UPM_DEMO"]["collect"]["mapping"]["script"] =
+            json!("throw new Error('must not run during navigation');");
+        assert_eq!(counts(&graph, &definitions).unwrap()["UPM_DEMO"], json!(9));
+        assert!(
+            evaluate(
+                &graph,
+                "UPM_DEMO",
+                &definitions["UPM_DEMO"]["collect"]["mapping"]
+            )
+            .is_err()
+        );
     }
     #[test]
     fn rejects_missing_duplicate_unknown_and_overlapping_script_results() {

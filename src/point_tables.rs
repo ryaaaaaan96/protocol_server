@@ -707,11 +707,12 @@ pub async fn read(
     {
         return Err(AppError::bad("此板卡尚未启用采集点表"));
     }
+    let process = table_rows(&mut tx, pid, &board_key, "process").await?;
     let options = json!({
         "native_groups": board["point_groups"],
         "endpoints": board["point_endpoints"].as_array().into_iter().flatten().filter(|endpoint|
             if kind == "collect" {endpoint["direction"] == "collect"} else {endpoint["direction"] != "collect"}).collect::<Vec<_>>(),
-        "process_points": table_rows(&mut tx, pid, &board_key, "process").await?,
+        "process_points": process,
     });
     let graph = crate::permissions::catalog(&mut tx, pid).await?;
     let access = crate::permissions::load(&mut tx, pid).await?;
@@ -725,7 +726,11 @@ pub async fn read(
     for table_kind in kinds {
         let definition =
             board_definition(&mut tx, pid, &board_key, table_kind, &s.project_files).await?;
-        let mut data = table_rows(&mut tx, pid, &board_key, table_kind).await?;
+        let mut data = if table_kind == "process" {
+            process.clone()
+        } else {
+            table_rows(&mut tx, pid, &board_key, table_kind).await?
+        };
         crate::point_order::sort_rows(&mut data, &definition["ordering"]);
         for row in &mut data {
             row["can_edit"] = json!(crate::permissions::can_edit_row(

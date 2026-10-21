@@ -32,6 +32,8 @@ Keep credentials in ignored `.env`. Separate migration/export credentials from t
 ## Project Configuration Workflow
 Edit topology through server files or validated folder imports; point rows remain web-editable. Definitions reload live; topology changes require validated import. Board/group/endpoint organization lives in JSON with stable keys. Use `protocol_platform` for accounts, registry and permissions, and one `protocol_project_<key>` per project. DC-UPS uses `dc-ups`; UPM is a board.
 
+Navigation uses `topology?workspace=true`: return only topology, revision, point identities and derived cardinalities, with normal authorization/RLS. Never execute table scripts or full validation on this path. Load actual table rows and validation on demand; preserve full validation for writes, generation and releases. Revision/project changes invalidate the frontend validation report.
+
 Topology version 3 uses explicit `roots` and permits shared children with multiple parents. Incoming paths reference the same devices: require equal derived totals and count descendants once. Reject cycles, duplicate parent/child pairs, undeclared roots and inconsistent quantities. Keep version 1/2 single-root trees compatible. Draw each board once with all incoming links; never infer a physical parent from collection mappings.
 
 The platform keeps eight tables: `auth.users`, `auth.sessions`, `auth.login_attempts`, `meta.projects`, `meta.project_members`, `meta.project_member_grants`, `history.audit_logs`, and `public._sqlx_migrations`. Use schema-qualified SQL. Platform migration 0002 changes grouping only; preserve records, constraints, sessions and authorization locks. Platform migration versions are independent of each project's `schema_version` and `revision`.

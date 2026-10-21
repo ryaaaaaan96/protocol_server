@@ -73,7 +73,7 @@ watch([sheets, hasOverview], ([available, overview]) => {
 watch(() => sheetKey.value === "overview" ? `${board.value?.name || props.boardKey} 总体视图` : sheet.value?.label || "", label => emit("sheet", label), { immediate: true });
 const points = computed(() => rows(props.graph || {}, "process_points").filter(point => point.board_key === props.boardKey));
 function count(kind: PointKind, endpointKey?: string) {
-  if (board.value?.point_storage === "derived" && kind === "collect") return props.graph?.derived_collections?.[props.boardKey]?.rows?.length || 0;
+  if (board.value?.point_storage === "derived" && kind === "collect") return props.graph?.derived_counts?.[props.boardKey] ?? props.graph?.derived_collections?.[props.boardKey]?.rows?.length ?? 0;
   const selected = points.value.filter(point => groupKey.value == null || point.group_key === groupKey.value);
   if (kind === "process") {
     const definition = schema.value?.boards[props.boardKey]?.process;

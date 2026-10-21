@@ -19,7 +19,7 @@ const permissions = { role: "admin", edit_scope: "all", grants: [], can_edit: tr
 const user = { id: 1, username: "test-admin", display_name: "测试管理员", is_admin: true, active: true };
 const validation = { errors: 0, warnings: 0, issues: [] };
 const tables = { process: processDefinition, forward: forwardDefinition };
-const requests = [], errors = [];
+const requests = [], reads = [], errors = [];
 let owned = false, folderInvalid = false;
 const folder = await mkdtemp(join(tmpdir(), "protocol-folder-ui-"));
 await writeFile(join(folder, "project.json"), JSON.stringify({ key: "dc-ups", name: "DC-UPS", topology: config }));
@@ -34,13 +34,15 @@ try {
   page.on("dialog", dialog => dialog.accept());
   await page.route("**/api/**", async route => {
     const request = route.request(), path = new URL(request.url()).pathname, method = request.method();
+    if (method === "GET") reads.push(path + new URL(request.url()).search);
     const ok = json => route.fulfill({ json });
     if (method !== "GET") requests.push({ path, method, body: request.headers()["content-type"]?.includes("application/json") ? request.postDataJSON() : null });
     if (path === "/api/auth/me") return ok(user);
     if (path === "/api/projects") return ok([project]);
     if (path.endsWith("/permissions")) return ok(permissions);
     if (path.endsWith("/overview")) return ok({ project, validation, has_configuration: true });
-    if (path.endsWith("/topology")) return ok({ ...graph, validation });
+    if (path.endsWith("/topology")) return ok(graph);
+    if (path.endsWith("/validation")) return ok(validation);
     if (path.includes("/edit-lock")) {
       if (path.endsWith("/acquire")) owned = true;
       if (path.endsWith("/release")) owned = false;
@@ -73,13 +75,26 @@ try {
   const nav = page.getByRole("navigation", { name: "项目与板卡导航" });
   await expect(page.getByLabel("当前项目").locator("option:checked")).toHaveText("DC-UPS");
   await expect(page.getByRole("group", { name: "项目板卡类型协议拓扑" })).toBeVisible();
-  assert.equal(requests.some(request => request.path.endsWith("/overview")), false, "startup must not load a second project snapshot");
+  assert.ok(reads.includes("/api/projects/1/topology?workspace=true"), "startup must use compact workspace data");
+  assert.equal(reads.some(path => path.endsWith("/overview") || path.endsWith("/validation")), false, "startup must not load full validation or a second project snapshot");
   assert.equal(modules.some(url => url.includes("/pages/TopologyWorkspace.vue")), false, "point editor must load only when opened");
+  await nav.getByRole("button", { name: "数据校验", exact: true }).click();
+  await expect(page.getByText("当前数据通过阻断性检查", { exact: true })).toBeVisible();
+  assert.equal(reads.filter(path=>path.endsWith("/validation")).length,1);
+  await nav.getByRole("button", { name: "项目拓扑", exact: true }).click();
+  await nav.getByRole("button", { name: "数据校验", exact: true }).click();
+  await expect(page.getByText("当前数据通过阻断性检查", { exact: true })).toBeVisible();
+  assert.equal(reads.filter(path=>path.endsWith("/validation")).length,1, "unchanged validation is retained within the current project revision");
+  await nav.getByRole("button", { name: "项目拓扑", exact: true }).click();
   await page.getByRole("button", { name: "查看 DSP 板卡内部信息", exact: true }).click();
   await expect(page.locator(".point-table tbody tr")).toHaveCount(1);
   await expect(page.getByRole("button", { name: "新建DSP内部数据", exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "开始编辑", exact: true }).click();
   await expect(page.getByRole("button", { name: "新建DSP内部数据", exact: true })).toBeVisible();
+  await nav.getByRole("button", { name: "数据校验", exact: true }).click();
+  await expect(page.getByText("当前数据通过阻断性检查", { exact: true })).toBeVisible();
+  assert.equal(reads.filter(path=>path.endsWith("/validation")).length,2,"refresh invalidates the previous validation report");
+  await nav.getByRole("button", { name: "板卡内部信息", exact: true }).click();
   await page.getByRole("button", { name: "选择 UPM 板卡", exact: true }).click();
   await expect(page.getByText("此板卡点表暂未启用", { exact: true })).toBeVisible();
   await expect(page.locator(".point-table")).toHaveCount(0);

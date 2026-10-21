@@ -51,6 +51,10 @@ const data=kind=>({
   }),
 });
 const errors=[],requests=[];
+const workspace={revision:1,project_config:manifest.topology,
+  process_points:points.map(({id,board_key,group_key,sig_id,metadata})=>({id,board_key,group_key,sig_id,source_sig_id:metadata?.source_sig_id})),
+  collect_points:collect.map(({id,board_key,process_point_id,endpoint_key})=>({id,board_key,process_point_id,endpoint_key})),
+  transmit_points:forward.map(({id,board_key,process_point_id,endpoint_key})=>({id,board_key,process_point_id,endpoint_key}))};
 const server=await createServer({root,logLevel:"error",server:{host:"127.0.0.1",port:0}});
 let browser;
 try {
@@ -64,7 +68,7 @@ try {
     import { permissionKey } from '/src/composables/useProjectPermissions.ts';
     import '/src/style.css';
     const app=createApp({render:()=>h(Workspace,{pid:1,boardKey:'UPM',canWrite:true,
-      graph:${JSON.stringify({revision:1,project_config:manifest.topology,process_points:points,collect_points:collect,transmit_points:forward})}})});
+      graph:${JSON.stringify(workspace)}})});
     app.provide(permissionKey,{state:ref({can_edit:true,can_manage_project:true,grants:[],catalog:[]}),error:ref(''),refresh:async()=>{}});
     app.mount('#test');
   </script></body></html>`}));
