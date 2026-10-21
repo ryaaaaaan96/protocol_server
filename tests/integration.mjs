@@ -16,6 +16,7 @@ import { checkDspTransmitRules } from "./dsp-transmit-rules.mjs";
 import { checkProjectFolders } from "./project-folders.mjs";
 import { checkExcelBatch } from "./excel-batch.mjs";
 import { checkProjectDatabases } from "./project-databases.mjs";
+import { onboardingFixture, checkProjectOnboarding } from "./project-onboarding.mjs";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 process.chdir(root);
 const env = Object.fromEntries(fs.readFileSync(".env", "utf8").split(/\r?\n/)
@@ -36,6 +37,7 @@ const password=crypto.randomBytes(20).toString("hex");
 const projectConfigs=fs.mkdtempSync(path.join(root,".runtime/test-project-configs-"));
 const fixtureSource=path.join(root,"config/dc-ups");
 for(const [baseKey,workbook] of [["table_behavior",false],["generic",true],["upm",true],["upm_address",false],["dsp_native",true],["dsp_native_other",false],["dsp_rules",false],["dsp_calculation",false],["cli",false],["excel",false],["broken",true]]){
+  if (process.argv.includes("--onboarding")) continue;
   const key=fixtureKey(baseKey);
   const directory=path.join(projectConfigs,key);fs.cpSync(fixtureSource,directory,{recursive:true});
   const manifest=JSON.parse(fs.readFileSync(path.join(directory,"project.json"),"utf8"));
@@ -84,6 +86,7 @@ for(const [baseKey,workbook] of [["table_behavior",false],["generic",true],["upm
   }
 
 }
+onboardingFixture(path.join(projectConfigs,fixtureKey("onboarding")),fixtureKey("onboarding"));
 const testEnv={...process.env,...env,MIGRATION_DATABASE_URL:migration.toString(),DATABASE_URL:appUrl.toString(),
   ADMIN_PASSWORD:password,ADMIN_USERNAME:"test_admin",BIND_ADDR:process.env.TEST_BIND_ADDR || "127.0.0.1:18081",RUST_LOG:"warn",PROJECT_CONFIG_DIR:projectConfigs};
 const base=`http://${testEnv.BIND_ADDR}/api`;
@@ -166,6 +169,7 @@ async function runIntegration(){
   equal((await client.raw("/auth/login","POST",{username:"test_admin",password},{"X-Requested-With":""})).status,403);
   await client.call("/auth/login","POST",{username:"test_admin",password});
   equal((await client.call("/projects")).length,0);
+  if (process.argv.includes("--onboarding")) { await checkProjectOnboarding({client,equal,ok,fixtureKey,projectConfigs,base}); console.log(`PASS: ${assertions} assertions`); return; }
   const createFromFile=key=>execFileSync("target/debug/protocol-server",["create-project",key],{env:testEnv,encoding:"utf8"});
   ok(createFromFile(fixtureKey("cli")).includes("已创建项目"));
   ok(createFromFile(fixtureKey("cli")).includes("未覆盖任何数据"));
@@ -196,6 +200,7 @@ async function runIntegration(){
   if (process.argv.includes("--upm-address")) { await checkUpmAddresses({client,engineer:e,engineerId:engineer.id,equal,ok,fixtureKey,projectConfigs}); console.log(`PASS: ${assertions} assertions`); return; }
   if (process.argv.includes("--exports")) { await checkPointExport({client,viewer:v,viewerId:viewer.id,engineer:e,equal,ok,fixtureKey,base}); console.log(`PASS: ${assertions} assertions`); return; }
   if (!process.argv.slice(2).length) await checkPointExport({client,viewer:v,viewerId:viewer.id,engineer:e,equal,ok,fixtureKey,base});
+  if (!process.argv.slice(2).length) await checkProjectOnboarding({client,equal,ok,fixtureKey,projectConfigs,base});
   await checkGenericBoards({client,equal,ok,fixtureKey,projectConfigs,testEnv});
   if (!process.argv.some(arg=>["--folders","--excel","--databases","--calculation"].includes(arg))) await checkTableBehavior({client,equal,ok,fixtureKey,projectConfigs});
   if (process.argv.includes("--calculation")) {

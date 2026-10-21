@@ -18,7 +18,7 @@ const props = defineProps<{ pid: number }>();
 const emit = defineEmits<{ error: [message: string] }>();
 const definitions = ref<Row | null>(null),
   sql = ref(
-    "SELECT p.name, p.enum_name, t.upp_model, t.address, t.wire_type\nFROM process_points p\nLEFT JOIN transmit_points t ON t.process_point_id = p.id\nORDER BY p.id, t.id",
+    "SELECT p.name, p.enum_name, t.upp_model, t.address, t.wire_type\nFROM points.process_points p\nLEFT JOIN points.transmit_points t ON t.process_point_id = p.id\nORDER BY p.id, t.id",
   ),
   result = ref<Row | null>(null),
   busy = ref(false),

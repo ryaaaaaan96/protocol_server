@@ -57,7 +57,7 @@ function fingerprint(directory) {
   return hash.digest("hex");
 }
 
-function comparableTopology(value) {
+export function comparableTopology(value) {
   const config = structuredClone(value);
   if (config?.version === 1) {
     config.version = 2;
@@ -67,6 +67,8 @@ function comparableTopology(value) {
       delete mount.transport;
     }
   }
+  if (config?.root == null) delete config.root;
+  if (Array.isArray(config?.roots) && !config.roots.length) delete config.roots;
   // Directory locations affect file organization, not the persisted board graph.
   for (const board of config?.board_types || []) {
     delete board.directory;
@@ -76,6 +78,10 @@ function comparableTopology(value) {
     for (const group of board.point_groups || []) {
       if (Array.isArray(group.devices) && !group.devices.length) delete group.devices;
       if (group.collect_enabled == null) delete group.collect_enabled;
+      for (const device of group.devices || []) {
+        if (device.modbus_base === 0) delete device.modbus_base;
+        if (device.instance_index == null) delete device.instance_index;
+      }
     }
     for (const endpoint of board.point_endpoints || []) {
       if (endpoint.direction === "transmit") delete endpoint.direction;

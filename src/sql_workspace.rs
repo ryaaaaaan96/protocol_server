@@ -289,10 +289,14 @@ pub async fn definitions(_user: User) -> Json<Value> {
         "-- 项目结构迁移源码，按版本顺序展示；最终分组为 points、history、meta。\n",
         include_str!("../migrations/project/0001_project.sql"),
         "\n-- 以下迁移应用分组和表合并。\n",
-        include_str!("../migrations/project/0002_grouped_project.sql")
+        include_str!("../migrations/project/0002_grouped_project.sql"),
+        "\n-- 采集点表与声明式板卡结构。\n",
+        include_str!("../migrations/project/0003_upm_collection.sql"),
+        "\n",
+        include_str!("../migrations/project/0004_declarative_boards.sql")
     ), "relations": RELATIONS, "examples": [
-        {"name":"DSP 内部数据", "sql":"SELECT board_key,group_key,name,enum_name,sig_id,internal_type FROM points.process_points ORDER BY board_key,display_order,id"},
-        {"name":"DSP 转发映射", "sql":"SELECT p.name,t.endpoint_key,t.address,t.wire_type,p.enum_name FROM points.transmit_points t JOIN points.process_points p ON p.id=t.process_point_id ORDER BY t.endpoint_key,t.address"},
+        {"name":"处理点表", "sql":"SELECT board_key,group_key,name,enum_name,sig_id,internal_type FROM points.process_points ORDER BY board_key,display_order,id"},
+        {"name":"转发映射", "sql":"SELECT p.name,t.endpoint_key,t.address,t.wire_type,p.enum_name FROM points.transmit_points t JOIN points.process_points p ON p.id=t.process_point_id ORDER BY t.endpoint_key,t.address"},
         {"name":"点表历史", "sql":"SELECT * FROM history.events WHERE kind='point' ORDER BY id DESC LIMIT 100"}
     ]}))
 }

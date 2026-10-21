@@ -22,7 +22,7 @@ DSP 当前使用 `transmit.json` 引用的 `transmit.js` 计算布局。同一�
 }
 ```
 
-按 `sort_by` 排序，每个 `group_by` 分组独立累计字节数。普通地址为 `header_bytes + 前面各行字节数`，固定地址行仍参与累计。`STRING` 取内部总字节数，其他类型读取 `type_bytes`。分组、排序和固定地址键可选 `id`、`process_point_id`、`source_order`、`endpoint_key`、`upp_model`、`upload_level`、`category`、`name`、`variable_name`。地址规则当前按 UPP 字节计数；Modbus 保留手动配置。
+按 `sort_by` 排序，每个 `group_by` 分组独立累计字节数。普通地址为 `header_bytes + 前面各行字节数`，固定地址行仍参与累计。`STRING` 取内部总字节数，其他类型读取 `type_bytes`。分组、排序和固定地址键可选 `id`、`process_point_id`、`source_order`、`endpoint_key`、`upp_model`、`upload_level`、`category`、`name`、`variable_name`。该兼容内置公式按字节累计；Modbus 的寄存器公式使用 JS 配置，参见 [最小项目](../examples/minimal-project/README.md)。
 
 DSP 的 JS 规则和兼容内置规则均可使用六个 Excel 固定偏移，见 `config/dc-ups/DSP/transmit.json`。参数和计算结果通过预览、地址冲突检查、权限与历史事务；读取配置不会自动改写数据库。修改规则后点击“重算协议布局”预览并保存。内置规则最多 10000 条输入，参数最多 32 KiB。
 
@@ -76,7 +76,7 @@ export default function calculate(points, parameters) {
 | 字段 | 含义 |
 | --- | --- |
 | `id`、`process_point_id` | 转发及内部点的固定记录 ID |
-| `endpoint_key`、`upp_model` | 输出接口与已经推导的模型号 |
+| `endpoint_key`、`upp_model`、`protocol` | 输出接口、已经推导的模型号、由端点配置提供的 UPP／MODBUS 协议 |
 | `wire_type`、`scale` | 当前配置的实际通信类型及系数 |
 | `name`、`variable_name` | 内部数据名称与原拼写变量名 |
 | `internal_type`、`element_count`、`byte_length` | 内部类型、元素数、总字节数 |
@@ -95,7 +95,7 @@ export default function calculate(points, parameters) {
 { "id": 123, "address": 6, "wire_length": 4 }
 ```
 
-后端拒绝额外字段、重复/遗漏/外部 ID、非整数字节数、非法类型长度、越界和同端点同模型地址重叠。`calculate` 不能增删记录、修改通信类型或系数、权限、型号与历史。模型分类等规则由 `behavior` 的白名单字段管理；超出两种脚本契约的新能力仍需扩展通用引擎。
+后端拒绝额外字段、重复/遗漏/外部 ID、非整数字节数、非法类型长度、越界和协议地址重叠。`wire_length` 始终为字节数；UPP 地址按字节、Modbus 地址按寄存器计数（`ceil(wire_length / 2)`）。Modbus 的重叠在布局及实例规则应用后，由公共协议校验器按最终地址和寄存器区检查，避免用模板字节范围误判。`calculate` 不能增删记录、修改通信类型或系数、权限、型号与历史。模型分类等规则由 `behavior` 的白名单字段管理；超出两种脚本契约的新能力仍需扩展通用引擎。
 
 ## 默认 DSP 规则与历史
 

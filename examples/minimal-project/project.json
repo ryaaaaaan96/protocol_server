@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "key": "minimal-project",
+  "name": "最小示例项目",
+  "description": "独立于 DC-UPS 的 JSON/JS 项目模板；首次创建为空点表。",
+  "topology": {
+    "version": 3,
+    "board_types": [
+      {
+        "code": "SENSOR_NODE",
+        "name": "传感器节点",
+        "model_code": "SENSOR_MODEL",
+        "directory": "sensor",
+        "point_storage": "native",
+        "point_groups": [
+          {
+            "code": "CHANNELS",
+            "name": "测量通道"
+          }
+        ],
+        "point_endpoints": [
+          {
+            "code": "LINK_IN",
+            "name": "UPP 输入",
+            "protocol": "UPP",
+            "direction": "collect"
+          },
+          {
+            "code": "OUTBOUND",
+            "name": "Modbus 输出",
+            "protocol": "MODBUS"
+          }
+        ]
+      }
+    ],
+    "roots": [
+      {
+        "type": "SENSOR_NODE",
+        "quantity": 1
+      }
+    ],
+    "mounts": []
+  },
+  "workspace": {
+    "boards": {
+      "SENSOR_NODE": {
+        "tables": [
+          "process",
+          "collect",
+          "transmit"
+        ]
+      }
+    }
+  }
+}

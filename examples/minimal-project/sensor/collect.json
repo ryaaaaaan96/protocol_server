@@ -1,0 +1,102 @@
+{
+  "version": 1,
+  "enabled": true,
+  "label": "采集点表",
+  "description": "UPP 接收端参数独立保存。",
+  "columns": [
+    "signal_name",
+    "address",
+    "wire_type",
+    "wire_length",
+    "scale",
+    "access",
+    "upp_model",
+    "poll_interval"
+  ],
+  "editor": [
+    "process_point_id",
+    "endpoint_key",
+    "wire_type",
+    "scale",
+    "access",
+    "upp_model",
+    "address",
+    "wire_length",
+    "poll_interval"
+  ],
+  "ordering": {
+    "mode": "display",
+    "group_by": [
+      "endpoint_key"
+    ]
+  },
+  "inline": {
+    "wire_type": "wire_type",
+    "scale": "scale",
+    "access": "access",
+    "upp_model": "upp_model",
+    "address": "address",
+    "wire_length": "wire_length",
+    "poll_interval": "poll_interval"
+  },
+  "fields": {
+    "signal_name": {
+      "label": "内部点"
+    },
+    "process_point_id": {
+      "label": "内部点",
+      "reference": "process_points",
+      "type": "number"
+    },
+    "endpoint_key": {
+      "label": "协议端点",
+      "reference": "endpoints"
+    },
+    "address": {
+      "label": "协议地址",
+      "type": "number",
+      "default": 6
+    },
+    "wire_type": {
+      "label": "通信类型",
+      "options": [
+        "U8",
+        "U16",
+        "S16",
+        "U32",
+        "S32",
+        "F32",
+        "STRING"
+      ],
+      "default": "U16"
+    },
+    "wire_length": {
+      "label": "协议字节数",
+      "type": "number",
+      "default": 2
+    },
+    "scale": {
+      "label": "协议系数",
+      "type": "number",
+      "default": 1
+    },
+    "access": {
+      "label": "读写属性",
+      "options": [
+        "RO",
+        "RW"
+      ],
+      "default": "RO"
+    },
+    "upp_model": {
+      "label": "UPP 模型",
+      "type": "number",
+      "default": 1
+    },
+    "poll_interval": {
+      "label": "轮询周期参数",
+      "type": "number",
+      "default": 100
+    }
+  }
+}

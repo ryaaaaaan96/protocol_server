@@ -75,7 +75,7 @@ async function commit() {
       <template v-if="!preview"
         ><label class="upload-area"
           ><div><Upload :size="30" /></div>
-          <strong>{{ busy ? "正在解析工作簿…" : "选择 DC-UPS 测点工作簿" }}</strong
+          <strong>{{ busy ? "正在解析工作簿…" : "选择测点工作簿" }}</strong
           ><span>支持 .xlsx，最大 15 MB。源文件保持不变。</span
           ><input
             type="file"

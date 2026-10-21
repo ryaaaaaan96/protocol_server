@@ -1,0 +1,106 @@
+{
+  "version": 1,
+  "enabled": true,
+  "label": "处理点表",
+  "description": "内部数据定义；校准系数示范扩展元数据字段。",
+  "columns": [
+    "name",
+    "enum_name",
+    "internal_type",
+    "unit",
+    "gain",
+    "calibrated_label"
+  ],
+  "editor": [
+    "group_key",
+    "name",
+    "enum_name",
+    "internal_type",
+    "element_count",
+    "unit",
+    "gain"
+  ],
+  "ordering": {
+    "mode": "display",
+    "group_by": [
+      "group_key"
+    ]
+  },
+  "inline": {
+    "name": "name",
+    "enum_name": "enum_name",
+    "internal_type": "internal_type",
+    "unit": "unit",
+    "gain": "gain"
+  },
+  "fields": {
+    "name": {
+      "label": "测点名称"
+    },
+    "enum_name": {
+      "label": "枚举"
+    },
+    "group_key": {
+      "label": "分组",
+      "reference": "native_groups"
+    },
+    "internal_type": {
+      "label": "内部类型",
+      "options": [
+        "U8",
+        "U16",
+        "S16",
+        "U32",
+        "S32",
+        "F32",
+        "STRING"
+      ],
+      "default": "U16"
+    },
+    "element_count": {
+      "label": "元素个数",
+      "type": "number",
+      "default": 1
+    },
+    "unit": {
+      "label": "单位",
+      "default": ""
+    },
+    "gain": {
+      "label": "校准系数",
+      "type": "number",
+      "default": 1
+    },
+    "calibrated_label": {
+      "label": "校准显示"
+    }
+  },
+  "behavior": {
+    "engine": "javascript",
+    "script_file": "process.js",
+    "parameters": {
+      "default_gain": 1,
+      "max_gain": 10
+    },
+    "editable_fields": [
+      "gain"
+    ],
+    "metadata_fields": [
+      "gain"
+    ],
+    "project_fields": [
+      "gain",
+      "calibrated_label"
+    ],
+    "owned_fields": []
+  },
+  "presentation": {
+    "search_placeholder": "搜索测点或枚举…",
+    "computed_dependencies": {
+      "calibrated_label": [
+        "name",
+        "gain"
+      ]
+    }
+  }
+}

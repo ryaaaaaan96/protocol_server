@@ -88,6 +88,10 @@ pub async fn configuration(
 /// Stable source order deliberately excludes the UI's display_order.
 pub fn inputs(graph: &Value, board: &str) -> Result<Vec<Value>> {
     let mut result = Vec::new();
+    let definition = rows(&graph["project_config"], "board_types")
+        .iter()
+        .find(|item| item["code"] == board)
+        .ok_or_else(|| fail("计算所属板卡不存在"))?;
     let source: Vec<_> = rows(graph, "process_points")
         .iter()
         .filter(|p| p["board_key"] == board)
@@ -98,6 +102,14 @@ pub fn inputs(graph: &Value, board: &str) -> Result<Vec<Value>> {
         .iter()
         .filter(|row| row["board_key"] == board)
     {
+        let endpoint = rows(definition, "point_endpoints")
+            .iter()
+            .find(|endpoint| endpoint["code"] == mapping["endpoint_key"])
+            .filter(|endpoint| {
+                endpoint["direction"] != "collect"
+                    && matches!(strv(endpoint, "protocol"), "UPP" | "MODBUS")
+            })
+            .ok_or_else(|| fail("转发端点的协议或方向无效"))?;
         let point = source
             .iter()
             .find(|p| p["id"] == mapping["process_point_id"])
@@ -136,6 +148,7 @@ pub fn inputs(graph: &Value, board: &str) -> Result<Vec<Value>> {
             "source":source_fields,"fields":mapping_fields,
             "id":mapping["id"],"process_point_id":point["id"],
             "endpoint_key":mapping["endpoint_key"],"upp_model":mapping["upp_model"],
+            "protocol":endpoint["protocol"],
             "wire_type":mapping["wire_type"],"scale":mapping["scale"],
             "name":point["name"],"variable_name":point["variable_name"],
             "internal_type":point["internal_type"],"element_count":point["element_count"],
@@ -345,15 +358,23 @@ pub fn evaluate(rule: &Value, input: &[Value]) -> Result<Vec<Layout>> {
         if !seen.insert(row.id) {
             return Err(fail("脚本返回重复记录 ID"));
         }
+        let span = match strv(original, "protocol") {
+            "UPP" => row.wire_length,
+            "MODBUS" => row.wire_length.saturating_add(1) / 2,
+            _ => return Err(fail("计算输入缺少受支持的协议")),
+        };
         if row.wire_length <= 0
             || row.wire_length > 65535
             || row.address < 0
-            || row
-                .address
-                .checked_add(row.wire_length)
-                .is_none_or(|end| end > 65536)
+            || row.address.checked_add(span).is_none_or(|end| end > 65536)
         {
             return Err(fail(format!("记录 {} 的字节数或偏移超出范围", row.id)));
+        }
+        // Modbus overlap is checked on actual device addresses by native_protocol,
+        // after this layout and any instance script have been applied. Template
+        // addresses alone cannot describe its register/device address spaces.
+        if original["protocol"] == "MODBUS" {
+            continue;
         }
         let group = ranges
             .entry((strv(original, "endpoint_key"), num(original, "upp_model")))
@@ -474,6 +495,7 @@ mod tests {
         )
         .unwrap();
         graph["table_definitions"] = files.definition(Some("dc-ups")).unwrap()["boards"].clone();
+        graph["project_config"] = files.topology_source("dc-ups").unwrap()["config"].clone();
         for (index, point) in graph["process_points"]
             .as_array_mut()
             .unwrap()
@@ -537,11 +559,35 @@ mod tests {
 
     fn input() -> Vec<Value> {
         vec![
-            json!({"id":1,"process_point_id":11,"endpoint_key":"UPP","upp_model":99,
+            json!({"id":1,"process_point_id":11,"endpoint_key":"UPP","protocol":"UPP","upp_model":99,
             "wire_type":"STRING","byte_length":6,"upload_level":"1：上传至UPM","source_order":1,"name":"array"}),
-            json!({"id":2,"process_point_id":12,"endpoint_key":"UPP","upp_model":99,
+            json!({"id":2,"process_point_id":12,"endpoint_key":"UPP","protocol":"UPP","upp_model":99,
             "wire_type":"U16","byte_length":2,"upload_level":"1：上传至UPM","source_order":2,"name":"scalar"}),
         ]
+    }
+
+    #[test]
+    fn modbus_layout_uses_register_bounds_and_defers_device_overlap() {
+        let mut rule = rule();
+        rule["script"] = json!(
+            "export default function calculate(points, parameters) { return points.map((p, i) => ({id:p.id, address:parameters.start + i, wire_length:2})); }"
+        );
+        let mut points = input();
+        for point in &mut points {
+            point["protocol"] = json!("MODBUS");
+        }
+        rule["parameters"]["start"] = json!(65534);
+        assert_eq!(evaluate(&rule, &points).unwrap()[1].address, 65535);
+        rule["parameters"]["start"] = json!(65535);
+        assert!(evaluate(&rule, &points).is_err());
+        points.truncate(1);
+        assert!(evaluate(&rule, &points).is_ok());
+        rule["script"] = json!(
+            "export default function calculate(points) { return points.map(p => ({id:p.id, address:65535, wire_length:3})); }"
+        );
+        assert!(evaluate(&rule, &points).is_err());
+        points[0]["protocol"] = json!("UNKNOWN");
+        assert!(evaluate(&rule, &points).is_err());
     }
 
     #[test]
