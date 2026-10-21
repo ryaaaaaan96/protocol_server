@@ -29,6 +29,8 @@ import ContextMenu from "./ContextMenu.vue";
 import { defaultColumns, restoreColumns, orderedColumns, type TableColumn } from "../domain/tableColumns";
 import PointChangePreview from "./PointChangePreview.vue";
 import Modal from "./Modal.vue";
+import ExportMenu from "./ExportMenu.vue";
+import { exportCell, type TableExport } from "../domain/tableExport";
 const props = defineProps<{
   pid: number;
   boardKey: string;
@@ -48,6 +50,7 @@ const emit = defineEmits<{
   conflict: [];
   process: [id: number];
   error: [message: string];
+  notify: [message: string];
   dirty: [value: boolean];
 }>();
 const data = shallowRef<PointTableData | null>(null),
@@ -226,6 +229,17 @@ const categories = computed(() => {
   return [...counts].map(([key, count]) => ({ key, label: key || "未分类", count }));
 });
 const filtered = computed(() => matched.value.filter(row => !classified.value || categoryFilter.value == null || categoryOf(row) === categoryFilter.value));
+function exportView(): TableExport {
+  const keys = displayColumns.value.map(column => column.key);
+  return {
+    title: `${props.boardKey}-${props.groupKey ?? '全部'}-${props.label}`,
+    context: { project_id: props.pid, revision: data.value!.revision, board_key: props.boardKey, kind: props.kind,
+      group_key: props.groupKey ?? null, endpoint_key: props.endpointKey ?? null, expanded: expanded.value,
+      search: query.value, category: categoryFilter.value, show_non_uploaded: showNonUploaded.value },
+    columns: keys.map(key => ({ key, label: def.value!.fields[key].column_label || def.value!.fields[key].label })),
+    rows: filtered.value.map(row => Object.fromEntries(keys.map(key => [key, exportCell(row[key], displayCell(data.value!, row, key, row.edit_values || {}))]))),
+  };
+}
 const pages = computed(() =>
   Math.max(1, Math.ceil(filtered.value.length / pageSize.value)),
 );
@@ -583,6 +597,8 @@ function text(row: Row, key: string) {
         />
       </div>
       <div class="inline">
+        <ExportMenu :pid="pid" :filename="`${boardKey}-${kind}-${groupKey ?? 'all'}${endpointKey ? `-${endpointKey}` : ''}`" :prepare="exportView"
+          :disabled="dirty || busy || !!review || editing || !!grid.editor.value" @notify="(message, error) => error ? emit('error', message) : emit('notify', message)" />
         <div v-if="expandable" class="inline" role="group" aria-label="转发表显示方式">
           <button class="button small" :class="{ primary: expanded }" :aria-pressed="expanded" :disabled="dirty || busy || !!review || editing" @click="changeExpansion(true)">按设备展开</button>
           <button class="button small" :class="{ primary: !expanded }" :aria-pressed="!expanded" :disabled="dirty || busy || !!review || editing" @click="changeExpansion(false)">编辑共享模板</button>
@@ -776,7 +792,7 @@ function text(row: Row, key: string) {
         <PointTable :pid="pid" :board-key="boardKey" kind="forward" :label="forwardLabel || '转发点表'"
           :revision="revision" :can-write="canWrite"
           :group-key="forwardSignal.group_key" :process-point-id="forwardSignal.id"
-          @done="emit('done', $event)" @conflict="forwardSignal = null; conflict()"
+          @done="emit('done', $event)" @conflict="forwardSignal = null; conflict()" @notify="emit('notify', $event)"
           @error="emit('error', $event)" @dirty="forwardDirty = $event" />
       </div>
       <div class="modal-footer"><button class="button" @click="closeForward">关闭转发配置</button></div>

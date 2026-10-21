@@ -34,6 +34,7 @@ import Badge from "./components/Badge.vue";
 import Empty from "./components/Empty.vue";
 import Login from "./pages/Login.vue";
 import Loading from "./components/Loading.vue";
+import ExportMenu from "./components/ExportMenu.vue";
 import { useProjectEditLock } from "./composables/useProjectEditLock";
 import { permissionKey, useProjectPermissions } from "./composables/useProjectPermissions";
 import { allowsBoard } from "./domain/permissions";
@@ -460,6 +461,7 @@ function userCreated() {
           <strong v-else>{{ pageTitle }}</strong>
         </div>
         <div class="topbar-right">
+          <ExportMenu v-if="project" :pid="pid" :filename="`protocol-${pid}`" :disabled="workspaceDirty" @notify="notify" />
           <span class="top-label"><span class="status-dot" />版本受控</span
           ><Badge v-if="project"
             >REV {{ graph?.revision ?? project.revision }}</Badge
@@ -553,6 +555,7 @@ function userCreated() {
             @conflict="topologyConflict"
             @error="fail"
             @board="enterBoard"
+            @notify="notify"
             @configuration="modal = 'config'"
             @sheet="sheetLabel = $event"
             @dirty="workspaceDirty = $event"

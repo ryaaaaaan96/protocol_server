@@ -21,6 +21,7 @@ const emit = defineEmits<{
   done: [merged?: boolean];
   conflict: [];
   error: [message: string];
+  notify: [message: string];
   board: [key: string];
   configuration: [];
   sheet: [label: string];
@@ -160,12 +161,12 @@ function done(merged = false) {
       </div>
       <PointOverview v-if="sheetKey === 'overview' && hasOverview" :key="`${boardKey}:overview:${groupKey ?? 'all'}`"
         :pid="pid" :board-key="boardKey" :revision="graph.revision" :can-write="canWrite" :group-key="groupKey"
-        @done="done" @error="emit('error', $event)" @dirty="pointDirty = $event" />
+        @done="done" @error="emit('error', $event)" @notify="emit('notify', $event)" @dirty="pointDirty = $event" />
       <PointTable v-else :key="`${boardKey}:${sheet.key}:${groupKey ?? 'all'}`" :pid="pid" :board-key="boardKey"
         :kind="sheet.pointKind" :endpoint-key="sheet.endpointKey" :label="sheet.label" :revision="graph.revision" :can-write="canWrite"
         :focus-id="pointFocus" :group-key="groupKey" :allow-forward="sheets.some(item => item.pointKind === 'forward')"
         :forward-label="schema.boards[boardKey]?.forward?.label"
-        @done="done" @conflict="emit('conflict')" @process="openProcess" @error="emit('error', $event)" @dirty="pointDirty = $event" />
+        @done="done" @conflict="emit('conflict')" @process="openProcess" @error="emit('error', $event)" @notify="emit('notify', $event)" @dirty="pointDirty = $event" />
     </section>
   </template>
 </template>

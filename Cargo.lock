@@ -1324,6 +1324,7 @@ dependencies = [
  "json-patch",
  "rand",
  "rquickjs",
+ "rust_xlsxwriter",
  "serde",
  "serde_json",
  "sha2",
@@ -1521,6 +1522,15 @@ dependencies = [
  "spki",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "rust_xlsxwriter"
+version = "0.90.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2be778223b36bb449b2ef2df4856ced2d311680818a7310db5c5dc370170f935"
+dependencies = [
+ "zip 4.6.1",
 ]
 
 [[package]]

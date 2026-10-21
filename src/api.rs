@@ -411,12 +411,8 @@ pub async fn export_json(
     u: User,
     Path(pid): Path<i64>,
 ) -> Result<impl IntoResponse> {
-    let mut tx = db::context(&s.pool, &u, Some(pid), false).await?;
+    let mut tx = db::read_snapshot_context(&s.pool, &u, pid).await?;
     crate::table_runtime::bind(&mut tx, pid, &s.project_files).await?;
-    sqlx::query("SELECT id FROM meta.project_state WHERE id=$1 FOR SHARE")
-        .bind(pid)
-        .execute(&mut *tx)
-        .await?;
     let snap = db::snapshot(&mut tx, pid).await?;
     Ok((
         [

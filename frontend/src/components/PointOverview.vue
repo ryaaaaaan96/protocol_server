@@ -15,9 +15,11 @@ import PointColumns from "./PointColumns.vue";
 import PointChangePreview from "./PointChangePreview.vue";
 import PointEditor from "./PointEditor.vue";
 import PointValueInput from "./PointValueInput.vue";
+import ExportMenu from "./ExportMenu.vue";
+import { exportCell, type TableExport } from "../domain/tableExport";
 
 const props = defineProps<{ pid: number; boardKey: string; revision: number; canWrite: boolean; groupKey?: string }>();
-const emit = defineEmits<{ done: [merged?: boolean]; error: [message: string]; dirty: [value: boolean] }>();
+const emit = defineEmits<{ done: [merged?: boolean]; error: [message: string]; notify: [message: string]; dirty: [value: boolean] }>();
 const data = ref<OverviewData | null>(null), error = ref(""), actionError = ref(""), reload = ref(0);
 const draft = ref<OverviewDraft>({}), undo = ref<OverviewDraft[]>([]), redo = ref<OverviewDraft[]>([]);
 const busy = ref(false), review = ref<Row | null>(null), checkOnly = ref(false);
@@ -63,6 +65,18 @@ const visible = computed(() => filtered.value.slice((page.value - 1) * pageSize.
 watch([query, mappingFilter], () => { page.value = 1; });
 watch(pages, value => { page.value = Math.min(page.value, value); });
 function text(row: OverviewRow, key: string) { return overviewText(data.value!, draft.value, row, key); }
+function exportView(): TableExport {
+  const keys = visibleColumns.value.map(column => column.key);
+  return {
+    title: `${props.boardKey}-${props.groupKey ?? '全部'}-总体视图`,
+    context: { project_id: props.pid, revision: data.value!.revision, board_key: props.boardKey, kind: "overview", group_key: props.groupKey ?? null, search: query.value, mapping_filter: mappingFilter.value, show_non_uploaded: showNonUploaded.value },
+    columns: keys.map(key => ({ key, label: `${data.value![columnSource(key).kind].definition.label} · ${def.value!.fields[key].column_label || def.value!.fields[key].label}` })),
+    rows: filtered.value.map(row => Object.fromEntries(keys.map(key => {
+      const { kind, column } = columnSource(key);
+      return [key, exportCell(row[kind]?.[column], text(row, key))];
+    }))),
+  };
+}
 function values(kind: PointKind, row: Row) { return overviewValues(data.value!, draft.value, kind, row); }
 function allowed(kind: PointKind, row?: Row | null) {
   return !!data.value && props.canWrite && allowsPoint(permissions.state.value, props.boardKey, kind, data.value[kind], row);
@@ -241,6 +255,8 @@ watch([head, visibleColumns], async (_, __, cleanup) => {
   <template v-else>
     <div class="sheet-heading overview-heading">
       <strong>总体视图</strong><span>内部数据与转发参数并列；重复的内部点共享修改。</span>
+      <ExportMenu :pid="pid" :filename="`${boardKey}-overview-${groupKey ?? 'all'}`" :prepare="exportView" :disabled="dirty || busy || !!review || !!detail || !!editor"
+        @notify="(message, error) => error ? emit('error', message) : emit('notify', message)" />
       <button class="button small" :disabled="busy || !!review" @click="finish() && (columnSettings = true)">列设置</button>
     </div>
     <div class="overview-toolbar">

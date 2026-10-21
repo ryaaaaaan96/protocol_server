@@ -20,7 +20,7 @@ const user = { id: 1, username: "test-admin", display_name: "测试管理员", i
 const validation = { errors: 0, warnings: 0, issues: [] };
 const tables = { process: processDefinition, forward: forwardDefinition };
 const requests = [], reads = [], errors = [];
-let owned = false, folderInvalid = false;
+let owned = false, folderInvalid = false, exportFailure = true;
 const folder = await mkdtemp(join(tmpdir(), "protocol-folder-ui-"));
 await writeFile(join(folder, "project.json"), JSON.stringify({ key: "dc-ups", name: "DC-UPS", topology: config }));
 const lock = () => ({ locked: owned, owned, owner: owned ? user : null, expires_at: owned ? new Date(Date.now() + 120_000).toISOString() : null, lease_seconds: 120, permissions });
@@ -43,6 +43,8 @@ try {
     if (path.endsWith("/overview")) return ok({ project, validation, has_configuration: true });
     if (path.endsWith("/topology")) return ok(graph);
     if (path.endsWith("/validation")) return ok(validation);
+    if (path.endsWith("/export")) return exportFailure ? route.fulfill({status:500,json:{error:"导出暂时失败，请重试"}}) : route.fulfill({contentType:"application/json",body:JSON.stringify(graph)});
+    if (path.endsWith("/export.xlsx")) return route.fulfill({contentType:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",body:Buffer.from("mock project XLSX")});
     if (path.includes("/edit-lock")) {
       if (path.endsWith("/acquire")) owned = true;
       if (path.endsWith("/release")) owned = false;
@@ -78,6 +80,20 @@ try {
   assert.ok(reads.includes("/api/projects/1/topology?workspace=true"), "startup must use compact workspace data");
   assert.equal(reads.some(path => path.endsWith("/overview") || path.endsWith("/validation")), false, "startup must not load full validation or a second project snapshot");
   assert.equal(modules.some(url => url.includes("/pages/TopologyWorkspace.vue")), false, "point editor must load only when opened");
+  assert.equal(reads.some(path=>path.includes("/export")),false,"exports must not load on startup");
+  await page.getByRole("button",{name:"导出项目",exact:true}).click();
+  await page.getByRole("menuitem",{name:"导出 JSON",exact:true}).click();
+  await expect(page.locator(".toast")).toContainText("导出暂时失败，请重试");
+  exportFailure=false;
+  for(const [label,extension] of [["导出 JSON","json"],["导出 Excel (.xlsx)","xlsx"]]) {
+    await page.getByRole("button",{name:"导出项目",exact:true}).click();
+    const pending=page.waitForEvent("download");
+    await page.getByRole("menuitem",{name:label,exact:true}).click();
+    const download=await pending;
+    assert.equal(download.suggestedFilename(),`protocol-1.${extension}`);
+    assert.equal(await download.failure(),null);
+  }
+  assert.equal(owned,false,"read-only exports do not acquire an editing lease");
   await nav.getByRole("button", { name: "数据校验", exact: true }).click();
   await expect(page.getByText("当前数据通过阻断性检查", { exact: true })).toBeVisible();
   assert.equal(reads.filter(path=>path.endsWith("/validation")).length,1);

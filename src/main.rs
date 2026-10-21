@@ -31,6 +31,7 @@ mod sheet_layout;
 mod sql_workspace;
 mod table_behavior;
 mod table_calculation;
+mod table_export;
 mod table_runtime;
 mod topology;
 mod topology_codegen;
@@ -274,6 +275,8 @@ async fn main() -> anyhow::Result<()> {
             get(api::download_release),
         )
         .route("/projects/{pid}/export", get(api::export_json))
+        .route("/projects/{pid}/export.xlsx", get(table_export::project))
+        .route("/projects/{pid}/export-table", post(table_export::current))
         .route("/projects/{pid}/audit", get(api::audit))
         .route(
             "/projects/{pid}/members",

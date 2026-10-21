@@ -9,6 +9,7 @@ import { genericFixture, checkGenericBoards } from "./generic-boards.mjs";
 import { tableBehaviorFixture, checkTableBehavior } from "./table-behavior.mjs";
 import { checkUpmPoints } from "./upm-points.mjs";
 import { checkUpmAddresses } from "./upm-addresses.mjs";
+import { checkPointExport } from "./point-export.mjs";
 import { checkDspPoints } from "./dsp-points.mjs";
 import { checkTableCalculation } from "./table-calculation.mjs";
 import { checkDspTransmitRules } from "./dsp-transmit-rules.mjs";
@@ -193,6 +194,8 @@ async function runIntegration(){
   if (process.argv.includes("--generic")) { await checkGenericBoards({client,equal,ok,fixtureKey,projectConfigs,testEnv}); console.log(`PASS: ${assertions} assertions`); return; }
   if (process.argv.includes("--upm")) { await checkUpmPoints({client,engineer:e,engineerId:engineer.id,viewer:v,viewerId:viewer.id,equal,ok,fixtureKey,projectConfigs,testEnv}); console.log(`PASS: ${assertions} assertions`); return; }
   if (process.argv.includes("--upm-address")) { await checkUpmAddresses({client,engineer:e,engineerId:engineer.id,equal,ok,fixtureKey,projectConfigs}); console.log(`PASS: ${assertions} assertions`); return; }
+  if (process.argv.includes("--exports")) { await checkPointExport({client,viewer:v,viewerId:viewer.id,engineer:e,equal,ok,fixtureKey,base}); console.log(`PASS: ${assertions} assertions`); return; }
+  if (!process.argv.slice(2).length) await checkPointExport({client,viewer:v,viewerId:viewer.id,engineer:e,equal,ok,fixtureKey,base});
   await checkGenericBoards({client,equal,ok,fixtureKey,projectConfigs,testEnv});
   if (!process.argv.some(arg=>["--folders","--excel","--databases","--calculation"].includes(arg))) await checkTableBehavior({client,equal,ok,fixtureKey,projectConfigs});
   if (process.argv.includes("--calculation")) {

@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { createServer } from "vite";
 import { chromium, expect } from "@playwright/test";
+import {downloadView,checkExpandedExport,checkPagedExport} from "./table-export-check.mjs";
 
 const root=fileURLToPath(new URL(".",import.meta.url));
 const manifest=JSON.parse(await readFile(new URL("../config/dc-ups/project.json",import.meta.url),"utf8"));
@@ -103,6 +104,10 @@ try {
   const overviewRows=()=>page.locator(".point-overview tbody tr");
   const overviewCell=(key,index=0)=>overviewRows().nth(index).locator(`[data-column-key="${key}"]`);
   await expect(overviewRows()).toHaveCount(2); // One LOCAL point, two independent endpoints.
+  const overviewExport=JSON.parse((await downloadView(page)).bytes);
+  assert.equal(overviewExport.rows.length,2);
+  assert.ok(overviewExport.columns.some(column=>column.key==="process:name"));
+  assert.ok(overviewExport.columns.some(column=>column.key==="forward:address"));
   await page.getByLabel("显示未分配 sigID 的点",{exact:true}).check();
   await expect(overviewRows()).toHaveCount(3);
   await expect(overviewCell("process:sig_id",2)).toHaveText("※（不上传 UPP）");
@@ -160,6 +165,7 @@ try {
   await page.locator('tbody [data-column-key="base_address"]').dblclick();
   await page.getByLabel("编辑 Base 地址",{exact:true}).fill("12");
   await page.getByLabel("编辑 Base 地址",{exact:true}).press("Enter");
+  await expect(page.getByRole("button",{name:"导出当前表格",exact:true})).toBeDisabled();
   await expect(page.locator('tbody [data-column-key="address"]')).toHaveText("6");
   await page.locator('tbody [data-column-key="poll_interval"]').dblclick();
   await page.getByLabel("编辑 UPP 轮询间隔",{exact:true}).fill("8");
@@ -212,6 +218,7 @@ try {
   await expect(tabCount(/转发点表 · UPP/)).toHaveText("1");
   await expect(page.locator("tbody tr")).toHaveCount(9);
   await expect(page.locator(".pagination-summary")).toContainText("共 9 条");
+  await checkExpandedExport(page,requests);
   // The generic view never mutates storage IDs, associations or source data.
   const expansionChecks=await page.evaluate(async source=>{
     const {expandedPointTable}=await import('/src/domain/pointExpansion.ts');
@@ -225,6 +232,7 @@ try {
       editors:expanded.definition.editor,templates:[...new Set(expanded.rows.map(row=>row.template_id))]};
   },data("forward"));
   assert.deepEqual(expansionChecks,{unchanged:true,rejected:true,ids:10,count:10,editors:[],templates:[3,1,2]});
+  await checkPagedExport(page,data("forward"));
   await page.route("**/__upm_import",route=>route.fulfill({contentType:"text/html; charset=utf-8",body:`<!doctype html><html><head><meta charset="utf-8"></head><body><div id="test"></div><script type="module">
     import {createApp,h} from '/node_modules/.vite/deps/vue.js';
     import ImportModal from '/src/components/ImportModal.vue';
